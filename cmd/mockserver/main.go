@@ -1283,8 +1283,10 @@ func handleUserBets(w http.ResponseWriter, r *http.Request) {
 	statusFilter := r.URL.Query().Get("status")
 	marketFilter := r.URL.Query().Get("market_id")
 
-	// "open" is a virtual filter meaning all active (non-settled) bets
-	openStatuses := map[string]bool{"unmatched": true, "partial": true, "matched": true}
+	// "open" = active bets (matched but not yet settled)
+	// House model: only matched, settled, cancelled, void are valid statuses
+	validStatuses := map[string]bool{"matched": true, "settled": true, "cancelled": true, "void": true}
+	openStatuses := map[string]bool{"matched": true}
 
 	// Enrich bets with market_name and selection_name
 	type enrichedBet struct {
@@ -1297,6 +1299,10 @@ func handleUserBets(w http.ResponseWriter, r *http.Request) {
 
 	store.mu.RLock()
 	for _, b := range bets {
+		// Never return bets with invalid statuses (unmatched, partial, error, etc.)
+		if !validStatuses[b.Status] {
+			continue
+		}
 		if statusFilter == "open" {
 			if !openStatuses[b.Status] {
 				continue
