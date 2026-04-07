@@ -933,6 +933,9 @@ func (s *Store) SettleBet(userID int64, betID string, pnl, commission float64) {
 		u.Balance = roundMoney(u.Balance - commission)
 		s.addLedger(userID, -commission, "commission", "commission:"+betID, betID, now)
 	}
+	if useDB() {
+		dbUpdateBalance(userID, u.Balance, u.Exposure)
+	}
 }
 
 // ─── Matching Engine ────────────────────────────────────────────────────────
@@ -1015,6 +1018,9 @@ func (s *Store) CancelOrder(marketID, betID, side string) error {
 					holdAmount = roundMoney(o.Remaining * (o.Price - 1))
 				}
 				u.Exposure = roundMoney(math.Max(u.Exposure-holdAmount, 0))
+				if useDB() {
+					dbUpdateBalance(bet.UserID, u.Balance, u.Exposure)
+				}
 			}
 			s.orderBooks[key] = append(orders[:i], orders[i+1:]...)
 			if bet.MatchedStake > 0 {
@@ -1185,6 +1191,12 @@ func (s *Store) VoidMarket(marketID string) int {
 			u.Exposure = math.Max(u.Exposure-bet.Stake, 0)
 			now := time.Now().Format(time.RFC3339)
 			s.addLedger(bet.UserID, bet.Stake, "release", "void:"+bet.ID, bet.ID, now)
+			if useDB() {
+				dbUpdateBalance(bet.UserID, u.Balance, u.Exposure)
+			}
+		}
+		if useDB() {
+			dbUpdateBet(bet)
 		}
 	}
 
@@ -1240,10 +1252,16 @@ func (s *Store) CreatePaymentTx(userID int64, direction, method string, amount f
 		CreatedAt: time.Now().Format(time.RFC3339),
 	}
 	s.paymentTxns[id] = tx
+	if useDB() {
+		dbSavePaymentTx(tx)
+	}
 	return tx
 }
 
 func (s *Store) GetUserPayments(userID int64) []*PaymentTx {
+	if useDB() {
+		return dbGetUserPayments(userID)
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -1264,6 +1282,9 @@ func (s *Store) GetChildren(userID int64) []*User {
 
 	u := s.users[userID]
 	if u == nil {
+		if useDB() {
+			return dbGetChildren(userID)
+		}
 		return nil
 	}
 	var out []*User
@@ -1271,6 +1292,9 @@ func (s *Store) GetChildren(userID int64) []*User {
 		if child.ID != userID && len(child.Path) > len(u.Path) && child.Path[:len(u.Path)] == u.Path {
 			out = append(out, child)
 		}
+	}
+	if len(out) == 0 && useDB() {
+		return dbGetChildren(userID)
 	}
 	return out
 }
@@ -1285,6 +1309,9 @@ func (s *Store) GetDirectChildren(userID int64) []*User {
 			out = append(out, u)
 		}
 	}
+	if len(out) == 0 && useDB() {
+		return dbGetDirectChildren(userID)
+	}
 	return out
 }
 
@@ -1297,6 +1324,9 @@ func (s *Store) GetDownlineUsers(userID int64) []*User {
 
 	u := s.users[userID]
 	if u == nil {
+		if useDB() {
+			return dbGetChildren(userID)
+		}
 		return nil
 	}
 	prefix := u.Path + "."
@@ -1305,6 +1335,9 @@ func (s *Store) GetDownlineUsers(userID int64) []*User {
 		if child.ID != userID && strings.HasPrefix(child.Path, prefix) {
 			out = append(out, child)
 		}
+	}
+	if len(out) == 0 && useDB() {
+		return dbGetChildren(userID)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -1412,6 +1445,9 @@ func (s *Store) ApplyReferralCode(userID int64, code string) (int64, error) {
 		return 0, fmt.Errorf("user not found")
 	}
 	u.ReferredBy = referrerID
+	if useDB() {
+		dbUpdateReferredBy(userID, referrerID)
+	}
 	return referrerID, nil
 }
 

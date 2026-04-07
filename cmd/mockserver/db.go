@@ -628,6 +628,79 @@ func nullableTime(s string) interface{} {
 	return t
 }
 
+// ── DB-backed Hierarchy queries ────────────────────────────────────────────
+
+func dbGetChildren(userID int64) []*User {
+	rows, err := db.Query(`
+		SELECT id, username, email, password_hash, role, path, parent_id, balance, exposure,
+		       credit_limit, commission_rate, status, referral_code, otp_enabled, is_demo, created_at
+		FROM auth.users
+		WHERE path LIKE (SELECT path FROM auth.users WHERE id=$1) || '.%'
+		  AND id != $1
+		ORDER BY id`, userID)
+	if err != nil {
+		logger.Error("dbGetChildren failed", "error", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var users []*User
+	for rows.Next() {
+		u := &User{}
+		var parentID sql.NullInt64
+		rows.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.Path, &parentID,
+			&u.Balance, &u.Exposure, &u.CreditLimit, &u.CommissionRate,
+			&u.Status, &u.ReferralCode, &u.OTPEnabled, &u.IsDemo, &u.CreatedAt)
+		if parentID.Valid {
+			pid := parentID.Int64
+			u.ParentID = &pid
+		}
+		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		logger.Error("dbGetChildren rows iteration error", "error", err)
+	}
+	return users
+}
+
+func dbGetDirectChildren(userID int64) []*User {
+	rows, err := db.Query(`
+		SELECT id, username, email, password_hash, role, path, parent_id, balance, exposure,
+		       credit_limit, commission_rate, status, referral_code, otp_enabled, is_demo, created_at
+		FROM auth.users WHERE parent_id=$1 ORDER BY id`, userID)
+	if err != nil {
+		logger.Error("dbGetDirectChildren failed", "error", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var users []*User
+	for rows.Next() {
+		u := &User{}
+		var parentID sql.NullInt64
+		rows.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.Path, &parentID,
+			&u.Balance, &u.Exposure, &u.CreditLimit, &u.CommissionRate,
+			&u.Status, &u.ReferralCode, &u.OTPEnabled, &u.IsDemo, &u.CreatedAt)
+		if parentID.Valid {
+			pid := parentID.Int64
+			u.ParentID = &pid
+		}
+		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		logger.Error("dbGetDirectChildren rows iteration error", "error", err)
+	}
+	return users
+}
+
+// ── DB-backed Referral update ─────────────────────────────────────────────
+
+func dbUpdateReferredBy(userID, referrerID int64) {
+	if _, err := db.Exec(`UPDATE auth.users SET referred_by=$1, updated_at=NOW() WHERE id=$2`, referrerID, userID); err != nil {
+		logger.Error("dbUpdateReferredBy failed", "error", err)
+	}
+}
+
 func minInt(a, b int) int {
 	if a < b {
 		return a
