@@ -22,7 +22,7 @@ interface ActiveInlineBet {
 
 interface PlacedBetResult {
   runnerId: string;
-  status: "matched" | "unmatched" | "error";
+  status: "matched" | "error";
   message: string;
 }
 
@@ -504,7 +504,7 @@ export default function MarketDetailPage() {
                     <div className="flex items-center justify-between">
                       <span className="text-[12px] font-medium text-white truncate">{bet.runnerName}</span>
                       <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                        bet.status === 'matched' ? 'bg-green-500/20 text-green-400' : bet.status === 'unmatched' ? 'bg-yellow-500/20 text-yellow-400' : 'bg-red-500/20 text-red-400'
+                        bet.status === 'matched' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
                       }`}>{bet.status.toUpperCase()}</span>
                     </div>
                     <div className="flex items-center gap-2 mt-1">
@@ -573,7 +573,26 @@ function RunnerRow({
       setConfirmStep(false);
       setPlacing(false);
     }
-  }, [activeInlineBet?.runnerId, activeInlineBet?.side, activeInlineBet?.price]);
+  }, [activeInlineBet?.runnerId, activeInlineBet?.side]);
+
+  // Keep inline price in sync with live odds (real-time updates)
+  useEffect(() => {
+    if (!isSelected || !activeInlineBet) return;
+    const isFancyMarket = marketType === "fancy" || marketType === "session";
+    let livePrice: number | undefined;
+    if (isFancyMarket) {
+      livePrice = activeInlineBet.side === "back" ? runner.yes_rate : runner.no_rate;
+    } else if (activeInlineBet.side === "back") {
+      livePrice = runner.back_prices?.[0]?.price ?? runner.back_price;
+    } else {
+      livePrice = runner.lay_prices?.[0]?.price ?? runner.lay_price;
+    }
+    if (livePrice && livePrice > 0) {
+      setInlinePrice(livePrice);
+      // Reset confirm step if odds changed — user must re-confirm
+      setConfirmStep(false);
+    }
+  }, [runner.back_prices, runner.lay_prices, runner.yes_rate, runner.no_rate]);
 
   const apiBackPrices = runner.back_prices || [];
   const apiLayPrices = runner.lay_prices || [];
@@ -660,13 +679,11 @@ function RunnerRow({
         client_ref: `inline_${Date.now()}`,
       });
 
-      const status = result.matched_stake && result.matched_stake >= stakeNum ? "matched" : "unmatched";
+      const status = "matched" as const;
       refreshBalance?.();
       addToast({
-        type: status === "matched" ? "success" : "info",
-        title: status === "matched"
-          ? `Bet matched: ${runner.name} @ ${inlinePrice.toFixed(2)}`
-          : `Bet placed (unmatched): ${runner.name} @ ${inlinePrice.toFixed(2)}`,
+        type: "success",
+        title: `Bet placed: ${runner.name} @ ${inlinePrice.toFixed(2)} for \u20B9${stakeNum.toLocaleString("en-IN")}`,
       });
 
       onBetPlaced?.(
@@ -859,15 +876,15 @@ function RunnerRow({
         <div className={`px-3 py-2 border-t ${
           placedBetResult.status === 'matched'
             ? 'bg-green-500/15 border-green-500/30'
-            : placedBetResult.status === 'unmatched'
+            : placedBetResult.status === 'error'
             ? 'bg-yellow-500/15 border-yellow-500/30'
             : 'bg-red-500/15 border-red-500/30'
         }`}>
           <div className="flex items-center gap-2">
             <span className={`text-xs font-bold ${
-              placedBetResult.status === 'matched' ? 'text-green-400' : placedBetResult.status === 'unmatched' ? 'text-yellow-400' : 'text-red-400'
+              placedBetResult.status === 'matched' ? 'text-green-400' : 'text-red-400'
             }`}>
-              {placedBetResult.status === 'matched' ? 'Matched' : placedBetResult.status === 'unmatched' ? 'Unmatched' : 'Error'}
+              {placedBetResult.status === 'matched' ? 'Bet Placed' : 'Failed'}
             </span>
             <span className="text-[11px] text-gray-400">{placedBetResult.message}</span>
             <button

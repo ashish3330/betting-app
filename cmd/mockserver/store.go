@@ -958,125 +958,31 @@ func (s *Store) PlaceAndMatch(userID int64, marketID string, selectionID int64, 
 	betID := "bet-" + randHex(8)
 	now := time.Now()
 
-	remaining := stake
-	var fills []Fill
-	var matched float64
+	// House model: every bet is immediately fully matched.
+	// The house (operator) takes the other side — no order book, no unmatched/partial.
+	status := "matched"
 
-	// Determine opposing side key
-	var oppKey string
-	if side == "back" {
-		oppKey = marketID + ":lay"
-	} else {
-		oppKey = marketID + ":back"
-	}
-
-	orders := s.orderBooks[oppKey]
-	var kept []*Order
-
-	// Sort opposing orders by best price
-	if side == "back" {
-		// Match against lays at <= our price (lowest first)
-		sort.Slice(orders, func(i, j int) bool {
-			if orders[i].Price == orders[j].Price {
-				return orders[i].Timestamp < orders[j].Timestamp
-			}
-			return orders[i].Price < orders[j].Price
-		})
-	} else {
-		// Match against backs at >= our price (highest first)
-		sort.Slice(orders, func(i, j int) bool {
-			if orders[i].Price == orders[j].Price {
-				return orders[i].Timestamp < orders[j].Timestamp
-			}
-			return orders[i].Price > orders[j].Price
-		})
-	}
-
-	for _, o := range orders {
-		if remaining <= 0 {
-			kept = append(kept, o)
-			continue
-		}
-
-		canMatch := false
-		if side == "back" && o.Price <= price {
-			canMatch = true
-		} else if side == "lay" && o.Price >= price {
-			canMatch = true
-		}
-
-		if !canMatch {
-			kept = append(kept, o)
-			continue
-		}
-
-		fillSize := roundMoney(math.Min(remaining, o.Remaining))
-		remaining = roundMoney(remaining - fillSize)
-		matched = roundMoney(matched + fillSize)
-		o.Remaining = roundMoney(o.Remaining - fillSize)
-
-		fills = append(fills, Fill{CounterBetID: o.ID, Price: o.Price, Size: fillSize})
-
-		// Update counter bet in bets map
-		if cb, ok := s.bets[o.ID]; ok {
-			cb.MatchedStake += fillSize
-			cb.UnmatchedStake -= fillSize
-			if cb.UnmatchedStake <= 0 {
-				cb.Status = "matched"
-			} else {
-				cb.Status = "partial"
-			}
-		}
-
-		if o.Remaining > 0 {
-			kept = append(kept, o)
-		}
-	}
-	s.orderBooks[oppKey] = kept
-
-	// Place remaining as resting order
-	if remaining > 0 {
-		myKey := marketID + ":" + side
-		s.orderBooks[myKey] = append(s.orderBooks[myKey], &Order{
-			ID: betID, MarketID: marketID, UserID: userID,
-			Side: side, Price: price, Remaining: remaining,
-			Timestamp: now.UnixNano(),
-		})
-	}
-
-	status := "unmatched"
-	if matched > 0 && remaining == 0 {
-		status = "matched"
-	} else if matched > 0 {
-		status = "partial"
-	}
-
-	// Record the bet
+	// Record the bet as fully matched
 	s.bets[betID] = &Bet{
 		ID: betID, MarketID: marketID, SelectionID: selectionID,
 		UserID: userID, Side: side, Price: price, Stake: stake,
-		MatchedStake: matched, UnmatchedStake: remaining,
+		MatchedStake: stake, UnmatchedStake: 0,
 		Status: status, ClientRef: clientRef, CreatedAt: now.Format(time.RFC3339),
 	}
 
 	// Update market total matched
 	if m, ok := s.markets[marketID]; ok {
-		m.TotalMatched += matched
+		m.TotalMatched += stake
 	}
 
-	// Persist bet and counter-bet updates to DB
+	// Persist to DB
 	if useDB() {
 		dbSaveBet(s.bets[betID])
-		for _, f := range fills {
-			if cb, ok := s.bets[f.CounterBetID]; ok {
-				dbUpdateBet(cb)
-			}
-		}
 	}
 
 	return &MatchResult{
-		BetID: betID, MatchedStake: matched,
-		UnmatchedStake: remaining, Status: status, Fills: fills,
+		BetID: betID, MatchedStake: stake,
+		UnmatchedStake: 0, Status: status, Fills: nil,
 	}, nil
 }
 

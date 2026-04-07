@@ -1124,15 +1124,24 @@ func handlePlaceBet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── 8. STALE ODDS PROTECTION — reject if displayed price moved > 5% from requested ──
-	// This prevents users from placing bets at outdated prices when odds shift rapidly.
-	// We compare against the runner's current displayed price (from seed/odds fluctuation).
-	const maxOddsDrift = 0.05 // 5% tolerance
+	// ── 8. STALE ODDS PROTECTION ──
+	// Match odds / Bookmaker: reject if price moved more than 0.02 from requested
+	// Fancy / Session: reject if price is not an exact match (rates must be exact)
 	store.mu.RLock()
 	var currentBestPrice float64
+	var isSessionMarket bool
+	if m, ok := store.markets[req.MarketID]; ok {
+		isSessionMarket = m.MarketType == "fancy" || m.MarketType == "session"
+	}
 	for _, runner := range marketRunners {
 		if runner.SelectionID == req.SelectionID {
-			if req.Side == "back" {
+			if isSessionMarket {
+				if req.Side == "back" {
+					currentBestPrice = runner.YesRate
+				} else {
+					currentBestPrice = runner.NoRate
+				}
+			} else if req.Side == "back" {
 				if len(runner.BackPrices) > 0 {
 					currentBestPrice = runner.BackPrices[0].Price
 				}
@@ -1147,21 +1156,40 @@ func handlePlaceBet(w http.ResponseWriter, r *http.Request) {
 	store.mu.RUnlock()
 
 	if currentBestPrice > 0 {
-		drift := (req.Price - currentBestPrice) / currentBestPrice
-		if drift < 0 {
-			drift = -drift
+		absDrift := req.Price - currentBestPrice
+		if absDrift < 0 {
+			absDrift = -absDrift
 		}
-		if drift > maxOddsDrift {
+
+		var rejected bool
+		var reason string
+		if isSessionMarket {
+			// Session/fancy: exact match required
+			if absDrift > 0.001 {
+				rejected = true
+				reason = fmt.Sprintf("Session rate changed from %.0f to %.0f. Rates must be exact.", req.Price, currentBestPrice)
+			}
+		} else {
+			// Match odds / Bookmaker: max 0.02 drift
+			if absDrift > 0.02 {
+				rejected = true
+				reason = fmt.Sprintf("Odds moved from %.2f to %.2f (moved by %.2f, max allowed 0.02).", req.Price, currentBestPrice, absDrift)
+			}
+		}
+
+		if rejected {
 			writeJSON(w, 409, map[string]interface{}{
 				"error":         "odds have changed",
 				"code":          "ODDS_CHANGED",
 				"requested":     req.Price,
 				"current_price": currentBestPrice,
-				"drift_pct":     fmt.Sprintf("%.1f%%", drift*100),
-				"message":       fmt.Sprintf("Odds moved from %.2f to %.2f (%.1f%% change). Please refresh and try again.", req.Price, currentBestPrice, drift*100),
+				"message":       reason,
 			})
 			return
 		}
+
+		// Use the current live price for the bet (not the potentially stale requested price)
+		req.Price = currentBestPrice
 	}
 
 	// ── 9. Sufficient balance check (pre-match) ──
