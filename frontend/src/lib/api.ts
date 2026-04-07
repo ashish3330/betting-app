@@ -17,6 +17,8 @@ function getCacheKey(endpoint: string, method?: string): string {
 }
 
 class ApiClient {
+  private refreshPromise: Promise<boolean> | null = null;
+
   private getToken(): string | null {
     if (typeof window === "undefined") return null;
     return decryptLocalStorage("access_token");
@@ -115,7 +117,12 @@ class ApiClient {
         }
         return retryData;
       } else {
-        this.logout();
+        // Clear tokens but don't redirect — let components decide
+        if (typeof window !== "undefined") {
+          localStorage.removeItem("access_token");
+          localStorage.removeItem("refresh_token");
+          localStorage.removeItem("user");
+        }
         throw new ApiError(401, "Session expired. Please login again.");
       }
     }
@@ -161,6 +168,16 @@ class ApiClient {
   }
 
   private async refreshToken(): Promise<boolean> {
+    if (this.refreshPromise) return this.refreshPromise;
+    this.refreshPromise = this._doRefresh();
+    try {
+      return await this.refreshPromise;
+    } finally {
+      this.refreshPromise = null;
+    }
+  }
+
+  private async _doRefresh(): Promise<boolean> {
     const refreshToken = this.getRefreshToken();
     if (!refreshToken) return false;
     try {

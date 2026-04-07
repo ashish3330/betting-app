@@ -4,9 +4,27 @@ import { useEffect, useState, useCallback, useRef, memo } from "react";
 import { useParams } from "next/navigation";
 import { api, MarketOdds, Runner, LiveScore as LiveScoreType, OrderBook as OrderBookType, OrderBookLevel } from "@/lib/api";
 import { getWS } from "@/lib/ws";
-import BetSlip, { BetSelection } from "@/components/BetSlip";
+// BetSlip component no longer used directly -- inline bet slip handles bet entry
 import LiveScore from "@/components/LiveScore";
 import RunLadder from "@/components/RunLadder";
+import { useAuth } from "@/lib/auth";
+import { useToast } from "@/components/Toast";
+
+// ---------- Inline Bet Slip Types ----------
+interface ActiveInlineBet {
+  runnerId: string;
+  runner: Runner;
+  side: "back" | "lay";
+  price: number;
+  marketId: string;
+  isSession?: boolean;
+}
+
+interface PlacedBetResult {
+  runnerId: string;
+  status: "matched" | "error";
+  message: string;
+}
 
 // ---------- Types ----------
 interface PriceLevel {
@@ -30,10 +48,27 @@ export default function MarketDetailPage() {
 
   const [odds, setOdds] = useState<MarketOdds | null>(null);
   const [orderBook, setOrderBook] = useState<OrderBookType>({ back: [], lay: [] });
-  const [selections, setSelections] = useState<BetSelection[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<MarketTab>("match_odds");
-  const [showMobileBetSlip, setShowMobileBetSlip] = useState(false);
+
+  // Inline bet slip state — only one active at a time
+  const [activeInlineBet, setActiveInlineBet] = useState<ActiveInlineBet | null>(null);
+  const [placedBetResult, setPlacedBetResult] = useState<PlacedBetResult | null>(null);
+
+  // Recently placed bets for "My Bets" panel
+  const [recentBets, setRecentBets] = useState<Array<{
+    id: string;
+    runnerName: string;
+    side: "back" | "lay";
+    price: number;
+    stake: number;
+    status: string;
+    timestamp: number;
+    isFancy: boolean;
+  }>>([]);
+
+  // Bets fetched from API for this market
+  const [marketBets, setMarketBets] = useState<{id:string, side:string, display_side?:string, market_type?:string, price:number, stake:number, status:string, created_at:string, selection_name?:string, market_name?:string}[]>([]);
 
   // All markets for this event (match_odds, bookmaker, fancy, etc.)
   const [eventMarkets, setEventMarkets] = useState<MarketInfo[]>([]);
@@ -215,78 +250,80 @@ export default function MarketDetailPage() {
     return () => clearInterval(interval);
   }, [fetchPositions]);
 
-  // ---------- BetSlip Management ----------
-  const handleSelectPrice = (runner: Runner, side: "back" | "lay", price: number) => {
-    const selId = `${runner.id}_${side}_${Date.now()}`;
-    const isSessionBet = isFancy && (runner.yes_rate != null || runner.no_rate != null);
-    const newSelection: BetSelection = {
-      id: selId,
-      marketId: activeMarketId,
-      runner,
-      side,
-      price,
-      stake: 0,
-      isSession: isSessionBet,
-    };
-    setSelections((prev) => [...prev, newSelection]);
-    setShowMobileBetSlip(true);
-  };
-
-  const handleRemoveSelection = (id: string) => {
-    setSelections((prev) => prev.filter((s) => s.id !== id));
-    if (selections.length <= 1) setShowMobileBetSlip(false);
-  };
-
-  const handleClearAll = () => {
-    setSelections([]);
-    setShowMobileBetSlip(false);
-  };
-
-  const handleUpdateSelection = (id: string, updates: Partial<BetSelection>) => {
-    setSelections((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, ...updates } : s))
-    );
-  };
-
-  // Sync bet slip prices with live odds so the slip always shows current market price
+  // ---------- Fetch Market Bets from API ----------
   useEffect(() => {
-    if (!odds?.runners || selections.length === 0) return;
-    setSelections((prev) => {
-      let changed = false;
-      const next = prev.map((sel) => {
-        // Only sync selections for the active market
-        if (sel.marketId !== activeMarketId) return sel;
-        const runner = odds.runners.find(
-          (r) =>
-            r.id === sel.runner.id ||
-            (r.selection_id && r.selection_id === sel.runner.selection_id)
-        );
-        if (!runner) return sel;
+    async function loadMarketBets() {
+      try {
+        const data = await api.request<{bets: typeof marketBets}>(`/api/v1/bets?market_id=${activeMarketId}&limit=20`, { auth: true });
+        setMarketBets(data.bets || []);
+      } catch {}
+    }
+    if (activeMarketId) loadMarketBets();
+    const interval = setInterval(loadMarketBets, 10000);
+    return () => clearInterval(interval);
+  }, [activeMarketId]);
 
-        let livePrice: number | undefined;
-        if (sel.isSession) {
-          // Fancy/session: back uses yes_rate, lay uses no_rate
-          livePrice = sel.side === "back" ? runner.yes_rate : runner.no_rate;
-        } else if (sel.side === "back") {
-          livePrice = runner.back_prices?.[0]?.price ?? runner.back_price;
-        } else {
-          livePrice = runner.lay_prices?.[0]?.price ?? runner.lay_price;
-        }
-
-        if (livePrice && livePrice !== sel.price) {
-          changed = true;
-          return { ...sel, price: livePrice };
-        }
-        return sel;
-      });
-      return changed ? next : prev;
-    });
-  }, [odds, activeMarketId]);
-
-  const isSuspended = odds?.status === "suspended" || odds?.status === "closed";
+  // Derived market type (needed before handlers)
   const currentMarketType = eventMarkets.find(m => m.id === activeMarketId)?.type || "match_odds";
   const isFancy = currentMarketType === "fancy" || currentMarketType === "session";
   const isBookmaker = currentMarketType === "bookmaker";
+  const isSuspended = odds?.status === "suspended" || odds?.status === "closed";
+
+  // ---------- Inline BetSlip Management ----------
+  const handleSelectPrice = (runner: Runner, side: "back" | "lay", price: number) => {
+    const runnerId = runner.id || runner.selection_id?.toString() || runner.name;
+    const isSessionBet = isFancy && (runner.yes_rate != null || runner.no_rate != null);
+
+    // If same runner+side is already selected, deselect it
+    if (activeInlineBet && activeInlineBet.runnerId === runnerId && activeInlineBet.side === side) {
+      setActiveInlineBet(null);
+      return;
+    }
+
+    // Set the inline bet (only one at a time)
+    setActiveInlineBet({
+      runnerId,
+      runner,
+      side,
+      price,
+      marketId: activeMarketId,
+      isSession: isSessionBet,
+    });
+    // Clear any previous placed bet result
+    setPlacedBetResult(null);
+  };
+
+  const handleDeselectInline = () => {
+    setActiveInlineBet(null);
+    setPlacedBetResult(null);
+  };
+
+  const handleBetPlaced = (result: PlacedBetResult, runnerName: string, side: "back" | "lay", price: number, stake: number) => {
+    setPlacedBetResult(result);
+    // Add to recent bets — only successful placements, not errors
+    if (result.status === "matched") {
+      setRecentBets((prev) => [{
+        id: `${Date.now()}`,
+        runnerName,
+        side,
+        price,
+        stake,
+        status: result.status,
+        timestamp: Date.now(),
+        isFancy: isFancy,
+      }, ...prev].slice(0, 20));
+    }
+
+    // Auto-close inline slip after 3 seconds
+    setTimeout(() => {
+      setActiveInlineBet(null);
+      setPlacedBetResult(null);
+    }, 3000);
+
+    // Refresh positions
+    fetchPositions();
+  };
+
 
   // Only show tabs for market types that exist in this event
   const tabLabels: Record<string, string> = {
@@ -357,6 +394,22 @@ export default function MarketDetailPage() {
             </h1>
           </div>
 
+          {/* --- Market Info Bar --- */}
+          <div className="bg-surface rounded-lg border border-gray-800/60 px-3 py-1.5 flex items-center gap-3 sm:gap-4 flex-wrap">
+            <span className="text-[10px] text-gray-500">Min Bet: <span className="text-gray-400 font-medium">{'\u20B9'}100</span></span>
+            <span className="text-[10px] text-gray-500">Max Bet: <span className="text-gray-400 font-medium">{'\u20B9'}5,00,000</span></span>
+            <span className="text-[10px] text-gray-500">Max Market: <span className="text-gray-400 font-medium">{'\u20B9'}25,00,000</span></span>
+            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded ml-auto ${
+              currentMarketType === 'bookmaker' ? 'bg-yellow-500/15 text-yellow-400' :
+              currentMarketType === 'fancy' || currentMarketType === 'session' ? 'bg-purple-500/15 text-purple-400' :
+              'bg-blue-500/15 text-blue-400'
+            }`}>
+              {currentMarketType === 'bookmaker' ? 'Bookmaker' :
+               currentMarketType === 'fancy' || currentMarketType === 'session' ? 'Fancy' :
+               'Match Odds'}
+            </span>
+          </div>
+
           {/* --- Live Score --- */}
           {(liveScore || odds?.score) && <LiveScore score={liveScore || odds!.score!} />}
 
@@ -425,18 +478,23 @@ export default function MarketDetailPage() {
 
               {odds?.runners?.map((runner) => {
                 const runnerId = runner.id || runner.selection_id?.toString() || runner.name;
-                const isSelected = selections.some((s) => (s.runner.id || s.runner.selection_id?.toString()) === runnerId);
-                const selectedSide = selections.find((s) => (s.runner.id || s.runner.selection_id?.toString()) === runnerId)?.side;
+                const isInlineSelected = activeInlineBet?.runnerId === runnerId;
+                const inlineSide = isInlineSelected ? activeInlineBet!.side : undefined;
                 return (
                   <RunnerRow
                     key={runnerId}
                     runner={{ ...runner, id: runnerId }}
                     prevOdds={prevOddsRef.current[runnerId]}
                     onSelect={handleSelectPrice}
-                    isSelected={isSelected}
-                    selectedSide={selectedSide}
+                    isSelected={isInlineSelected}
+                    selectedSide={inlineSide}
                     marketType={currentMarketType}
                     pnl={positions[String(runner.selection_id)]}
+                    allPositions={positions}
+                    activeInlineBet={isInlineSelected ? activeInlineBet! : undefined}
+                    placedBetResult={isInlineSelected ? placedBetResult : undefined}
+                    onDeselect={handleDeselectInline}
+                    onBetPlaced={handleBetPlaced}
                   />
                 );
               })}
@@ -465,60 +523,62 @@ export default function MarketDetailPage() {
         </div>
       </div>
 
-      {/* ===== Desktop BetSlip Panel (Right) ===== */}
+      {/* ===== Desktop My Bets Panel (Right) ===== */}
       <div className="hidden md:block w-[320px] flex-shrink-0 border-l border-gray-800/60">
-        <div className="sticky top-14 h-[calc(100vh-56px)] overflow-y-auto p-3">
-          <BetSlip
-            selections={selections}
-            onRemoveSelection={handleRemoveSelection}
-            onClearAll={handleClearAll}
-            onUpdateSelection={handleUpdateSelection}
-            onBetPlaced={fetchPositions}
-          />
-        </div>
-      </div>
-
-      {/* ===== Mobile BetSlip Bottom Sheet ===== */}
-      {showMobileBetSlip && selections.length > 0 && (
-        <div className="md:hidden fixed inset-0 z-[60]">
-          {/* Backdrop */}
-          <div
-            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-            onClick={() => setShowMobileBetSlip(false)}
-          />
-          {/* Sheet — sits above bottom nav (56px) */}
-          <div className="absolute bottom-0 left-0 right-0 bg-[var(--bg-surface)] rounded-t-2xl border-t border-gray-800 max-h-[80vh] overflow-y-auto animate-slide-up pb-20">
-            {/* Drag Handle */}
-            <div className="flex justify-center pt-2 pb-1 sticky top-0 bg-[var(--bg-surface)] z-10">
-              <div className="w-10 h-1 rounded-full bg-gray-700" />
+        <div className="sticky top-14 h-[calc(100vh-56px)] overflow-y-auto p-3 space-y-3">
+          {/* My Bets on Market (from API — single source of truth) */}
+          <div className="bg-surface rounded-lg border border-gray-800/60 overflow-hidden">
+            <div className="px-3 py-2.5 border-b border-gray-800/40">
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">My Bets on Market</h3>
             </div>
-            <div className="px-3 pb-4">
-              <BetSlip
-                selections={selections}
-                onRemoveSelection={handleRemoveSelection}
-                onClearAll={handleClearAll}
-                onUpdateSelection={handleUpdateSelection}
-              />
-            </div>
+            {marketBets.length === 0 && recentBets.length === 0 ? (
+              <div className="px-3 py-8 text-center text-gray-500 text-xs">
+                No bets placed yet. Click on odds to place a bet inline.
+              </div>
+            ) : marketBets.length === 0 ? (
+              <div className="px-3 py-4 text-center text-gray-600 text-[10px]">
+                No bet history loaded for this market.
+              </div>
+            ) : (
+              <div className="divide-y divide-gray-800/30">
+                {marketBets.map((bet) => {
+                  const betIsFancy = bet.market_type === "fancy" || bet.market_type === "session";
+                  const ds = bet.display_side || bet.side;
+                  return (
+                  <div key={bet.id} className="px-3 py-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        {betIsFancy && <span className="text-[8px] font-bold px-1 py-0.5 rounded bg-purple-500/20 text-purple-400">FANCY</span>}
+                        <span className="text-[12px] font-medium text-white truncate">{bet.selection_name || 'Selection'}</span>
+                      </div>
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                        bet.status === 'matched' ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'
+                      }`}>{bet.status === 'matched' ? 'PLACED' : bet.status.toUpperCase()}</span>
+                    </div>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                        ds === 'back' || ds === 'yes' ? 'bg-[#72BBEF]/20 text-[#72BBEF]' : 'bg-[#FAA9BA]/20 text-[#FAA9BA]'
+                      }`}>{ds.toUpperCase()}</span>
+                      <span className="text-[11px] text-gray-400">@ {bet.price.toFixed(2)}</span>
+                      <span className="text-[11px] text-gray-300 font-medium">{'\u20B9'}{bet.stake.toLocaleString('en-IN')}</span>
+                      <span className="text-[10px] text-gray-600 ml-auto">
+                        {new Date(bet.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </div>
+                    <div className="text-[9px] text-gray-600 mt-0.5">ID: {bet.id}</div>
+                  </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
-      )}
-
-      {/* Mobile floating bet count indicator */}
-      {selections.length > 0 && !showMobileBetSlip && (
-        <button
-          onClick={() => setShowMobileBetSlip(true)}
-          className="md:hidden fixed bottom-16 right-4 z-40 bg-lotus text-white rounded-full w-14 h-14 flex flex-col items-center justify-center shadow-lg shadow-lotus/20 active:scale-95 transition"
-        >
-          <span className="text-lg font-bold leading-none">{selections.length}</span>
-          <span className="text-[8px] font-semibold">BETS</span>
-        </button>
-      )}
+      </div>
     </div>
   );
 }
 
-// ========== Runner Row ==========
+// ========== Runner Row with Inline Bet Slip ==========
 function RunnerRow({
   runner,
   prevOdds,
@@ -527,6 +587,11 @@ function RunnerRow({
   selectedSide,
   marketType = "match_odds",
   pnl,
+  allPositions,
+  activeInlineBet,
+  placedBetResult,
+  onDeselect,
+  onBetPlaced,
 }: {
   runner: Runner;
   prevOdds?: { back: number; lay: number };
@@ -535,7 +600,52 @@ function RunnerRow({
   selectedSide?: "back" | "lay";
   marketType?: string;
   pnl?: number;
+  allPositions?: Record<string, number>;
+  activeInlineBet?: ActiveInlineBet;
+  placedBetResult?: PlacedBetResult | null;
+  onDeselect?: () => void;
+  onBetPlaced?: (result: PlacedBetResult, runnerName: string, side: "back" | "lay", price: number, stake: number) => void;
 }) {
+  const { isLoggedIn, refreshBalance } = useAuth();
+  const { addToast } = useToast();
+
+  // Inline bet slip local state
+  const [inlinePrice, setInlinePrice] = useState(0);
+  const [inlineStake, setInlineStake] = useState<number | "">("");
+  const [confirmStep, setConfirmStep] = useState(false);
+  const [placing, setPlacing] = useState(false);
+
+  const INLINE_QUICK_STAKES = [100, 500, 1000, 5000, 10000, 25000];
+
+  // Sync inline price when selection changes
+  useEffect(() => {
+    if (activeInlineBet) {
+      setInlinePrice(activeInlineBet.price);
+      setInlineStake("");
+      setConfirmStep(false);
+      setPlacing(false);
+    }
+  }, [activeInlineBet?.runnerId, activeInlineBet?.side]);
+
+  // Keep inline price in sync with live odds (real-time updates)
+  useEffect(() => {
+    if (!isSelected || !activeInlineBet) return;
+    const isFancyMarket = marketType === "fancy" || marketType === "session";
+    let livePrice: number | undefined;
+    if (isFancyMarket) {
+      livePrice = activeInlineBet.side === "back" ? runner.yes_rate : runner.no_rate;
+    } else if (activeInlineBet.side === "back") {
+      livePrice = runner.back_prices?.[0]?.price ?? runner.back_price;
+    } else {
+      livePrice = runner.lay_prices?.[0]?.price ?? runner.lay_price;
+    }
+    if (livePrice && livePrice > 0) {
+      setInlinePrice(livePrice);
+      // Reset confirm step if odds changed — user must re-confirm
+      setConfirmStep(false);
+    }
+  }, [runner.back_prices, runner.lay_prices, runner.yes_rate, runner.no_rate]);
+
   const apiBackPrices = runner.back_prices || [];
   const apiLayPrices = runner.lay_prices || [];
   const isFancy = marketType === "fancy" || marketType === "session";
@@ -565,75 +675,302 @@ function RunnerRow({
 
   const isRunnerSuspended = runner.status === "suspended";
 
+  // Inline bet slip calculations
+  const side = activeInlineBet?.side || "back";
+  const isSession = activeInlineBet?.isSession || false;
+  const stakeNum = typeof inlineStake === "number" ? inlineStake : 0;
+
+  let profitOrLiability = 0;
+  if (stakeNum > 0 && inlinePrice > 0) {
+    if (isSession) {
+      // Session: profit = stake * rate / 100
+      profitOrLiability = stakeNum * inlinePrice / 100;
+    } else if (side === "back") {
+      profitOrLiability = stakeNum * (inlinePrice - 1);
+    } else {
+      // Lay liability
+      profitOrLiability = stakeNum * (inlinePrice - 1);
+    }
+  }
+
+  const onDecrPrice = () => {
+    setInlinePrice((p) => Math.max(1.01, parseFloat((p - 0.01).toFixed(2))));
+    setConfirmStep(false);
+  };
+  const onIncrPrice = () => {
+    setInlinePrice((p) => parseFloat((p + 0.01).toFixed(2)));
+    setConfirmStep(false);
+  };
+
+  const handlePlaceOrConfirm = async () => {
+    if (!activeInlineBet || stakeNum <= 0) {
+      addToast({ type: "error", title: "Enter a valid stake" });
+      return;
+    }
+
+    if (!isLoggedIn) {
+      addToast({ type: "error", title: "Please log in to place bets" });
+      return;
+    }
+
+    if (!confirmStep) {
+      // First click: show confirm button
+      setConfirmStep(true);
+      return;
+    }
+
+    // Second click: actually place the bet
+    setPlacing(true);
+    try {
+      const result = await api.placeBet({
+        market_id: activeInlineBet.marketId,
+        selection_id: runner.selection_id || 0,
+        side: activeInlineBet.side,
+        price: inlinePrice,
+        stake: stakeNum,
+        client_ref: `inline_${Date.now()}`,
+      });
+
+      const status = "matched" as const;
+      const betId = result.bet_id || '';
+      const matchedAmt = result.matched_stake ?? stakeNum;
+      refreshBalance?.();
+      addToast({
+        type: "success",
+        title: `Bet placed: ${runner.name} @ ${inlinePrice.toFixed(2)} for \u20B9${stakeNum.toLocaleString("en-IN")}`,
+        message: betId ? `Bet ID: ${betId} | Matched: \u20B9${Number(matchedAmt).toLocaleString("en-IN")}` : undefined,
+      });
+
+      onBetPlaced?.(
+        { runnerId: activeInlineBet.runnerId, status, message: betId ? `Bet ID: ${betId} | Matched: \u20B9${Number(matchedAmt).toLocaleString("en-IN")}` : `Bet ${status}` },
+        runner.name,
+        activeInlineBet.side,
+        inlinePrice,
+        stakeNum
+      );
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to place bet";
+      addToast({ type: "error", title: message });
+      onBetPlaced?.(
+        { runnerId: activeInlineBet.runnerId, status: "error", message },
+        runner.name,
+        activeInlineBet.side,
+        inlinePrice,
+        stakeNum
+      );
+    } finally {
+      setPlacing(false);
+      setConfirmStep(false);
+    }
+  };
+
   return (
-    <div
-      className={`flex items-center border-b border-gray-800/30 relative ${
-        isSelected ? "bg-surface-light" : "hover:bg-surface-light/30"
-      } transition-colors`}
-    >
-      {isRunnerSuspended && (
-        <div className="absolute inset-0 bg-black/50 z-[5] flex items-center justify-center">
-          <span className="text-[10px] font-bold text-yellow-400 uppercase tracking-wider">Suspended</span>
+    <div className="border-b border-gray-800/30">
+      <div
+        className={`flex items-center relative ${
+          isSelected ? "bg-surface-light" : "hover:bg-surface-light/30"
+        } transition-colors`}
+      >
+        {isRunnerSuspended && (
+          <div className="absolute inset-0 bg-black/50 z-[5] flex items-center justify-center">
+            <span className="text-[10px] font-bold text-yellow-400 uppercase tracking-wider">Suspended</span>
+          </div>
+        )}
+
+        {/* Runner Name + P&L */}
+        <div className="flex-1 min-w-0 px-2 sm:px-3 py-1.5">
+          <div className="flex items-center gap-2">
+            <span className="text-[12px] sm:text-[13px] font-semibold text-white block truncate">{runner.name}</span>
+            {pnl != null && pnl !== 0 && (
+              <span className={`text-[11px] sm:text-[12px] font-bold tabular-nums flex-shrink-0 px-1.5 py-0.5 rounded ${
+                pnl > 0 ? "text-green-400 bg-green-500/10" : "text-red-400 bg-red-500/10"
+              }`}>
+                {pnl > 0 ? "+" : ""}{formatPnl(pnl)}
+              </span>
+            )}
+            {isFancy && runner.run_value != null && runner.run_value > 0 && (
+              <span className="inline-flex items-center justify-center bg-lotus/20 text-lotus text-[11px] font-bold px-2 py-0.5 rounded-md min-w-[32px]">
+                {runner.run_value}
+              </span>
+            )}
+          </div>
+          {/* Book P&L row — show positions across all runners when user has any */}
+          {allPositions && Object.values(allPositions).some(v => v !== 0) && (
+            <div className="flex items-center gap-2 mt-0.5">
+              <span className="text-[9px] text-gray-600 uppercase">Book P&L:</span>
+              {pnl != null && pnl !== 0 ? (
+                <span className={`text-[10px] font-bold tabular-nums ${pnl > 0 ? "text-green-400" : "text-red-400"}`}>
+                  {pnl > 0 ? "+" : ""}{'\u20B9'}{Math.abs(pnl).toLocaleString('en-IN')}
+                </span>
+              ) : (
+                <span className="text-[10px] text-gray-600 tabular-nums">{'\u20B9'}0</span>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Odds Grid -- layout changes by market type */}
+        {isFancy && runner.yes_rate != null && runner.yes_rate > 0 ? (
+          /* FANCY / SESSION with YES/NO rates */
+          <div className="grid grid-cols-2 w-[110px] sm:w-[200px] flex-shrink-0">
+            <button
+              onClick={() => onSelect(runner, "back", runner.yes_rate || 0)}
+              className="bg-[#72bbef] h-10 flex flex-col items-center justify-center border-r border-white/10 hover:brightness-110 active:brightness-95 transition-all cursor-pointer"
+            >
+              <span className="text-[13px] font-bold text-black">{runner.yes_rate || '-'}</span>
+              <span className="text-[9px] text-black/60">YES</span>
+            </button>
+            <button
+              onClick={() => onSelect(runner, "lay", runner.no_rate || 0)}
+              className="bg-[#faa9ba] h-10 flex flex-col items-center justify-center hover:brightness-110 active:brightness-95 transition-all cursor-pointer"
+            >
+              <span className="text-[13px] font-bold text-black">{runner.no_rate || '-'}</span>
+              <span className="text-[9px] text-black/60">NO</span>
+            </button>
+          </div>
+        ) : isFancy ? (
+          /* FANCY / SESSION fallback: 2 columns -- YES (back) + NO (lay) */
+          <div className="grid grid-cols-2 w-[110px] sm:w-[200px] flex-shrink-0">
+            <OddsCell level={backLevels[2]} side="back" depth={0} runner={runner} onSelect={onSelect} direction={backDirection} isSelected={isSelected && selectedSide === "back"} />
+            <OddsCell level={layLevels[0]} side="lay" depth={0} runner={runner} onSelect={onSelect} direction={layDirection} isSelected={isSelected && selectedSide === "lay"} />
+          </div>
+        ) : isBookmaker ? (
+          /* BOOKMAKER: 2 columns -- Back + Lay (wider cells, no depth) */
+          <div className="grid grid-cols-2 w-[110px] sm:w-[240px] flex-shrink-0">
+            <OddsCell level={backLevels[2]} side="back" depth={0} runner={runner} onSelect={onSelect} direction={backDirection} isSelected={isSelected && selectedSide === "back"} />
+            <OddsCell level={layLevels[0]} side="lay" depth={0} runner={runner} onSelect={onSelect} direction={layDirection} isSelected={isSelected && selectedSide === "lay"} />
+          </div>
+        ) : (
+          /* MATCH ODDS: 6 columns -- 3 Back + 3 Lay */
+          <div className="grid grid-cols-2 sm:grid-cols-6 w-[110px] sm:w-[396px] flex-shrink-0">
+            <OddsCell level={backLevels[0]} side="back" depth={2} runner={runner} onSelect={onSelect} className="hidden sm:flex" />
+            <OddsCell level={backLevels[1]} side="back" depth={1} runner={runner} onSelect={onSelect} className="hidden sm:flex" />
+            <OddsCell level={backLevels[2]} side="back" depth={0} runner={runner} onSelect={onSelect} direction={backDirection} isSelected={isSelected && selectedSide === "back"} />
+            <OddsCell level={layLevels[0]} side="lay" depth={0} runner={runner} onSelect={onSelect} direction={layDirection} isSelected={isSelected && selectedSide === "lay"} />
+            <OddsCell level={layLevels[1]} side="lay" depth={1} runner={runner} onSelect={onSelect} className="hidden sm:flex" />
+            <OddsCell level={layLevels[2]} side="lay" depth={2} runner={runner} onSelect={onSelect} className="hidden sm:flex" />
+          </div>
+        )}
+      </div>
+
+      {/* Inline Bet Slip */}
+      {isSelected && !placedBetResult && (
+        <div className={`px-3 py-2 ${side === 'back' ? 'bg-[#72BBEF]/20 border-t border-[#72BBEF]/30' : 'bg-[#FAA9BA]/20 border-t border-[#FAA9BA]/30'}`}>
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Odds input with +/- */}
+            <div className="flex items-center gap-0.5">
+              <button
+                onClick={onDecrPrice}
+                className="w-6 h-8 bg-gray-800 rounded text-gray-400 text-sm hover:bg-gray-700 active:bg-gray-600 transition-colors"
+              >
+                -
+              </button>
+              <input
+                type="number"
+                step="0.01"
+                value={inlinePrice}
+                onChange={(e) => { setInlinePrice(parseFloat(e.target.value) || 0); setConfirmStep(false); }}
+                className={`w-16 h-8 text-center text-sm font-bold rounded border bg-gray-900 text-white outline-none ${
+                  side === 'back' ? 'border-[#72BBEF]/50 focus:border-[#72BBEF]' : 'border-[#FAA9BA]/50 focus:border-[#FAA9BA]'
+                }`}
+              />
+              <button
+                onClick={onIncrPrice}
+                className="w-6 h-8 bg-gray-800 rounded text-gray-400 text-sm hover:bg-gray-700 active:bg-gray-600 transition-colors"
+              >
+                +
+              </button>
+            </div>
+
+            {/* Stake input */}
+            <input
+              type="number"
+              placeholder="Stake"
+              value={inlineStake}
+              onChange={(e) => { setInlineStake(e.target.value ? parseFloat(e.target.value) : ""); setConfirmStep(false); }}
+              className={`w-20 h-8 px-2 text-sm rounded border bg-gray-900 text-white outline-none ${
+                side === 'back' ? 'border-[#72BBEF]/50 focus:border-[#72BBEF]' : 'border-[#FAA9BA]/50 focus:border-[#FAA9BA]'
+              }`}
+            />
+
+            {/* Quick stake buttons */}
+            <div className="flex gap-0.5">
+              {INLINE_QUICK_STAKES.map((a) => (
+                <button
+                  key={a}
+                  onClick={() => { setInlineStake(a); setConfirmStep(false); }}
+                  className="text-[9px] px-1.5 py-1 bg-gray-800 rounded text-gray-300 hover:bg-gray-700 hover:text-white active:bg-gray-600 transition-colors"
+                >
+                  {a >= 1000 ? `${a / 1000}K` : a}
+                </button>
+              ))}
+            </div>
+
+            {/* Side label + Profit / Liability display */}
+            <div className="flex items-center gap-2 ml-auto">
+              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                side === 'back' ? 'bg-[#72BBEF]/20 text-[#72BBEF]' : 'bg-[#FAA9BA]/20 text-[#FAA9BA]'
+              }`}>
+                {isFancy ? (side === 'back' ? 'YES' : 'NO') : side.toUpperCase()}
+              </span>
+              <span className="text-[11px] text-gray-400 whitespace-nowrap">
+                {side === 'back' ? 'Profit' : 'Liability'}:{' '}
+                <span className={side === 'back' ? 'text-green-400 font-bold' : 'text-red-400 font-bold'}>
+                  {'\u20B9'}{profitOrLiability.toFixed(0)}
+                </span>
+              </span>
+            </div>
+
+            {/* Place / Confirm button */}
+            <button
+              onClick={handlePlaceOrConfirm}
+              disabled={placing || stakeNum <= 0}
+              className={`px-3 py-1.5 rounded text-xs font-bold transition-all ${
+                placing
+                  ? 'bg-gray-600 text-gray-300 cursor-wait'
+                  : confirmStep
+                  ? 'bg-green-600 hover:bg-green-500 text-white px-4 py-2 text-sm'
+                  : 'bg-lotus hover:bg-lotus/80 text-white'
+              } ${stakeNum <= 0 ? 'opacity-50 cursor-not-allowed' : ''}`}
+            >
+              {placing ? 'Placing...' : confirmStep ? 'Confirm Bet' : 'Place Bet'}
+            </button>
+
+            {/* Cancel */}
+            <button
+              onClick={onDeselect}
+              className="text-gray-500 hover:text-gray-300 text-xs transition-colors px-1"
+              title="Cancel"
+            >
+              {'\u2715'}
+            </button>
+          </div>
         </div>
       )}
 
-      {/* Runner Name */}
-      <div className="flex-1 min-w-0 px-2 sm:px-3 py-1.5">
-        <div className="flex items-center gap-2">
-          <span className="text-[12px] sm:text-[13px] font-semibold text-white block truncate">{runner.name}</span>
-          {pnl != null && pnl !== 0 && (
-            <span className={`text-[10px] sm:text-[11px] font-bold tabular-nums flex-shrink-0 ${pnl > 0 ? "text-green-400" : "text-red-400"}`}>
-              {pnl > 0 ? "+" : ""}{formatPnl(pnl)}
+      {/* Inline Bet Result (shown briefly after placement) */}
+      {isSelected && placedBetResult && (
+        <div className={`px-3 py-2 border-t ${
+          placedBetResult.status === 'matched'
+            ? 'bg-green-500/15 border-green-500/30'
+            : placedBetResult.status === 'error'
+            ? 'bg-yellow-500/15 border-yellow-500/30'
+            : 'bg-red-500/15 border-red-500/30'
+        }`}>
+          <div className="flex items-center gap-2">
+            <span className={`text-xs font-bold ${
+              placedBetResult.status === 'matched' ? 'text-green-400' : 'text-red-400'
+            }`}>
+              {placedBetResult.status === 'matched' ? 'Bet Placed' : 'Failed'}
             </span>
-          )}
-          {isFancy && runner.run_value != null && runner.run_value > 0 && (
-            <span className="inline-flex items-center justify-center bg-lotus/20 text-lotus text-[11px] font-bold px-2 py-0.5 rounded-md min-w-[32px]">
-              {runner.run_value}
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* Odds Grid — layout changes by market type */}
-      {isFancy && runner.yes_rate != null && runner.yes_rate > 0 ? (
-        /* FANCY / SESSION with YES/NO rates */
-        <div className="grid grid-cols-2 w-[110px] sm:w-[200px] flex-shrink-0">
-          <button
-            onClick={() => onSelect(runner, "back", runner.yes_rate || 0)}
-            className="bg-[#72bbef] h-10 flex flex-col items-center justify-center border-r border-white/10 hover:brightness-110 active:brightness-95 transition-all cursor-pointer"
-          >
-            <span className="text-[13px] font-bold text-black">{runner.yes_rate || '-'}</span>
-            <span className="text-[9px] text-black/60">YES</span>
-          </button>
-          <button
-            onClick={() => onSelect(runner, "lay", runner.no_rate || 0)}
-            className="bg-[#faa9ba] h-10 flex flex-col items-center justify-center hover:brightness-110 active:brightness-95 transition-all cursor-pointer"
-          >
-            <span className="text-[13px] font-bold text-black">{runner.no_rate || '-'}</span>
-            <span className="text-[9px] text-black/60">NO</span>
-          </button>
-        </div>
-      ) : isFancy ? (
-        /* FANCY / SESSION fallback: 2 columns — YES (back) + NO (lay) */
-        <div className="grid grid-cols-2 w-[110px] sm:w-[200px] flex-shrink-0">
-          <OddsCell level={backLevels[2]} side="back" depth={0} runner={runner} onSelect={onSelect} direction={backDirection} isSelected={isSelected && selectedSide === "back"} />
-          <OddsCell level={layLevels[0]} side="lay" depth={0} runner={runner} onSelect={onSelect} direction={layDirection} isSelected={isSelected && selectedSide === "lay"} />
-        </div>
-      ) : isBookmaker ? (
-        /* BOOKMAKER: 2 columns — Back + Lay (wider cells, no depth) */
-        <div className="grid grid-cols-2 w-[110px] sm:w-[240px] flex-shrink-0">
-          <OddsCell level={backLevels[2]} side="back" depth={0} runner={runner} onSelect={onSelect} direction={backDirection} isSelected={isSelected && selectedSide === "back"} />
-          <OddsCell level={layLevels[0]} side="lay" depth={0} runner={runner} onSelect={onSelect} direction={layDirection} isSelected={isSelected && selectedSide === "lay"} />
-        </div>
-      ) : (
-        /* MATCH ODDS: 6 columns — 3 Back + 3 Lay */
-        <div className="grid grid-cols-2 sm:grid-cols-6 w-[110px] sm:w-[396px] flex-shrink-0">
-          <OddsCell level={backLevels[0]} side="back" depth={2} runner={runner} onSelect={onSelect} className="hidden sm:flex" />
-          <OddsCell level={backLevels[1]} side="back" depth={1} runner={runner} onSelect={onSelect} className="hidden sm:flex" />
-          <OddsCell level={backLevels[2]} side="back" depth={0} runner={runner} onSelect={onSelect} direction={backDirection} isSelected={isSelected && selectedSide === "back"} />
-          <OddsCell level={layLevels[0]} side="lay" depth={0} runner={runner} onSelect={onSelect} direction={layDirection} isSelected={isSelected && selectedSide === "lay"} />
-          <OddsCell level={layLevels[1]} side="lay" depth={1} runner={runner} onSelect={onSelect} className="hidden sm:flex" />
-          <OddsCell level={layLevels[2]} side="lay" depth={2} runner={runner} onSelect={onSelect} className="hidden sm:flex" />
+            <span className="text-[11px] text-gray-400">{placedBetResult.message}</span>
+            <button
+              onClick={onDeselect}
+              className="text-gray-500 hover:text-gray-300 text-xs ml-auto transition-colors px-1"
+            >
+              {'\u2715'}
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -784,19 +1121,11 @@ function FancyMarketBlock({ market, odds, onSelect }: {
   odds: MarketOdds | null;
   onSelect: (r: Runner, side: "back" | "lay", price: number) => void;
 }) {
-  const [showLadder, setShowLadder] = useState(false);
-
   return (
     <div className="bg-surface rounded-lg border border-gray-800/60 overflow-hidden">
-      <button
-        onClick={() => setShowLadder(!showLadder)}
-        className="w-full px-2 py-1.5 border-b border-gray-800/40 bg-surface-light/30 flex items-center justify-between hover:bg-surface-light/50 transition"
-      >
+      <div className="w-full px-2 py-1.5 border-b border-gray-800/40 bg-surface-light/30 flex items-center justify-between">
         <span className="text-[11px] font-medium text-gray-300">{market.name}</span>
-        <svg className={`w-3 h-3 text-gray-500 transition-transform ${showLadder ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-        </svg>
-      </button>
+      </div>
       {odds?.runners?.map((runner) => {
         const rid = runner.id || runner.selection_id?.toString() || runner.name;
         return (
@@ -809,7 +1138,7 @@ function FancyMarketBlock({ market, odds, onSelect }: {
           />
         );
       })}
-      {showLadder && <RunLadder marketId={market.id} />}
+      <RunLadder marketId={market.id} />
     </div>
   );
 }
@@ -834,6 +1163,6 @@ function formatPnl(n: number): string {
   const sign = n < 0 ? "-" : "";
   if (abs >= 10000000) return `${sign}\u20B9${(abs / 10000000).toFixed(1)}Cr`;
   if (abs >= 100000) return `${sign}\u20B9${(abs / 100000).toFixed(1)}L`;
-  if (abs >= 1000) return `${sign}\u20B9${(abs / 1000).toFixed(0)}K`;
-  return `${sign}\u20B9${abs.toFixed(0)}`;
+  // Show exact amount — no rounding to K that loses precision
+  return `${sign}\u20B9${abs.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 }

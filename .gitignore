@@ -1,5 +1,8 @@
 # Binaries
 bin/
+server
+mockserver
+cmd/server/mockserver
 *.exe
 *.out
 

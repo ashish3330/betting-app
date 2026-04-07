@@ -20,7 +20,7 @@ export default function Navbar({ onToggleSidebar, sidebarOpen = false, liveCount
   const [theme, setThemeState] = useState<Theme>("dark");
   const [unreadCount, setUnreadCount] = useState(0);
   const [exposureOpen, setExposureOpen] = useState(false);
-  const [exposureBets, setExposureBets] = useState<{ id: string; market_id: string; market_name: string; selection_name: string; side: string; stake: number; price: number; status: string }[]>([]);
+  const [exposureBets, setExposureBets] = useState<{ id: string; market_id: string; market_name: string; selection_name: string; side: string; display_side: string; market_type: string; stake: number; price: number; status: string }[]>([]);
   const accountRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLDivElement>(null);
   const exposureRef = useRef<HTMLDivElement>(null);
@@ -243,21 +243,56 @@ export default function Navbar({ onToggleSidebar, sidebarOpen = false, liveCount
                         </div>
                         {exposureBets.length === 0 ? (
                           <p className="px-3 py-3 text-[10px] text-gray-500 text-center">No active bets</p>
-                        ) : exposureBets.map((bet) => (
-                          <Link key={bet.id} href={`/markets/${bet.market_id || bet.id}`} onClick={() => setExposureOpen(false)}
-                            className="block px-3 py-1.5 hover:bg-white/5 transition border-b border-gray-800/20 last:border-0">
-                            <div className="flex items-center justify-between">
-                              <span className="text-[10px] text-white truncate max-w-[140px]">{bet.market_name || bet.market_id || bet.id}</span>
-                              <span className={`text-[10px] px-1 py-0.5 rounded font-medium ${bet.side === "back" ? "bg-[#72BBEF]/20 text-[#72BBEF]" : "bg-[#FAA9BA]/20 text-[#FAA9BA]"}`}>
-                                {bet.side?.toUpperCase()}
-                              </span>
-                            </div>
-                            <div className="flex items-center justify-between text-[9px] text-gray-500 mt-0.5">
-                              <span>{bet.selection_name || "—"}</span>
-                              <span>₹{bet.stake?.toLocaleString("en-IN")} @ {bet.price}</span>
-                            </div>
-                          </Link>
-                        ))}
+                        ) : (() => {
+                          const matchBets = exposureBets.filter((b) => b.market_type !== "fancy" && b.market_type !== "session");
+                          const fancyBets = exposureBets.filter((b) => b.market_type === "fancy" || b.market_type === "session");
+                          const showHeaders = matchBets.length > 0 && fancyBets.length > 0;
+
+                          const renderBet = (bet: typeof exposureBets[0]) => {
+                            const isFancy = bet.market_type === "fancy" || bet.market_type === "session";
+                            const displaySide = bet.display_side || bet.side;
+                            const isYes = displaySide === "yes" || (isFancy && bet.side === "back");
+                            return (
+                              <Link key={bet.id} href={`/markets/${bet.market_id || bet.id}`} onClick={() => setExposureOpen(false)}
+                                className="block px-3 py-1.5 hover:bg-white/5 transition border-b border-gray-800/20 last:border-0">
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    {isFancy && <span className="text-[8px] px-1 py-0.5 rounded bg-purple-500/20 text-purple-400 font-bold flex-shrink-0">FANCY</span>}
+                                    <span className="text-[10px] text-white truncate max-w-[120px]">{bet.market_name || bet.market_id || bet.id}</span>
+                                  </div>
+                                  <span className={`text-[10px] px-1 py-0.5 rounded font-medium ${
+                                    isFancy
+                                      ? isYes ? "bg-[#72BBEF]/20 text-[#72BBEF]" : "bg-[#FAA9BA]/20 text-[#FAA9BA]"
+                                      : displaySide === "back" ? "bg-[#72BBEF]/20 text-[#72BBEF]" : "bg-[#FAA9BA]/20 text-[#FAA9BA]"
+                                  }`}>
+                                    {isFancy ? (isYes ? "YES" : "NO") : displaySide?.toUpperCase()}
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-between text-[9px] text-gray-500 mt-0.5">
+                                  <span>{bet.selection_name || "—"}</span>
+                                  <span>₹{bet.stake?.toLocaleString("en-IN")} @ {bet.price}</span>
+                                </div>
+                              </Link>
+                            );
+                          };
+
+                          return (
+                            <>
+                              {matchBets.length > 0 && (
+                                <>
+                                  {showHeaders && <div className="px-3 py-1 text-[9px] font-bold text-gray-500 uppercase bg-white/[0.02]">Match Bets ({matchBets.length})</div>}
+                                  {matchBets.map(renderBet)}
+                                </>
+                              )}
+                              {fancyBets.length > 0 && (
+                                <>
+                                  {showHeaders && <div className="px-3 py-1 text-[9px] font-bold text-purple-400/70 uppercase bg-purple-500/[0.03] border-t border-gray-800/40">Fancy Bets ({fancyBets.length})</div>}
+                                  {fancyBets.map(renderBet)}
+                                </>
+                              )}
+                            </>
+                          );
+                        })()}
                       </div>
                     )}
                   </div>

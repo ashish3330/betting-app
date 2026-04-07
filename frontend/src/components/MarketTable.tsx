@@ -308,6 +308,5 @@ function fmtCurrency(n: number): string {
   const sign = n < 0 ? "-" : "";
   if (abs >= 10000000) return `${sign}₹${(abs / 10000000).toFixed(1)}Cr`;
   if (abs >= 100000) return `${sign}₹${(abs / 100000).toFixed(1)}L`;
-  if (abs >= 1000) return `${sign}₹${(abs / 1000).toFixed(0)}K`;
-  return `${sign}₹${abs.toFixed(0)}`;
+  return `${sign}₹${abs.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`;
 }
