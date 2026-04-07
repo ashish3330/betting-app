@@ -145,6 +145,32 @@ func runMigrations(log *slog.Logger) error {
 			login_at TIMESTAMPTZ DEFAULT NOW()
 		)`,
 
+		// ── Payment Transactions ──
+		`CREATE TABLE IF NOT EXISTS betting.payment_transactions (
+			id TEXT PRIMARY KEY,
+			user_id BIGINT NOT NULL REFERENCES auth.users(id),
+			direction TEXT NOT NULL,
+			method TEXT NOT NULL,
+			amount NUMERIC(20,2) NOT NULL,
+			currency TEXT NOT NULL DEFAULT 'INR',
+			status TEXT DEFAULT 'pending',
+			upi_id TEXT DEFAULT '',
+			wallet_address TEXT DEFAULT '',
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+
+		// ── Responsible Gambling ──
+		`CREATE TABLE IF NOT EXISTS betting.responsible_gambling (
+			user_id BIGINT PRIMARY KEY REFERENCES auth.users(id),
+			daily_deposit_limit NUMERIC(20,2) DEFAULT 0,
+			daily_loss_limit NUMERIC(20,2) DEFAULT 0,
+			max_stake_per_bet NUMERIC(20,2) DEFAULT 0,
+			session_limit_minutes INT DEFAULT 0,
+			self_excluded BOOLEAN DEFAULT FALSE,
+			excluded_until TIMESTAMPTZ,
+			updated_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+
 		// ── Indexes ──
 		`CREATE INDEX IF NOT EXISTS idx_bets_user ON betting.bets(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_bets_market ON betting.bets(market_id)`,
@@ -154,6 +180,7 @@ func runMigrations(log *slog.Logger) error {
 		`CREATE INDEX IF NOT EXISTS idx_notif_read ON betting.notifications(user_id, read)`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_user ON betting.audit_log(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_login_user ON auth.login_history(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_payment_user ON betting.payment_transactions(user_id)`,
 	}
 
 	for _, m := range migrations {
@@ -246,6 +273,12 @@ func dbGetUser(id int64) *User {
 		u.ParentID = &pid
 	}
 	return u
+}
+
+func dbUpdateUserStatus(userID int64, status string) {
+	if _, err := db.Exec(`UPDATE auth.users SET status=$1, updated_at=NOW() WHERE id=$2`, status, userID); err != nil {
+		logger.Error("dbUpdateUserStatus failed", "error", err)
+	}
 }
 
 func dbUpdateBalance(userID int64, balance, exposure float64) {
@@ -518,6 +551,81 @@ func dbSyncUserBalance(userID int64) (float64, float64) {
 	var balance, exposure float64
 	db.QueryRow(`SELECT balance, exposure FROM auth.users WHERE id=$1`, userID).Scan(&balance, &exposure)
 	return balance, exposure
+}
+
+// ── DB-backed Payment Transactions ────────────────────────────────────────────
+
+func dbSavePaymentTx(tx *PaymentTx) {
+	if _, err := db.Exec(`
+		INSERT INTO betting.payment_transactions (id, user_id, direction, method, amount, currency, status, upi_id, wallet_address, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		ON CONFLICT (id) DO UPDATE SET status=$7`,
+		tx.ID, tx.UserID, tx.Direction, tx.Method, tx.Amount, tx.Currency, tx.Status, tx.UPIID, tx.Wallet, tx.CreatedAt); err != nil {
+		logger.Error("dbSavePaymentTx failed", "tx_id", tx.ID, "error", err)
+	}
+}
+
+func dbGetUserPayments(userID int64) []*PaymentTx {
+	rows, err := db.Query(`
+		SELECT id, user_id, direction, method, amount, currency, status, upi_id, wallet_address, created_at
+		FROM betting.payment_transactions WHERE user_id=$1 ORDER BY created_at DESC`, userID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var txns []*PaymentTx
+	for rows.Next() {
+		tx := &PaymentTx{}
+		rows.Scan(&tx.ID, &tx.UserID, &tx.Direction, &tx.Method, &tx.Amount, &tx.Currency, &tx.Status, &tx.UPIID, &tx.Wallet, &tx.CreatedAt)
+		txns = append(txns, tx)
+	}
+	if err := rows.Err(); err != nil {
+		logger.Error("dbGetUserPayments rows iteration error", "error", err)
+	}
+	return txns
+}
+
+// ── DB-backed Responsible Gambling ────────────────────────────────────────────
+
+func dbSaveResponsibleLimits(userID int64, limits *ResponsibleGamblingLimits) {
+	if _, err := db.Exec(`
+		INSERT INTO betting.responsible_gambling (user_id, daily_deposit_limit, daily_loss_limit, max_stake_per_bet, session_limit_minutes, self_excluded, excluded_until, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+		ON CONFLICT (user_id) DO UPDATE SET
+			daily_deposit_limit=$2, daily_loss_limit=$3, max_stake_per_bet=$4,
+			session_limit_minutes=$5, self_excluded=$6, excluded_until=$7, updated_at=NOW()`,
+		userID, limits.DailyDeposit, limits.DailyLoss, limits.MaxStake, limits.SessionMinutes,
+		limits.SelfExcluded, nullableTime(limits.ExcludedUntil)); err != nil {
+		logger.Error("dbSaveResponsibleLimits failed", "error", err)
+	}
+}
+
+func dbGetResponsibleLimits(userID int64) *ResponsibleGamblingLimits {
+	l := &ResponsibleGamblingLimits{}
+	var excludedUntil sql.NullTime
+	err := db.QueryRow(`
+		SELECT daily_deposit_limit, daily_loss_limit, max_stake_per_bet, session_limit_minutes, self_excluded, excluded_until
+		FROM betting.responsible_gambling WHERE user_id=$1`, userID).Scan(
+		&l.DailyDeposit, &l.DailyLoss, &l.MaxStake, &l.SessionMinutes, &l.SelfExcluded, &excludedUntil)
+	if err != nil {
+		return nil
+	}
+	if excludedUntil.Valid {
+		l.ExcludedUntil = excludedUntil.Time.Format(time.RFC3339)
+	}
+	return l
+}
+
+func nullableTime(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return nil
+	}
+	return t
 }
 
 func minInt(a, b int) int {

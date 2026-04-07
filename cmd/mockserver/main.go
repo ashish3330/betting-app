@@ -1218,13 +1218,12 @@ func handlePlaceBet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Hold funds for unmatched portion
-	if result.UnmatchedStake > 0 {
-		unmatchedHold := holdAmount * (result.UnmatchedStake / req.Stake)
-		if err := store.HoldFunds(uid, unmatchedHold, result.BetID); err != nil {
-			writeErr(w, 400, err.Error())
-			return
-		}
+	// Hold funds for the full bet amount (matched + unmatched).
+	// Matched portion stays as exposure until settlement; unmatched until cancel/match.
+	// This ensures balance and exposure update immediately when a bet is placed.
+	if err := store.HoldFunds(uid, holdAmount, result.BetID); err != nil {
+		writeErr(w, 400, err.Error())
+		return
 	}
 
 	store.AddAudit(uid, r.Header.Get("X-Username"), "bet_placed",
@@ -1563,6 +1562,9 @@ func handleUPIDeposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tx := store.CreatePaymentTx(uid, "deposit", "upi", req.Amount, "INR", req.UPIID, "")
+	if useDB() {
+		dbSavePaymentTx(tx)
+	}
 	logger.Info("UPI deposit initiated", "tx", tx.ID, "user", uid, "amount", req.Amount)
 	writeJSON(w, 200, map[string]interface{}{
 		"id":               tx.ID,
@@ -1588,6 +1590,9 @@ func handleCryptoDeposit(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	tx := store.CreatePaymentTx(uid, "deposit", "crypto", req.Amount, req.Currency, "", req.Wallet)
+	if useDB() {
+		dbSavePaymentTx(tx)
+	}
 	logger.Info("crypto deposit initiated", "tx", tx.ID, "user", uid)
 	writeJSON(w, 200, map[string]interface{}{
 		"id":               tx.ID,
@@ -1619,6 +1624,9 @@ func handleWithdraw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tx := store.CreatePaymentTx(uid, "withdrawal", req.Method, req.Amount, "INR", req.UPIID, req.Wallet)
+	if useDB() {
+		dbSavePaymentTx(tx)
+	}
 	store.HoldFunds(uid, req.Amount, "withdrawal:"+tx.ID)
 	logger.Info("withdrawal initiated", "tx", tx.ID, "user", uid, "amount", req.Amount)
 	writeJSON(w, 200, map[string]interface{}{
@@ -2024,6 +2032,10 @@ func handlePanelUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		u.Status = req.Status
 	}
 	store.mu.Unlock()
+
+	if useDB() {
+		dbUpdateUserStatus(targetID, req.Status)
+	}
 
 	store.AddAudit(uid, r.Header.Get("X-Username"), "status_change",
 		fmt.Sprintf("target_user=%d new_status=%s", targetID, req.Status), r.RemoteAddr)
@@ -2720,6 +2732,11 @@ func handleSetResponsibleLimits(w http.ResponseWriter, r *http.Request) {
 		existing.SessionMinutes = req.SessionMinutes
 	}
 	store.mu.Unlock()
+
+	if useDB() {
+		dbSaveResponsibleLimits(claims.UserID, existing)
+	}
+
 	writeJSON(w, 200, existing)
 }
 
@@ -2734,6 +2751,11 @@ func handleSelfExclude(w http.ResponseWriter, r *http.Request) {
 	existing.SelfExcluded = true
 	existing.ExcludedUntil = time.Now().Add(24 * time.Hour).Format(time.RFC3339)
 	store.mu.Unlock()
+
+	if useDB() {
+		dbSaveResponsibleLimits(claims.UserID, existing)
+	}
+
 	writeJSON(w, 200, map[string]string{
 		"message":       "Self-excluded for 24 hours",
 		"excluded_until": existing.ExcludedUntil,

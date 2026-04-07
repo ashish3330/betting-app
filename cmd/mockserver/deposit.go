@@ -14,6 +14,7 @@ package main
 // Uses Store.mu for concurrency safety (in production use DB locks).
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -137,6 +138,16 @@ func (ds *DepositStore) CreateBankAccount(ownerID int64, ownerRole string, req *
 		UpdatedAt:     now,
 	}
 	ds.bankAccounts[id] = acct
+
+	if useDB() {
+		dbID := dbSaveBankAccount(acct)
+		if dbID > 0 {
+			acct.ID = dbID
+			delete(ds.bankAccounts, id)
+			ds.bankAccounts[dbID] = acct
+		}
+	}
+
 	return acct
 }
 
@@ -161,6 +172,10 @@ func (ds *DepositStore) UpdateBankAccount(id int64, ownerID int64, updates map[s
 	if v, ok := updates["status"]; ok && (v == "active" || v == "inactive") { acct.Status = v }
 	acct.UpdatedAt = time.Now().Format(time.RFC3339)
 
+	if useDB() {
+		dbUpdateBankAccount(acct)
+	}
+
 	return acct, nil
 }
 
@@ -176,6 +191,11 @@ func (ds *DepositStore) DeleteBankAccount(id int64, ownerID int64) error {
 		return fmt.Errorf("not authorized")
 	}
 	acct.Status = "inactive"
+
+	if useDB() {
+		dbUpdateBankAccount(acct)
+	}
+
 	return nil
 }
 
@@ -186,6 +206,9 @@ func (ds *DepositStore) GetUsageToday(accountID int64) (float64, int) {
 	defer ds.mu.RUnlock()
 	if u, ok := ds.dailyUsage[key]; ok {
 		return u.TotalUsed, u.DepositCount
+	}
+	if useDB() {
+		return dbGetDailyUsage(accountID, todayIST())
 	}
 	return 0, 0
 }
@@ -211,6 +234,16 @@ func (ds *DepositStore) GetBankAccountsByOwner(ownerID int64) []*BankAccount {
 			out = append(out, &clone)
 		}
 	}
+
+	// DB fallback when in-memory is empty
+	if len(out) == 0 && useDB() {
+		dbAccounts := dbGetBankAccountsByOwner(ownerID)
+		for _, acct := range dbAccounts {
+			ds.enrichAccount(acct)
+		}
+		return dbAccounts
+	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
@@ -258,6 +291,19 @@ func (ds *DepositStore) GetAllBankAccounts() []*BankAccount {
 		}
 		out = append(out, &clone)
 	}
+
+	// DB fallback when in-memory is empty
+	if len(out) == 0 && useDB() {
+		dbAccounts := dbGetAllBankAccounts()
+		for _, acct := range dbAccounts {
+			ds.enrichAccount(acct)
+			if owner := store.GetUser(acct.OwnerID); owner != nil {
+				acct.OwnerUsername = owner.Username
+			}
+		}
+		return dbAccounts
+	}
+
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
@@ -377,6 +423,16 @@ func (ds *DepositStore) CreateDepositRequest(playerID, agentID, masterID, bankAc
 	}
 
 	ds.depositRequests[id] = req
+
+	if useDB() {
+		dbID := dbSaveDepositRequest(req)
+		if dbID > 0 {
+			delete(ds.depositRequests, id)
+			req.ID = dbID
+			ds.depositRequests[dbID] = req
+		}
+	}
+
 	return req
 }
 
@@ -451,6 +507,12 @@ func (ds *DepositStore) ConfirmDeposit(depositID int64, confirmedBy int64, txnRe
 	now := time.Now().Format(time.RFC3339)
 	mainStore.addLedger(req.PlayerID, req.Amount, "deposit", fmt.Sprintf("deposit:%d", depositID), "", now)
 
+	// Persist to DB
+	if useDB() {
+		dbUpdateDepositRequest(req)
+		dbSaveDailyUsage(usage)
+	}
+
 	// Release both locks
 	ds.mu.Unlock()
 	mainStore.mu.Unlock()
@@ -478,6 +540,10 @@ func (ds *DepositStore) RejectDeposit(depositID int64, rejectedBy int64, reason 
 	req.RejectionReason = reason
 	req.ConfirmedBy = rejectedBy
 	req.ConfirmedAt = time.Now().Format(time.RFC3339)
+
+	if useDB() {
+		dbUpdateDepositRequest(req)
+	}
 
 	return req, nil
 }
@@ -508,6 +574,11 @@ func (ds *DepositStore) GetDepositRequests(userID int64, role string, statusFilt
 			continue
 		}
 		out = append(out, req)
+	}
+
+	// DB fallback when in-memory is empty
+	if len(out) == 0 && useDB() {
+		return dbGetDepositRequests(userID, role, statusFilter)
 	}
 
 	// Sort newest first
@@ -1294,4 +1365,248 @@ func maskAccountNumber(acctNum string) string {
 		return acctNum
 	}
 	return strings.Repeat("*", len(acctNum)-4) + acctNum[len(acctNum)-4:]
+}
+
+// ── DB helper functions for deposit persistence ─────────────────
+
+// dbSaveBankAccount inserts a bank account and returns the DB-assigned ID.
+func dbSaveBankAccount(acct *BankAccount) int64 {
+	var id int64
+	err := db.QueryRow(`
+		INSERT INTO betting.bank_accounts
+			(owner_id, owner_role, bank_name, account_holder, account_number, ifsc_code, upi_id, qr_image_url, daily_limit, status, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW())
+		RETURNING id`,
+		acct.OwnerID, acct.OwnerRole, acct.BankName, acct.AccountHolder,
+		acct.AccountNumber, acct.IFSCCode, acct.UPIID, acct.QRImageURL,
+		acct.DailyLimit, acct.Status,
+	).Scan(&id)
+	if err != nil {
+		logger.Error("dbSaveBankAccount failed", "error", err)
+		return 0
+	}
+	return id
+}
+
+// dbUpdateBankAccount updates an existing bank account row.
+func dbUpdateBankAccount(acct *BankAccount) {
+	_, err := db.Exec(`
+		UPDATE betting.bank_accounts
+		SET bank_name=$1, account_holder=$2, account_number=$3, ifsc_code=$4,
+		    upi_id=$5, qr_image_url=$6, status=$7, updated_at=NOW()
+		WHERE id=$8`,
+		acct.BankName, acct.AccountHolder, acct.AccountNumber, acct.IFSCCode,
+		acct.UPIID, acct.QRImageURL, acct.Status, acct.ID,
+	)
+	if err != nil {
+		logger.Error("dbUpdateBankAccount failed", "id", acct.ID, "error", err)
+	}
+}
+
+// dbGetBankAccountsByOwner loads bank accounts for a given owner from the DB.
+func dbGetBankAccountsByOwner(ownerID int64) []*BankAccount {
+	rows, err := db.Query(`
+		SELECT id, owner_id, owner_role, bank_name, account_holder, account_number,
+		       ifsc_code, upi_id, qr_image_url, daily_limit, status, created_at, updated_at
+		FROM betting.bank_accounts WHERE owner_id=$1 ORDER BY id`, ownerID)
+	if err != nil {
+		logger.Error("dbGetBankAccountsByOwner failed", "error", err)
+		return nil
+	}
+	defer rows.Close()
+	return scanBankAccountRows(rows)
+}
+
+// dbGetAllBankAccounts loads all bank accounts from the DB.
+func dbGetAllBankAccounts() []*BankAccount {
+	rows, err := db.Query(`
+		SELECT id, owner_id, owner_role, bank_name, account_holder, account_number,
+		       ifsc_code, upi_id, qr_image_url, daily_limit, status, created_at, updated_at
+		FROM betting.bank_accounts ORDER BY id`)
+	if err != nil {
+		logger.Error("dbGetAllBankAccounts failed", "error", err)
+		return nil
+	}
+	defer rows.Close()
+	return scanBankAccountRows(rows)
+}
+
+// scanBankAccountRows scans rows into BankAccount slices.
+func scanBankAccountRows(rows *sql.Rows) []*BankAccount {
+	var out []*BankAccount
+	for rows.Next() {
+		a := &BankAccount{}
+		var upi, qr sql.NullString
+		rows.Scan(&a.ID, &a.OwnerID, &a.OwnerRole, &a.BankName, &a.AccountHolder,
+			&a.AccountNumber, &a.IFSCCode, &upi, &qr, &a.DailyLimit, &a.Status,
+			&a.CreatedAt, &a.UpdatedAt)
+		if upi.Valid {
+			a.UPIID = upi.String
+		}
+		if qr.Valid {
+			a.QRImageURL = qr.String
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		logger.Error("scanBankAccountRows iteration error", "error", err)
+	}
+	return out
+}
+
+// dbSaveDepositRequest inserts a deposit request and returns the DB-assigned ID.
+func dbSaveDepositRequest(req *DepositRequest) int64 {
+	var id int64
+	err := db.QueryRow(`
+		INSERT INTO betting.deposit_requests
+			(player_id, agent_id, master_id, bank_account_id, amount, status, txn_reference, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),NOW())
+		RETURNING id`,
+		req.PlayerID, req.AgentID, req.MasterID, req.BankAccountID,
+		req.Amount, req.Status, req.TxnReference,
+	).Scan(&id)
+	if err != nil {
+		logger.Error("dbSaveDepositRequest failed", "error", err)
+		return 0
+	}
+	return id
+}
+
+// dbUpdateDepositRequest updates status, confirmed_by, confirmed_at, txn_reference, rejection_reason.
+func dbUpdateDepositRequest(req *DepositRequest) {
+	var confirmedBy sql.NullInt64
+	var confirmedAt sql.NullString
+	if req.ConfirmedBy > 0 {
+		confirmedBy = sql.NullInt64{Int64: req.ConfirmedBy, Valid: true}
+	}
+	if req.ConfirmedAt != "" {
+		confirmedAt = sql.NullString{String: req.ConfirmedAt, Valid: true}
+	}
+	_, err := db.Exec(`
+		UPDATE betting.deposit_requests
+		SET status=$1, confirmed_by=$2, confirmed_at=$3, txn_reference=$4, rejection_reason=$5, updated_at=NOW()
+		WHERE id=$6`,
+		req.Status, confirmedBy, confirmedAt, req.TxnReference, req.RejectionReason, req.ID,
+	)
+	if err != nil {
+		logger.Error("dbUpdateDepositRequest failed", "id", req.ID, "error", err)
+	}
+}
+
+// dbGetDepositRequests loads deposit requests from DB filtered by role and status.
+func dbGetDepositRequests(userID int64, role string, statusFilter string) []*DepositRequest {
+	var query string
+	var args []interface{}
+
+	switch role {
+	case "superadmin":
+		if statusFilter != "" {
+			query = `SELECT id, player_id, agent_id, master_id, bank_account_id, amount, status,
+			         confirmed_by, confirmed_at, txn_reference, rejection_reason, created_at
+			         FROM betting.deposit_requests WHERE status=$1 ORDER BY id DESC`
+			args = []interface{}{statusFilter}
+		} else {
+			query = `SELECT id, player_id, agent_id, master_id, bank_account_id, amount, status,
+			         confirmed_by, confirmed_at, txn_reference, rejection_reason, created_at
+			         FROM betting.deposit_requests ORDER BY id DESC`
+		}
+	case "admin", "master":
+		if statusFilter != "" {
+			query = `SELECT id, player_id, agent_id, master_id, bank_account_id, amount, status,
+			         confirmed_by, confirmed_at, txn_reference, rejection_reason, created_at
+			         FROM betting.deposit_requests WHERE (master_id=$1 OR agent_id=$1) AND status=$2 ORDER BY id DESC`
+			args = []interface{}{userID, statusFilter}
+		} else {
+			query = `SELECT id, player_id, agent_id, master_id, bank_account_id, amount, status,
+			         confirmed_by, confirmed_at, txn_reference, rejection_reason, created_at
+			         FROM betting.deposit_requests WHERE master_id=$1 OR agent_id=$1 ORDER BY id DESC`
+			args = []interface{}{userID}
+		}
+	case "agent":
+		if statusFilter != "" {
+			query = `SELECT id, player_id, agent_id, master_id, bank_account_id, amount, status,
+			         confirmed_by, confirmed_at, txn_reference, rejection_reason, created_at
+			         FROM betting.deposit_requests WHERE agent_id=$1 AND status=$2 ORDER BY id DESC`
+			args = []interface{}{userID, statusFilter}
+		} else {
+			query = `SELECT id, player_id, agent_id, master_id, bank_account_id, amount, status,
+			         confirmed_by, confirmed_at, txn_reference, rejection_reason, created_at
+			         FROM betting.deposit_requests WHERE agent_id=$1 ORDER BY id DESC`
+			args = []interface{}{userID}
+		}
+	case "client":
+		if statusFilter != "" {
+			query = `SELECT id, player_id, agent_id, master_id, bank_account_id, amount, status,
+			         confirmed_by, confirmed_at, txn_reference, rejection_reason, created_at
+			         FROM betting.deposit_requests WHERE player_id=$1 AND status=$2 ORDER BY id DESC`
+			args = []interface{}{userID, statusFilter}
+		} else {
+			query = `SELECT id, player_id, agent_id, master_id, bank_account_id, amount, status,
+			         confirmed_by, confirmed_at, txn_reference, rejection_reason, created_at
+			         FROM betting.deposit_requests WHERE player_id=$1 ORDER BY id DESC`
+			args = []interface{}{userID}
+		}
+	default:
+		return nil
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		logger.Error("dbGetDepositRequests failed", "error", err)
+		return nil
+	}
+	defer rows.Close()
+
+	var out []*DepositRequest
+	for rows.Next() {
+		r := &DepositRequest{}
+		var confirmedBy sql.NullInt64
+		var confirmedAt, txnRef, rejReason sql.NullString
+		rows.Scan(&r.ID, &r.PlayerID, &r.AgentID, &r.MasterID, &r.BankAccountID,
+			&r.Amount, &r.Status, &confirmedBy, &confirmedAt, &txnRef, &rejReason, &r.CreatedAt)
+		if confirmedBy.Valid {
+			r.ConfirmedBy = confirmedBy.Int64
+		}
+		if confirmedAt.Valid {
+			r.ConfirmedAt = confirmedAt.String
+		}
+		if txnRef.Valid {
+			r.TxnReference = txnRef.String
+		}
+		if rejReason.Valid {
+			r.RejectionReason = rejReason.String
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		logger.Error("dbGetDepositRequests rows iteration error", "error", err)
+	}
+	return out
+}
+
+// dbSaveDailyUsage upserts the daily usage record for a bank account.
+func dbSaveDailyUsage(usage *DailyUsage) {
+	_, err := db.Exec(`
+		INSERT INTO betting.daily_account_usage (bank_account_id, usage_date, total_used, deposit_count, updated_at)
+		VALUES ($1, $2, $3, $4, NOW())
+		ON CONFLICT (bank_account_id, usage_date)
+		DO UPDATE SET total_used=$3, deposit_count=$4, updated_at=NOW()`,
+		usage.BankAccountID, usage.UsageDate, usage.TotalUsed, usage.DepositCount,
+	)
+	if err != nil {
+		logger.Error("dbSaveDailyUsage failed", "account", usage.BankAccountID, "error", err)
+	}
+}
+
+// dbGetDailyUsage reads today's usage for a bank account from DB.
+func dbGetDailyUsage(accountID int64, date string) (float64, int) {
+	var totalUsed float64
+	var depositCount int
+	err := db.QueryRow(`
+		SELECT total_used, deposit_count FROM betting.daily_account_usage
+		WHERE bank_account_id=$1 AND usage_date=$2`, accountID, date).Scan(&totalUsed, &depositCount)
+	if err != nil {
+		return 0, 0
+	}
+	return totalUsed, depositCount
 }
