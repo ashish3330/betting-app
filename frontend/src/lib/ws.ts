@@ -1,3 +1,5 @@
+import { decryptLocalStorage } from "./crypto";
+
 type MessageHandler = (data: unknown) => void;
 
 interface WSMessage {
@@ -29,7 +31,7 @@ class LotusWebSocket {
     }
 
     // Don't connect if no token (not logged in) or no subscriptions
-    const token = typeof window !== "undefined" ? localStorage.getItem("access_token") : null;
+    const token = typeof window !== "undefined" ? decryptLocalStorage("access_token") : null;
     if (!token && this.subscribedMarkets.length === 0) {
       return;
     }
@@ -46,7 +48,7 @@ class LotusWebSocket {
         // Authenticate if we have a token
         const token =
           typeof window !== "undefined"
-            ? localStorage.getItem("access_token")
+            ? decryptLocalStorage("access_token")
             : null;
         if (token) {
           this.send({ type: "auth", payload: { token } });

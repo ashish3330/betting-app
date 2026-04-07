@@ -597,6 +597,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	store.mu.Lock()
 	store.refreshTokens[refresh] = u.ID
+	store.refreshTokenTimes[refresh] = time.Now()
 	store.mu.Unlock()
 
 	// Set HttpOnly cookies for secure token storage (immune to XSS)
@@ -654,6 +655,7 @@ func handleDemoLogin(w http.ResponseWriter, r *http.Request) {
 
 	store.mu.Lock()
 	store.refreshTokens[refresh] = u.ID
+	store.refreshTokenTimes[refresh] = time.Now()
 	store.mu.Unlock()
 
 	clientIP := extractClientIP(r)
@@ -749,6 +751,7 @@ func handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	store.mu.Lock()
 	store.refreshTokens[refresh] = u.ID
+	store.refreshTokenTimes[refresh] = time.Now()
 	store.mu.Unlock()
 
 	writeJSON(w, 200, map[string]interface{}{
@@ -2543,6 +2546,7 @@ func handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 
 	store.mu.Lock()
 	store.refreshTokens[refresh] = u.ID
+	store.refreshTokenTimes[refresh] = time.Now()
 	store.mu.Unlock()
 
 	w.Header().Set("X-CSRF-Token", csrf)

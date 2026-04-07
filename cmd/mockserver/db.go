@@ -192,7 +192,9 @@ func dbCreateUser(username, email, passwordHash, role, path string, parentID *in
 
 	// Update path to include own ID if no parent
 	if parentID == nil {
-		db.Exec(`UPDATE auth.users SET path=$1 WHERE id=$2`, fmt.Sprintf("%d", id), id)
+		if _, err := db.Exec(`UPDATE auth.users SET path=$1 WHERE id=$2`, fmt.Sprintf("%d", id), id); err != nil {
+			logger.Error("dbCreateUser: failed to update path", "error", err)
+		}
 	}
 
 	return &User{
@@ -247,7 +249,9 @@ func dbGetUser(id int64) *User {
 }
 
 func dbUpdateBalance(userID int64, balance, exposure float64) {
-	db.Exec(`UPDATE auth.users SET balance=$1, exposure=$2, updated_at=NOW() WHERE id=$3`, balance, exposure, userID)
+	if _, err := db.Exec(`UPDATE auth.users SET balance=$1, exposure=$2, updated_at=NOW() WHERE id=$3`, balance, exposure, userID); err != nil {
+		logger.Error("dbUpdateBalance failed", "error", err)
+	}
 }
 
 func dbAllUsers() []*User {
@@ -272,6 +276,9 @@ func dbAllUsers() []*User {
 			u.ParentID = &pid
 		}
 		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		logger.Error("dbAllUsers rows iteration error", "error", err)
 	}
 	return users
 }
@@ -320,8 +327,10 @@ func dbUpdateBet(b *Bet) {
 // ── DB-backed Ledger ──────────────────────────────────────────────────────────
 
 func dbAddLedger(userID int64, amount float64, typ, ref, betID string) {
-	db.Exec(`INSERT INTO betting.ledger (user_id, amount, type, reference, bet_id) VALUES ($1,$2,$3,$4,$5)`,
-		userID, amount, typ, ref, betID)
+	if _, err := db.Exec(`INSERT INTO betting.ledger (user_id, amount, type, reference, bet_id) VALUES ($1,$2,$3,$4,$5)`,
+		userID, amount, typ, ref, betID); err != nil {
+		logger.Error("dbAddLedger failed", "error", err)
+	}
 }
 
 func dbGetLedger(userID int64, limit, offset int) []*LedgerEntry {
@@ -340,14 +349,19 @@ func dbGetLedger(userID int64, limit, offset int) []*LedgerEntry {
 		rows.Scan(&e.ID, &e.UserID, &e.Amount, &e.Type, &e.Reference, &e.BetID, &e.CreatedAt)
 		entries = append(entries, e)
 	}
+	if err := rows.Err(); err != nil {
+		logger.Error("dbGetLedger rows iteration error", "error", err)
+	}
 	return entries
 }
 
 // ── DB-backed Notifications ───────────────────────────────────────────────────
 
 func dbAddNotification(id string, userID int64, typ, title, message string) {
-	db.Exec(`INSERT INTO betting.notifications (id, user_id, type, title, message) VALUES ($1,$2,$3,$4,$5)`,
-		id, userID, typ, title, message)
+	if _, err := db.Exec(`INSERT INTO betting.notifications (id, user_id, type, title, message) VALUES ($1,$2,$3,$4,$5)`,
+		id, userID, typ, title, message); err != nil {
+		logger.Error("dbAddNotification failed", "error", err)
+	}
 }
 
 func dbGetNotifications(userID int64, unreadOnly bool, limit, offset int) []*Notification {
@@ -368,6 +382,9 @@ func dbGetNotifications(userID int64, unreadOnly bool, limit, offset int) []*Not
 		n := &Notification{}
 		rows.Scan(&n.ID, &n.UserID, &n.Type, &n.Title, &n.Message, &n.Read, &n.Created)
 		notifs = append(notifs, n)
+	}
+	if err := rows.Err(); err != nil {
+		logger.Error("dbGetNotifications rows iteration error", "error", err)
 	}
 	return notifs
 }
@@ -396,13 +413,17 @@ func dbMarkAllNotificationsRead(userID int64) int {
 // ── DB-backed Audit Log ───────────────────────────────────────────────────────
 
 func dbAddAudit(userID int64, username, action, details, ip string) {
-	db.Exec(`INSERT INTO betting.audit_log (user_id, username, action, details, ip) VALUES ($1,$2,$3,$4,$5)`,
-		userID, username, action, details, ip)
+	if _, err := db.Exec(`INSERT INTO betting.audit_log (user_id, username, action, details, ip) VALUES ($1,$2,$3,$4,$5)`,
+		userID, username, action, details, ip); err != nil {
+		logger.Error("dbAddAudit failed", "error", err)
+	}
 }
 
 func dbRecordLogin(userID int64, ip, userAgent string, success bool) {
-	db.Exec(`INSERT INTO auth.login_history (user_id, ip, user_agent, success) VALUES ($1,$2,$3,$4)`,
-		userID, ip, userAgent, success)
+	if _, err := db.Exec(`INSERT INTO auth.login_history (user_id, ip, user_agent, success) VALUES ($1,$2,$3,$4)`,
+		userID, ip, userAgent, success); err != nil {
+		logger.Error("dbRecordLogin failed", "error", err)
+	}
 }
 
 func dbGetLoginHistory(userID int64, limit int) []*LoginRecord {
@@ -419,6 +440,9 @@ func dbGetLoginHistory(userID int64, limit int) []*LoginRecord {
 		r := &LoginRecord{}
 		rows.Scan(&r.UserID, &r.IP, &r.UserAgent, &r.LoginAt, &r.Success)
 		records = append(records, r)
+	}
+	if err := rows.Err(); err != nil {
+		logger.Error("dbGetLoginHistory rows iteration error", "error", err)
 	}
 	return records
 }
@@ -440,6 +464,9 @@ func dbAllBets() []*Bet {
 			&b.MatchedStake, &b.UnmatchedStake, &b.Profit, &b.Status, &b.ClientRef, &b.CreatedAt)
 		bets = append(bets, b)
 	}
+	if err := rows.Err(); err != nil {
+		logger.Error("dbAllBets rows iteration error", "error", err)
+	}
 	return bets
 }
 
@@ -459,6 +486,9 @@ func dbGetAuditLog(limit int) []*AuditEntry {
 		rows.Scan(&e.ID, &e.UserID, &e.Username, &e.Action, &e.Details, &e.IP, &e.Timestamp)
 		entries = append(entries, e)
 	}
+	if err := rows.Err(); err != nil {
+		logger.Error("dbGetAuditLog rows iteration error", "error", err)
+	}
 	return entries
 }
 
@@ -475,6 +505,9 @@ func dbGetAuditLogForUser(userID int64, limit int) []*AuditEntry {
 		e := &AuditEntry{}
 		rows.Scan(&e.ID, &e.UserID, &e.Username, &e.Action, &e.Details, &e.IP, &e.Timestamp)
 		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		logger.Error("dbGetAuditLogForUser rows iteration error", "error", err)
 	}
 	return entries
 }

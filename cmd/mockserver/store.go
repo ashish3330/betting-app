@@ -68,7 +68,11 @@ type Store struct {
 	otpStore map[int64]*OTPEntry
 
 	// CSRF tokens: token -> userID
-	csrfTokens map[string]int64
+	csrfTokens     map[string]int64
+	csrfTokenTimes map[string]time.Time // token -> creation time
+
+	// Refresh token creation times for expiry tracking
+	refreshTokenTimes map[string]time.Time // token -> creation time
 
 	// Brute force protection: username -> login attempt tracking
 	loginAttempts map[string]*LoginAttempt
@@ -290,13 +294,27 @@ func (s *Store) AddNotification(userID int64, typ, title, message string) {
 	}
 }
 
-// NotifyHierarchy sends a notification to all parents up the chain (agent → master → admin → superadmin)
+// NotifyHierarchy sends a notification to all parents up the chain (agent → master → admin → superadmin).
+// Collects all target IDs under the read lock, then sends notifications outside the lock
+// to avoid holding the lock during potentially slow notification writes.
 func (s *Store) NotifyHierarchy(childID int64, typ, title, message string) {
+	// Phase 1: collect all parent IDs under the read lock
+	parentIDs := s.collectHierarchyIDs(childID)
+
+	// Phase 2: send notifications outside the lock
+	for _, pid := range parentIDs {
+		s.AddNotification(pid, typ, title, message)
+	}
+}
+
+// collectHierarchyIDs returns parent + superadmin user IDs for the given child, under a read lock.
+func (s *Store) collectHierarchyIDs(childID int64) []int64 {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	child := s.users[childID]
 	if child == nil {
-		s.mu.RUnlock()
-		return
+		return nil
 	}
 	// Walk up the parent chain
 	var parentIDs []int64
@@ -324,11 +342,7 @@ func (s *Store) NotifyHierarchy(childID int64, typ, title, message string) {
 			}
 		}
 	}
-	s.mu.RUnlock()
-
-	for _, pid := range parentIDs {
-		s.AddNotification(pid, typ, title, message)
-	}
+	return parentIDs
 }
 
 func (s *Store) GetNotifications(userID int64, unreadOnly bool, limit, offset int) []*Notification {
@@ -504,8 +518,10 @@ func NewStore() *Store {
 		blacklist:         make(map[string]time.Time),
 		refreshTokens:  make(map[string]int64),
 		otpStore:       make(map[int64]*OTPEntry),
-		csrfTokens:     make(map[string]int64),
-		loginAttempts:  make(map[string]*LoginAttempt),
+		csrfTokens:        make(map[string]int64),
+		csrfTokenTimes:    make(map[string]time.Time),
+		refreshTokenTimes: make(map[string]time.Time),
+		loginAttempts:     make(map[string]*LoginAttempt),
 		PrivateKey:     priv,
 		PublicKey:       pub,
 	}
@@ -544,7 +560,7 @@ func (s *Store) loadUsersFromDB() {
 }
 
 func (s *Store) startCleanupLoop() {
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(10 * time.Minute)
 	for range ticker.C {
 		now := time.Now()
 		s.mu.Lock()
@@ -568,6 +584,29 @@ func (s *Store) startCleanupLoop() {
 		// Prune login history to last 5000
 		if len(s.loginHistory) > 5000 {
 			s.loginHistory = s.loginHistory[len(s.loginHistory)-5000:]
+		}
+
+		// Purge expired CSRF tokens (older than 24 hours)
+		for token, created := range s.csrfTokenTimes {
+			if now.Sub(created) > 24*time.Hour {
+				delete(s.csrfTokens, token)
+				delete(s.csrfTokenTimes, token)
+			}
+		}
+
+		// Purge expired refresh tokens (older than 7 days)
+		for token, created := range s.refreshTokenTimes {
+			if now.Sub(created) > 7*24*time.Hour {
+				delete(s.refreshTokens, token)
+				delete(s.refreshTokenTimes, token)
+			}
+		}
+
+		// Purge stale login attempts older than 30 minutes
+		for username, attempt := range s.loginAttempts {
+			if now.Sub(attempt.LastTry) > 30*time.Minute {
+				delete(s.loginAttempts, username)
+			}
 		}
 
 		s.mu.Unlock()
@@ -647,7 +686,7 @@ func (s *Store) CreateUser(username, email, password, role string, parentID *int
 			return nil, fmt.Errorf("parent has insufficient balance (available: %.2f, requested: %.2f)", parent.Available(), creditLimit)
 		}
 		// Deduct from parent, give to child
-		parent.Balance -= creditLimit
+		parent.Balance = roundMoney(parent.Balance - creditLimit)
 		initialBalance = creditLimit
 	}
 
@@ -887,11 +926,11 @@ func (s *Store) SettleBet(userID int64, betID string, pnl, commission float64) {
 	if !ok {
 		return
 	}
-	u.Balance += pnl
+	u.Balance = roundMoney(u.Balance + pnl)
 	now := time.Now().Format(time.RFC3339)
 	s.addLedger(userID, pnl, "settlement", "settlement:"+betID, betID, now)
 	if commission > 0 {
-		u.Balance -= commission
+		u.Balance = roundMoney(u.Balance - commission)
 		s.addLedger(userID, -commission, "commission", "commission:"+betID, betID, now)
 	}
 }
@@ -1554,6 +1593,7 @@ func (s *Store) GenerateCSRF(userID int64) string {
 	token := randHex(16)
 	s.mu.Lock()
 	s.csrfTokens[token] = userID
+	s.csrfTokenTimes[token] = time.Now()
 	s.mu.Unlock()
 	return token
 }

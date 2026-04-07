@@ -52,6 +52,7 @@ export default function BetSlip({
 
   const placeSingleBet = useCallback(
     async (selection: BetSelection) => {
+      if (placingBets.has(selection.id)) return;
       if (!isLoggedIn) {
         setResults((prev) => {
           const next = new Map(prev);
@@ -142,17 +143,18 @@ export default function BetSlip({
         });
       }
     },
-    [isLoggedIn, refreshBalance, onRemoveSelection]
+    [isLoggedIn, placingBets, refreshBalance, onRemoveSelection]
   );
 
   const placeAllBets = useCallback(async () => {
+    if (placingBets.size > 0) return;
     const validSelections = selections.filter(
       (s) => s.stake > 0 && s.price > 1
     );
     for (const sel of validSelections) {
       await placeSingleBet(sel);
     }
-  }, [selections, placeSingleBet]);
+  }, [selections, placingBets, placeSingleBet]);
 
   const totalStake = selections.reduce((sum, s) => sum + (s.stake || 0), 0);
   const totalProfit = selections.reduce((sum, s) => {
