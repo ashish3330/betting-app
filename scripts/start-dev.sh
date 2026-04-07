@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start the mock server with all required env vars for local development
+# Start the Lotus Exchange server with all required env vars for local development
 # Usage: ./scripts/start-dev.sh
 
 set -e
@@ -7,9 +7,9 @@ set -e
 cd "$(dirname "$0")/.."
 
 # Build if needed
-if [ ! -f bin/mockserver ] || [ cmd/mockserver/main.go -nt bin/mockserver ]; then
-  echo "Building mockserver..."
-  go build -o bin/mockserver ./cmd/mockserver
+if [ ! -f bin/server ] || [ cmd/server/main.go -nt bin/server ]; then
+  echo "Building server..."
+  go build -o bin/server ./cmd/server
 fi
 
 # Persistent signing key — tokens survive restarts
@@ -24,4 +24,4 @@ export PORT="${PORT:-8080}"
 echo "Starting Lotus Exchange backend on :${PORT}"
 echo "  DB: connected"
 echo "  Keys: persistent"
-exec ./bin/mockserver
+exec ./bin/server

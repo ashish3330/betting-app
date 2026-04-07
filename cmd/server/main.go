@@ -105,7 +105,9 @@ func main() {
 
 	// ── Health ──────────────────────────────────────────────────
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]string{"status": "ok", "mode": "mock", "version": "2.0.0-mock", "odds_mode": oddsMode})
+		dbStatus := "disconnected"
+		if useDB() { dbStatus = "connected" }
+		writeJSON(w, 200, map[string]string{"status": "ok", "database": dbStatus, "version": "2.0.0", "odds_mode": oddsMode})
 	})
 
 	// ── Auth ────────────────────────────────────────────────────
@@ -340,12 +342,12 @@ func main() {
 	logger.Info("3XBet Exchange starting", "port", port, "storage", storageMode, "odds", oddsMode, "odds_api_key", oddsKeyStatus)
 	fmt.Printf("\n")
 	fmt.Printf("╔══════════════════════════════════════════════════════╗\n")
-	fmt.Printf("║   Lotus Exchange Mock Server (No DB/Redis needed)   ║\n")
+	fmt.Printf("║          Lotus Exchange Server v2.0.0               ║\n")
 	fmt.Printf("╠══════════════════════════════════════════════════════╣\n")
 	fmt.Printf("║  API:       http://localhost:%s                   ║\n", port)
 	fmt.Printf("║  Health:    http://localhost:%s/health            ║\n", port)
+	fmt.Printf("║  Database:  %-40s ║\n", storageMode)
 	fmt.Printf("║  Odds:      %-40s ║\n", oddsMode)
-	fmt.Printf("║  ODDS_API_KEY: %-37s ║\n", oddsKeyStatus)
 	fmt.Printf("║                                                      ║\n")
 	fmt.Printf("║  Register users via POST /api/v1/auth/register       ║\n")
 	fmt.Printf("║  Then login, transfer credit, place bets, settle.    ║\n")
@@ -461,7 +463,7 @@ func generateToken(u *User, ttl time.Duration) string {
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			Issuer:    "lotus-exchange-mock",
+			Issuer:    "lotus-exchange",
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
