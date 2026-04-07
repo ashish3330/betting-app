@@ -391,8 +391,8 @@ func dbGetLedger(userID int64, limit, offset int) []*LedgerEntry {
 // ── DB-backed Notifications ───────────────────────────────────────────────────
 
 func dbAddNotification(id string, userID int64, typ, title, message string) {
-	if _, err := db.Exec(`INSERT INTO betting.notifications (id, user_id, type, title, message) VALUES ($1,$2,$3,$4,$5)`,
-		id, userID, typ, title, message); err != nil {
+	if _, err := db.Exec(`INSERT INTO betting.notifications (user_id, type, title, message) VALUES ($1,$2,$3,$4)`,
+		userID, typ, title, message); err != nil {
 		logger.Error("dbAddNotification failed", "error", err)
 	}
 }
