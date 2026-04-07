@@ -66,6 +66,9 @@ export default function MarketDetailPage() {
     timestamp: number;
   }>>([]);
 
+  // Bets fetched from API for this market
+  const [marketBets, setMarketBets] = useState<{id:string, side:string, price:number, stake:number, status:string, created_at:string, selection_name?:string, market_name?:string}[]>([]);
+
   // All markets for this event (match_odds, bookmaker, fancy, etc.)
   const [eventMarkets, setEventMarkets] = useState<MarketInfo[]>([]);
   const [activeMarketId, setActiveMarketId] = useState<string>(marketId);
@@ -246,6 +249,19 @@ export default function MarketDetailPage() {
     return () => clearInterval(interval);
   }, [fetchPositions]);
 
+  // ---------- Fetch Market Bets from API ----------
+  useEffect(() => {
+    async function loadMarketBets() {
+      try {
+        const data = await api.request<{bets: typeof marketBets}>(`/api/v1/bets?market_id=${activeMarketId}&limit=20`, { auth: true });
+        setMarketBets(data.bets || []);
+      } catch {}
+    }
+    if (activeMarketId) loadMarketBets();
+    const interval = setInterval(loadMarketBets, 10000);
+    return () => clearInterval(interval);
+  }, [activeMarketId]);
+
   // Derived market type (needed before handlers)
   const currentMarketType = eventMarkets.find(m => m.id === activeMarketId)?.type || "match_odds";
   const isFancy = currentMarketType === "fancy" || currentMarketType === "session";
@@ -374,6 +390,22 @@ export default function MarketDetailPage() {
             </h1>
           </div>
 
+          {/* --- Market Info Bar --- */}
+          <div className="bg-surface rounded-lg border border-gray-800/60 px-3 py-1.5 flex items-center gap-3 sm:gap-4 flex-wrap">
+            <span className="text-[10px] text-gray-500">Min Bet: <span className="text-gray-400 font-medium">{'\u20B9'}100</span></span>
+            <span className="text-[10px] text-gray-500">Max Bet: <span className="text-gray-400 font-medium">{'\u20B9'}5,00,000</span></span>
+            <span className="text-[10px] text-gray-500">Max Market: <span className="text-gray-400 font-medium">{'\u20B9'}25,00,000</span></span>
+            <span className={`text-[10px] font-semibold px-2 py-0.5 rounded ml-auto ${
+              currentMarketType === 'bookmaker' ? 'bg-yellow-500/15 text-yellow-400' :
+              currentMarketType === 'fancy' || currentMarketType === 'session' ? 'bg-purple-500/15 text-purple-400' :
+              'bg-blue-500/15 text-blue-400'
+            }`}>
+              {currentMarketType === 'bookmaker' ? 'Bookmaker' :
+               currentMarketType === 'fancy' || currentMarketType === 'session' ? 'Fancy' :
+               'Match Odds'}
+            </span>
+          </div>
+
           {/* --- Live Score --- */}
           {(liveScore || odds?.score) && <LiveScore score={liveScore || odds!.score!} />}
 
@@ -454,6 +486,7 @@ export default function MarketDetailPage() {
                     selectedSide={inlineSide}
                     marketType={currentMarketType}
                     pnl={positions[String(runner.selection_id)]}
+                    allPositions={positions}
                     activeInlineBet={isInlineSelected ? activeInlineBet! : undefined}
                     placedBetResult={isInlineSelected ? placedBetResult : undefined}
                     onDeselect={handleDeselectInline}
@@ -488,16 +521,13 @@ export default function MarketDetailPage() {
 
       {/* ===== Desktop My Bets Panel (Right) ===== */}
       <div className="hidden md:block w-[320px] flex-shrink-0 border-l border-gray-800/60">
-        <div className="sticky top-14 h-[calc(100vh-56px)] overflow-y-auto p-3">
-          <div className="bg-surface rounded-lg border border-gray-800/60 overflow-hidden">
-            <div className="px-3 py-2.5 border-b border-gray-800/40">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">My Bets</h3>
-            </div>
-            {recentBets.length === 0 ? (
-              <div className="px-3 py-8 text-center text-gray-500 text-xs">
-                No bets placed yet. Click on odds to place a bet inline.
+        <div className="sticky top-14 h-[calc(100vh-56px)] overflow-y-auto p-3 space-y-3">
+          {/* Session Bets (placed this session) */}
+          {recentBets.length > 0 && (
+            <div className="bg-surface rounded-lg border border-gray-800/60 overflow-hidden">
+              <div className="px-3 py-2.5 border-b border-gray-800/40">
+                <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Session Bets</h3>
               </div>
-            ) : (
               <div className="divide-y divide-gray-800/30">
                 {recentBets.map((bet) => (
                   <div key={bet.id} className="px-3 py-2">
@@ -520,6 +550,48 @@ export default function MarketDetailPage() {
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* Market Bets (from API) */}
+          <div className="bg-surface rounded-lg border border-gray-800/60 overflow-hidden">
+            <div className="px-3 py-2.5 border-b border-gray-800/40">
+              <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider">My Bets on Market</h3>
+            </div>
+            {marketBets.length === 0 && recentBets.length === 0 ? (
+              <div className="px-3 py-8 text-center text-gray-500 text-xs">
+                No bets placed yet. Click on odds to place a bet inline.
+              </div>
+            ) : marketBets.length === 0 ? (
+              <div className="px-3 py-4 text-center text-gray-600 text-[10px]">
+                No bet history loaded for this market.
+              </div>
+            ) : (
+              <div className="divide-y divide-gray-800/30">
+                {marketBets.map((bet) => (
+                  <div key={bet.id} className="px-3 py-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[12px] font-medium text-white truncate">{bet.selection_name || 'Selection'}</span>
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                        bet.status === 'matched' ? 'bg-green-500/20 text-green-400' :
+                        bet.status === 'pending' ? 'bg-yellow-500/20 text-yellow-400' :
+                        'bg-red-500/20 text-red-400'
+                      }`}>{bet.status.toUpperCase()}</span>
+                    </div>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                        bet.side === 'back' ? 'bg-[#72BBEF]/20 text-[#72BBEF]' : 'bg-[#FAA9BA]/20 text-[#FAA9BA]'
+                      }`}>{bet.side.toUpperCase()}</span>
+                      <span className="text-[11px] text-gray-400">@ {bet.price.toFixed(2)}</span>
+                      <span className="text-[11px] text-gray-300 font-medium">{'\u20B9'}{bet.stake.toLocaleString('en-IN')}</span>
+                      <span className="text-[10px] text-gray-600 ml-auto">
+                        {new Date(bet.created_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </div>
+                    <div className="text-[9px] text-gray-600 mt-0.5">ID: {bet.id}</div>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
         </div>
@@ -537,6 +609,7 @@ function RunnerRow({
   selectedSide,
   marketType = "match_odds",
   pnl,
+  allPositions,
   activeInlineBet,
   placedBetResult,
   onDeselect,
@@ -549,6 +622,7 @@ function RunnerRow({
   selectedSide?: "back" | "lay";
   marketType?: string;
   pnl?: number;
+  allPositions?: Record<string, number>;
   activeInlineBet?: ActiveInlineBet;
   placedBetResult?: PlacedBetResult | null;
   onDeselect?: () => void;
@@ -680,14 +754,17 @@ function RunnerRow({
       });
 
       const status = "matched" as const;
+      const betId = result.bet_id || '';
+      const matchedAmt = result.matched_stake ?? stakeNum;
       refreshBalance?.();
       addToast({
         type: "success",
         title: `Bet placed: ${runner.name} @ ${inlinePrice.toFixed(2)} for \u20B9${stakeNum.toLocaleString("en-IN")}`,
+        message: betId ? `Bet ID: ${betId} | Matched: \u20B9${Number(matchedAmt).toLocaleString("en-IN")}` : undefined,
       });
 
       onBetPlaced?.(
-        { runnerId: activeInlineBet.runnerId, status, message: `Bet ${status}` },
+        { runnerId: activeInlineBet.runnerId, status, message: betId ? `Bet ID: ${betId} | Matched: \u20B9${Number(matchedAmt).toLocaleString("en-IN")}` : `Bet ${status}` },
         runner.name,
         activeInlineBet.side,
         inlinePrice,
@@ -722,12 +799,14 @@ function RunnerRow({
           </div>
         )}
 
-        {/* Runner Name */}
+        {/* Runner Name + P&L */}
         <div className="flex-1 min-w-0 px-2 sm:px-3 py-1.5">
           <div className="flex items-center gap-2">
             <span className="text-[12px] sm:text-[13px] font-semibold text-white block truncate">{runner.name}</span>
             {pnl != null && pnl !== 0 && (
-              <span className={`text-[10px] sm:text-[11px] font-bold tabular-nums flex-shrink-0 ${pnl > 0 ? "text-green-400" : "text-red-400"}`}>
+              <span className={`text-[11px] sm:text-[12px] font-bold tabular-nums flex-shrink-0 px-1.5 py-0.5 rounded ${
+                pnl > 0 ? "text-green-400 bg-green-500/10" : "text-red-400 bg-red-500/10"
+              }`}>
                 {pnl > 0 ? "+" : ""}{formatPnl(pnl)}
               </span>
             )}
@@ -737,6 +816,19 @@ function RunnerRow({
               </span>
             )}
           </div>
+          {/* Book P&L row — show positions across all runners when user has any */}
+          {allPositions && Object.values(allPositions).some(v => v !== 0) && (
+            <div className="flex items-center gap-2 mt-0.5">
+              <span className="text-[9px] text-gray-600 uppercase">Book P&L:</span>
+              {pnl != null && pnl !== 0 ? (
+                <span className={`text-[10px] font-bold tabular-nums ${pnl > 0 ? "text-green-400" : "text-red-400"}`}>
+                  {pnl > 0 ? "+" : ""}{'\u20B9'}{Math.abs(pnl).toLocaleString('en-IN')}
+                </span>
+              ) : (
+                <span className="text-[10px] text-gray-600 tabular-nums">{'\u20B9'}0</span>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Odds Grid -- layout changes by market type */}

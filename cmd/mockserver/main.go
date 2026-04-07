@@ -1281,6 +1281,7 @@ func handleUserBets(w http.ResponseWriter, r *http.Request) {
 
 	// Filter by status if provided
 	statusFilter := r.URL.Query().Get("status")
+	marketFilter := r.URL.Query().Get("market_id")
 
 	// "open" is a virtual filter meaning all active (non-settled) bets
 	openStatuses := map[string]bool{"unmatched": true, "partial": true, "matched": true}
@@ -1301,6 +1302,9 @@ func handleUserBets(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 		} else if statusFilter != "" && b.Status != statusFilter {
+			continue
+		}
+		if marketFilter != "" && b.MarketID != marketFilter {
 			continue
 		}
 		eb := enrichedBet{Bet: b, ProfitLoss: b.Profit}

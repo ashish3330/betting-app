@@ -23,6 +23,46 @@ interface Bet {
 
 const BETS_PER_PAGE = 10;
 
+function truncateId(id: string): string {
+  return id.length > 8 ? id.slice(-8) : id;
+}
+
+function getStatusBadge(status: string, profitLoss?: number) {
+  const s = status.toLowerCase();
+  if (s === "matched" || s === "open" || s === "partially_matched") {
+    return { label: "Matched", className: "bg-profit/20 text-profit" };
+  }
+  if (s === "settled" || s === "won") {
+    // Determine won/lost from P&L if available
+    if (profitLoss !== undefined && profitLoss !== null) {
+      return profitLoss >= 0
+        ? { label: "Settled (Won)", className: "bg-profit/20 text-profit" }
+        : { label: "Settled (Lost)", className: "bg-loss/20 text-loss" };
+    }
+    return { label: "Settled (Won)", className: "bg-profit/20 text-profit" };
+  }
+  if (s === "lost") {
+    return { label: "Settled (Lost)", className: "bg-loss/20 text-loss" };
+  }
+  if (s === "void" || s === "voided" || s === "cancelled") {
+    return { label: "Void", className: "bg-gray-500/20 text-gray-400" };
+  }
+  return { label: status.toUpperCase(), className: "bg-amber-500/20 text-amber-400" };
+}
+
+function calcPotentialProfit(bet: Bet): number {
+  if (bet.side === "back") {
+    return bet.stake * (bet.price - 1);
+  }
+  // For lay bets, potential profit is the backer's stake (which equals our stake)
+  return bet.stake;
+}
+
+function calcLiability(bet: Bet): number | null {
+  if (bet.side !== "lay") return null;
+  return bet.stake * (bet.price - 1);
+}
+
 export default function BetsPage() {
   const { isLoggedIn, isLoading: authLoading } = useAuth();
   const router = useRouter();
@@ -158,125 +198,148 @@ export default function BetsPage() {
       ) : paginatedBets.length > 0 ? (
         <>
           <div className="space-y-2">
-            {paginatedBets.map((bet) => (
-              <div
-                key={bet.id}
-                className="bg-surface rounded-xl border border-gray-800 p-3"
-              >
-                <div className="flex items-start justify-between">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span
-                        className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                          bet.side === "back"
-                            ? "bg-back/20 text-back"
-                            : "bg-lay/20 text-lay"
-                        }`}
-                      >
-                        {bet.side.toUpperCase()}
-                      </span>
-                      <span
-                        className={`text-[10px] px-1.5 py-0.5 rounded ${
-                          bet.status === "settled" || bet.status === "won"
-                            ? "bg-profit/20 text-profit"
-                            : bet.status === "lost"
-                            ? "bg-loss/20 text-loss"
-                            : "bg-amber-500/20 text-amber-400"
-                        }`}
-                      >
-                        {bet.status.toUpperCase()}
-                      </span>
-                    </div>
-                    <div className="text-sm text-white font-medium truncate">
-                      {bet.selection_name || bet.market_name || bet.market_id}
-                    </div>
-                    <div className="text-[10px] text-gray-500 mt-0.5">
-                      {new Date(bet.created_at).toLocaleString("en-IN", {
-                        day: "numeric",
-                        month: "short",
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </div>
-                  </div>
-                  <div className="text-right ml-3">
-                    <div className="text-xs text-gray-400">
-                      Odds:{" "}
-                      <span className="font-mono text-white">
-                        {bet.price.toFixed(2)}
-                      </span>
-                    </div>
-                    <div className="text-xs text-gray-400">
-                      Stake:{" "}
-                      <span className="font-mono text-white">
-                        {"\u20B9"}
-                        {bet.stake.toLocaleString("en-IN")}
-                      </span>
-                    </div>
-                    {bet.profit_loss !== undefined &&
-                      bet.profit_loss !== null && (
-                        <div
-                          className={`text-sm font-bold font-mono mt-1 ${
-                            bet.profit_loss >= 0 ? "text-profit" : "text-loss"
+            {paginatedBets.map((bet) => {
+              const statusBadge = getStatusBadge(bet.status, bet.profit_loss);
+              const potentialProfit = calcPotentialProfit(bet);
+              const liability = calcLiability(bet);
+
+              return (
+                <div
+                  key={bet.id}
+                  className="bg-surface rounded-xl border border-gray-800 p-3"
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        <span
+                          className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                            bet.side === "back"
+                              ? "bg-back/20 text-back"
+                              : "bg-lay/20 text-lay"
                           }`}
                         >
-                          {bet.profit_loss >= 0 ? "+" : ""}
-                          {"\u20B9"}
-                          {Math.abs(bet.profit_loss).toLocaleString("en-IN", {
-                            minimumFractionDigits: 2,
-                          })}
-                        </div>
-                      )}
-                  </div>
-                </div>
-
-                {/* Cash Out Button */}
-                {cashoutOffers[bet.id] &&
-                  (bet.status === "matched" ||
-                    bet.status === "open" ||
-                    bet.status === "partially_matched") && (
-                    <div className="mt-2 pt-2 border-t border-gray-800/50">
-                      {confirmCashout === bet.id ? (
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs text-gray-400">
-                            Confirm cash out for{" "}
-                            <span className="text-profit font-bold">
-                              {"\u20B9"}
-                              {cashoutOffers[bet.id].toLocaleString("en-IN", {
-                                minimumFractionDigits: 2,
-                              })}
-                            </span>
-                            ?
-                          </span>
-                          <button
-                            onClick={() => handleCashout(bet.id)}
-                            disabled={cashoutLoading[bet.id]}
-                            className="text-[11px] bg-profit/20 text-profit hover:bg-profit/30 px-3 py-1 rounded-md font-medium transition disabled:opacity-50"
-                          >
-                            {cashoutLoading[bet.id] ? "Processing..." : "Yes"}
-                          </button>
-                          <button
-                            onClick={() => setConfirmCashout(null)}
-                            className="text-[11px] text-gray-500 hover:text-white px-2 py-1 rounded-md transition"
-                          >
-                            No
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          onClick={() => setConfirmCashout(bet.id)}
-                          className="w-full text-xs bg-profit/10 text-profit hover:bg-profit/20 border border-profit/30 px-3 py-1.5 rounded-lg font-bold transition"
+                          {bet.side.toUpperCase()}
+                        </span>
+                        <span
+                          className={`text-[10px] px-1.5 py-0.5 rounded ${statusBadge.className}`}
                         >
-                          Cash Out {"\u20B9"}
-                          {cashoutOffers[bet.id].toLocaleString("en-IN", {
+                          {statusBadge.label}
+                        </span>
+                        <span className="text-[9px] text-gray-600 font-mono">
+                          #{truncateId(bet.id)}
+                        </span>
+                      </div>
+                      <div className="text-sm text-white font-medium truncate">
+                        {bet.selection_name || bet.market_name || bet.market_id}
+                      </div>
+                      <div className="text-[10px] text-gray-500 mt-0.5">
+                        {new Date(bet.created_at).toLocaleString("en-IN", {
+                          day: "numeric",
+                          month: "short",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </div>
+                    </div>
+                    <div className="text-right ml-3 space-y-0.5">
+                      <div className="text-xs text-gray-400">
+                        Odds:{" "}
+                        <span className="font-mono text-white">
+                          {bet.price.toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="text-xs text-gray-400">
+                        Stake:{" "}
+                        <span className="font-mono text-white">
+                          {"\u20B9"}
+                          {bet.stake.toLocaleString("en-IN")}
+                        </span>
+                      </div>
+                      <div className="text-xs text-gray-400">
+                        Pot. Profit:{" "}
+                        <span className="font-mono text-profit">
+                          {"\u20B9"}
+                          {potentialProfit.toLocaleString("en-IN", {
                             minimumFractionDigits: 2,
                           })}
-                        </button>
+                        </span>
+                      </div>
+                      {liability !== null && (
+                        <div className="text-xs text-gray-400">
+                          Liability:{" "}
+                          <span className="font-mono text-loss">
+                            {"\u20B9"}
+                            {liability.toLocaleString("en-IN", {
+                              minimumFractionDigits: 2,
+                            })}
+                          </span>
+                        </div>
                       )}
+                      {bet.profit_loss !== undefined &&
+                        bet.profit_loss !== null && (
+                          <div
+                            className={`text-sm font-bold font-mono mt-1 ${
+                              bet.profit_loss >= 0 ? "text-profit" : "text-loss"
+                            }`}
+                          >
+                            P&L: {bet.profit_loss >= 0 ? "+" : ""}
+                            {"\u20B9"}
+                            {Math.abs(bet.profit_loss).toLocaleString("en-IN", {
+                              minimumFractionDigits: 2,
+                            })}
+                          </div>
+                        )}
                     </div>
-                  )}
-              </div>
-            ))}
+                  </div>
+
+                  {/* Cash Out Button */}
+                  {cashoutOffers[bet.id] &&
+                    (bet.status === "matched" ||
+                      bet.status === "open" ||
+                      bet.status === "partially_matched") && (
+                      <div className="mt-2 pt-2 border-t border-gray-800/50">
+                        {confirmCashout === bet.id ? (
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-gray-400">
+                              Confirm cash out for{" "}
+                              <span className="text-profit font-bold">
+                                {"\u20B9"}
+                                {cashoutOffers[bet.id].toLocaleString("en-IN", {
+                                  minimumFractionDigits: 2,
+                                })}
+                              </span>
+                              ?
+                            </span>
+                            <button
+                              onClick={() => handleCashout(bet.id)}
+                              disabled={cashoutLoading[bet.id]}
+                              className="text-[11px] bg-profit/20 text-profit hover:bg-profit/30 px-3 py-1 rounded-md font-medium transition disabled:opacity-50"
+                            >
+                              {cashoutLoading[bet.id] ? "Processing..." : "Yes"}
+                            </button>
+                            <button
+                              onClick={() => setConfirmCashout(null)}
+                              className="text-[11px] text-gray-500 hover:text-white px-2 py-1 rounded-md transition"
+                            >
+                              No
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setConfirmCashout(bet.id)}
+                            className="w-full text-xs bg-profit/10 text-profit hover:bg-profit/20 border border-profit/30 px-3 py-1.5 rounded-lg font-bold transition"
+                          >
+                            Cash Out {"\u20B9"}
+                            {cashoutOffers[bet.id].toLocaleString("en-IN", {
+                              minimumFractionDigits: 2,
+                            })}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                </div>
+              );
+            })}
           </div>
 
           <Pagination
