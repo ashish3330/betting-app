@@ -299,16 +299,18 @@ export default function MarketDetailPage() {
 
   const handleBetPlaced = (result: PlacedBetResult, runnerName: string, side: "back" | "lay", price: number, stake: number) => {
     setPlacedBetResult(result);
-    // Add to recent bets
-    setRecentBets((prev) => [{
-      id: `${Date.now()}`,
-      runnerName,
-      side,
-      price,
-      stake,
-      status: result.status,
-      timestamp: Date.now(),
-    }, ...prev].slice(0, 20)); // keep last 20
+    // Add to recent bets — only successful placements, not errors
+    if (result.status === "matched") {
+      setRecentBets((prev) => [{
+        id: `${Date.now()}`,
+        runnerName,
+        side,
+        price,
+        stake,
+        status: result.status,
+        timestamp: Date.now(),
+      }, ...prev].slice(0, 20));
+    }
 
     // Auto-close inline slip after 3 seconds
     setTimeout(() => {
