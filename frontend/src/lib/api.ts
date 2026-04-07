@@ -117,7 +117,12 @@ class ApiClient {
         }
         return retryData;
       } else {
-        this.logout();
+        // Clear tokens but don't redirect — let components decide
+        if (typeof window !== "undefined") {
+          localStorage.removeItem("access_token");
+          localStorage.removeItem("refresh_token");
+          localStorage.removeItem("user");
+        }
         throw new ApiError(401, "Session expired. Please login again.");
       }
     }

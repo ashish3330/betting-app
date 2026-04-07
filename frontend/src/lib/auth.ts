@@ -58,8 +58,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const bal = await api.getBalance();
       setBalance(bal);
-    } catch {
-      // Silently fail
+    } catch (err) {
+      // If session expired (tokens cleared by api.ts), reset auth state
+      if (!decryptLocalStorage("access_token")) {
+        setUser(null);
+        setBalance(null);
+      }
     }
   }, []);
 
