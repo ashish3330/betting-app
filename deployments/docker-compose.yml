@@ -1,0 +1,308 @@
+version: '3.9'
+
+services:
+  # ---------------------------------------------------------------
+  # PostgreSQL 16 with ltree extension and migration bootstrap
+  # ---------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bettingdb}
+      POSTGRES_USER: ${POSTGRES_USER:-lotus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-L0tus!Xchg2026}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lotus} -d ${POSTGRES_DB:-bettingdb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+          cpus: '1.0'
+        reservations:
+          memory: 256M
+    networks:
+      - backend
+    shm_size: '256mb'
+
+  # ---------------------------------------------------------------
+  # Redis 7 -- LRU eviction, AOF persistence
+  # ---------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: >
+      redis-server
+        --maxmemory 512mb
+        --maxmemory-policy allkeys-lru
+        --appendonly yes
+        --requirepass ${REDIS_PASSWORD:-R3dis!Lotus2026}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-R3dis!Lotus2026}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------
+  # NATS with JetStream
+  # ---------------------------------------------------------------
+  nats:
+    image: nats:2-alpine
+    restart: unless-stopped
+    ports:
+      - "${NATS_PORT:-4222}:4222"
+      - "${NATS_MONITOR_PORT:-8222}:8222"
+    command: >
+      --jetstream
+        --store_dir /data
+        --http_port 8222
+        --max_payload 1MB
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------
+  # ClickHouse for analytics
+  # ---------------------------------------------------------------
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    restart: unless-stopped
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-lotus_analytics}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-lotus}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-Cl1ck!Lotus2026}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------
+  # Gateway -- main Go API service
+  # ---------------------------------------------------------------
+  gateway:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+      - "${WS_PORT:-8081}:8081"
+    env_file:
+      - ../.env
+    environment:
+      HTTP_PORT: "8080"
+      WS_PORT: "8081"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,auth,public"
+      REDIS_URL: "redis:6379"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
+      NATS_URL: "nats://nats:4222"
+      CLICKHOUSE_URL: "tcp://clickhouse:9000"
+      ENVIRONMENT: "${ENVIRONMENT:-production}"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+        reservations:
+          memory: 128M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    networks:
+      - backend
+      - frontend
+
+  # ---------------------------------------------------------------
+  # Frontend -- Next.js application
+  # ---------------------------------------------------------------
+  frontend:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile.frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: "http://gateway:8080"
+      NEXT_PUBLIC_WS_URL: "ws://gateway:8081"
+      NODE_ENV: production
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+    depends_on:
+      gateway:
+        condition: service_healthy
+    networks:
+      - frontend
+
+  # ---------------------------------------------------------------
+  # Prometheus -- metrics collection
+  # ---------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    restart: unless-stopped
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ../configs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------
+  # Grafana -- dashboards & alerting
+  # ---------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.0.0
+    restart: unless-stopped
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-Gr4fana!Lotus2026}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    networks:
+      - backend
+
+# ---------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------
+networks:
+  backend:
+    driver: bridge
+    name: lotus_backend
+  frontend:
+    driver: bridge
+    name: lotus_frontend
+
+# ---------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------
+volumes:
+  postgres_data:
+    name: lotus_postgres_data
+  redis_data:
+    name: lotus_redis_data
+  nats_data:
+    name: lotus_nats_data
+  clickhouse_data:
+    name: lotus_clickhouse_data
+  clickhouse_logs:
+    name: lotus_clickhouse_logs
+  prometheus_data:
+    name: lotus_prometheus_data
+  grafana_data:
+    name: lotus_grafana_data

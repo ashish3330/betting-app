@@ -1,0 +1,768 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Fonts loaded via next/font in layout.tsx for optimal performance */
+
+:root {
+  --back: #72bbef;
+  --lay: #faa9ba;
+  --lotus: #0D9488;
+  --gold: #0D9488;
+  --gold-dim: rgba(255, 215, 0, 0.15);
+  --bg-primary: #0a0c14;
+  --bg-surface: #1a1d26;
+  --bg-surface-light: #252836;
+  --text-primary: #ffffff;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+  --border-color: rgba(55, 65, 81, 0.6);
+  --nav-bg: #0f0f23;
+  --dropdown-bg: #1a1d26;
+}
+
+[data-theme="light"] {
+  --bg-primary: #f0f2f5;
+  --bg-surface: #ffffff;
+  --bg-surface-light: #f5f5f5;
+  --text-primary: #1a1a2e;
+  --text-secondary: #4a4a6a;
+  --text-muted: #8888a0;
+  --border-color: rgba(200, 200, 220, 0.6);
+  --nav-bg: #ffffff;
+  --dropdown-bg: #ffffff;
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: "Inter", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+[data-theme="light"] body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+[data-theme="light"] nav {
+  background-color: var(--nav-bg) !important;
+  border-bottom-color: var(--border-color) !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+/* ── Light mode: Override Tailwind text/bg colors ── */
+/* text-white → dark text, BUT NOT inside dark sections or gradient buttons */
+[data-theme="light"] .text-white:not(.text-transparent):not(.keep-white) { color: #1a1a2e !important; }
+/* Keep white text inside dark sections (hero, gradient cards, login bg) */
+[data-theme="light"] .dark-section .text-white { color: #ffffff !important; }
+[data-theme="light"] .dark-section .text-gray-300 { color: #d1d5db !important; }
+[data-theme="light"] .dark-section .text-gray-400 { color: #9ca3af !important; }
+[data-theme="light"] .dark-section .text-gray-200 { color: #e5e7eb !important; }
+[data-theme="light"] .dark-section .text-gray-500 { color: #6b7280 !important; }
+/* Gradient cards (casino games, etc.) always keep white text */
+[data-theme="light"] [class*="bg-gradient-to"] .text-white { color: #ffffff !important; }
+/* Buttons with colored backgrounds keep white text */
+[data-theme="light"] .bg-lotus .text-white,
+[data-theme="light"] .bg-lotus-dark .text-white,
+[data-theme="light"] .bg-green-500 .text-white,
+[data-theme="light"] .bg-red-500 .text-white,
+[data-theme="light"] .bg-lotus.text-white,
+[data-theme="light"] .bg-lotus-dark.text-white,
+[data-theme="light"] button[class*="bg-lotus"],
+[data-theme="light"] a[class*="bg-lotus"] { color: #ffffff !important; }
+[data-theme="light"] button[class*="bg-gradient"] { color: #ffffff !important; }
+[data-theme="light"] a[class*="bg-gradient"] { color: #ffffff !important; }
+/* Don't override text-white inside elements with dark backgrounds */
+[data-theme="light"] [class*="from-lotus"] .text-white,
+[data-theme="light"] [class*="from-green"] .text-white,
+[data-theme="light"] [class*="from-red"] .text-white,
+[data-theme="light"] [class*="from-blue"] .text-white,
+[data-theme="light"] [class*="from-amber"] .text-white,
+[data-theme="light"] [class*="from-purple"] .text-white,
+[data-theme="light"] [class*="from-emerald"] .text-white,
+[data-theme="light"] [class*="from-rose"] .text-white,
+[data-theme="light"] [class*="from-violet"] .text-white,
+[data-theme="light"] [class*="from-yellow"] .text-white,
+[data-theme="light"] [class*="from-cyan"] .text-white,
+[data-theme="light"] .bg-profit .text-white,
+[data-theme="light"] .bg-loss .text-white { color: #ffffff !important; }
+/* hover:text-white → dark text in light mode */
+[data-theme="light"] .hover\:text-white:hover { color: #1a1a2e !important; }
+/* Gradient text must stay transparent */
+[data-theme="light"] .text-transparent { color: transparent !important; }
+/* Fix gradient-to-b from-white: make it from-dark in light mode */
+[data-theme="light"] .from-white { --tw-gradient-from: #1a1a2e !important; }
+/* text-gray-200/300/400/500/600 → darker for readability */
+[data-theme="light"] .text-gray-200 { color: #3a3a5a !important; }
+[data-theme="light"] .text-gray-300 { color: #4a4a6a !important; }
+[data-theme="light"] .text-gray-400 { color: #6b6b8a !important; }
+[data-theme="light"] .text-gray-500 { color: #8888a0 !important; }
+[data-theme="light"] .text-gray-600 { color: #5a5a7a !important; }
+/* hover:text-gray variants */
+[data-theme="light"] .hover\:text-gray-200:hover { color: #3a3a5a !important; }
+[data-theme="light"] .hover\:text-gray-300:hover { color: #4a4a6a !important; }
+/* group-hover:text-gray variants */
+[data-theme="light"] .group:hover .group-hover\:text-white { color: #1a1a2e !important; }
+[data-theme="light"] .group:hover .group-hover\:text-gray-300 { color: #4a4a6a !important; }
+[data-theme="light"] .group:hover .group-hover\:text-gray-400 { color: #6b6b8a !important; }
+/* Backgrounds — hardcoded dark bg overrides for light mode */
+[data-theme="light"] .bg-surface { background-color: #ffffff !important; }
+[data-theme="light"] .bg-surface-light { background-color: #f5f5f8 !important; }
+[data-theme="light"] .bg-surface-lighter { background-color: #e8e8f0 !important; }
+[data-theme="light"] .hover\:bg-surface-lighter:hover { background-color: #dcdce8 !important; }
+/* bg-[#0f0f23] — nav, betslip header, inputs */
+[data-theme="light"] .bg-\[\#0f0f23\] { background-color: #ffffff !important; }
+/* bg-[#0d0d1a] — sidebar, bottom nav, age gate, casino play, panel */
+[data-theme="light"] .bg-\[\#0d0d1a\] { background-color: #fafafa !important; }
+/* bg-[#0a0c14] — page backgrounds, body, panel, login/otp */
+[data-theme="light"] .bg-\[\#0a0c14\] { background-color: #f0f2f5 !important; }
+/* bg-[#1a1d26] — betslip, orderbook, markettabs, dropdown */
+[data-theme="light"] .bg-\[\#1a1d26\] { background-color: #ffffff !important; }
+/* bg-[#0F1118] — mobile betslip bottom sheet */
+[data-theme="light"] .bg-\[\#0F1118\] { background-color: #f5f5f8 !important; }
+/* bg-[#080812] — footer */
+[data-theme="light"] .bg-\[\#080812\] { background-color: #fafafa !important; }
+/* bg-[#1a1a2e] — sidebar alt */
+[data-theme="light"] .bg-\[\#1a1a2e\] { background-color: #ffffff !important; }
+/* bg-[#0d0d1f] — bottom ticker */
+[data-theme="light"] .bg-\[\#0d0d1f\] { background-color: #fafafa !important; }
+/* bg-gray-800 — buttons, badges, quick stake buttons */
+[data-theme="light"] .bg-gray-800 { background-color: #e8e8f0 !important; color: #4a4a6a !important; }
+[data-theme="light"] .bg-gray-800\/60 { background-color: rgba(200,200,220,0.4) !important; }
+[data-theme="light"] .bg-gray-800\/40 { background-color: rgba(200,200,220,0.3) !important; }
+[data-theme="light"] .bg-gray-800\/30 { background-color: rgba(200,200,220,0.2) !important; }
+/* bg-gray-700 — fallback badges, icon containers */
+[data-theme="light"] .bg-gray-700 { background-color: #e0e0e8 !important; }
+[data-theme="light"] .bg-gray-700\/50 { background-color: rgba(200,200,220,0.35) !important; }
+/* hover:bg-gray-700 */
+[data-theme="light"] .hover\:bg-gray-700:hover { background-color: #d8d8e4 !important; }
+/* bg-black/40 — referral code boxes */
+[data-theme="light"] .bg-black\/40 { background-color: rgba(0,0,0,0.05) !important; }
+/* Borders */
+[data-theme="light"] .border-gray-800 { border-color: #e0e0e8 !important; }
+[data-theme="light"] .border-gray-800\/60 { border-color: rgba(200,200,220,0.6) !important; }
+[data-theme="light"] .border-gray-800\/50 { border-color: rgba(200,200,220,0.5) !important; }
+[data-theme="light"] .border-gray-800\/40 { border-color: rgba(200,200,220,0.4) !important; }
+[data-theme="light"] .border-gray-800\/30 { border-color: rgba(200,200,220,0.3) !important; }
+[data-theme="light"] .border-gray-800\/20 { border-color: rgba(200,200,220,0.2) !important; }
+[data-theme="light"] .border-gray-800\/15 { border-color: rgba(200,200,220,0.15) !important; }
+[data-theme="light"] .border-gray-700 { border-color: #d0d0e0 !important; }
+[data-theme="light"] .border-gray-700\/60 { border-color: rgba(200,200,220,0.6) !important; }
+/* Dividers */
+[data-theme="light"] .divide-gray-800\/50 > :not([hidden]) ~ :not([hidden]) { border-color: rgba(200,200,220,0.4) !important; }
+[data-theme="light"] .divide-gray-800 > :not([hidden]) ~ :not([hidden]) { border-color: #e0e0e8 !important; }
+/* Inputs, selects, textareas */
+[data-theme="light"] input, [data-theme="light"] select, [data-theme="light"] textarea {
+  background-color: #f5f5f8 !important;
+  border-color: #d0d0e0 !important;
+  color: #1a1a2e !important;
+}
+[data-theme="light"] input::placeholder { color: #9999aa !important; }
+[data-theme="light"] select option {
+  background-color: #ffffff !important;
+  color: #1a1a2e !important;
+}
+[data-theme="light"] .placeholder-gray-500::placeholder { color: #9999aa !important; }
+[data-theme="light"] .placeholder\:text-gray-500::placeholder { color: #9999aa !important; }
+/* Custom Select component & all dropdowns in light mode */
+[data-theme="light"] [class*="bg-[var(--dropdown-bg)"] { background-color: #ffffff !important; }
+[data-theme="light"] [class*="bg-[var(--bg-surface)"] { background-color: #ffffff !important; }
+[data-theme="light"] [class*="bg-[var(--bg-primary)"] { background-color: #f0f2f5 !important; }
+/* Button text on light backgrounds */
+[data-theme="light"] button.text-white:not([class*="bg-lotus"]):not([class*="bg-green"]):not([class*="bg-red"]):not([class*="bg-blue"]) {
+  color: #1a1a2e !important;
+}
+/* Labels */
+[data-theme="light"] label { color: #4a4a6a !important; }
+/* Panel sections — form cards need visible borders */
+[data-theme="light"] .bg-surface { border-color: #d0d0e0 !important; }
+/* Table headers and rows */
+[data-theme="light"] th { color: #4a4a6a !important; background-color: #f5f5f8 !important; }
+[data-theme="light"] td { color: #1a1a2e !important; }
+[data-theme="light"] tr:hover td { background-color: #f0f2f5 !important; }
+/* Badges and status chips */
+[data-theme="light"] .bg-green-500\/10 { background-color: rgba(22,163,74,0.1) !important; }
+[data-theme="light"] .bg-green-500\/20 { background-color: rgba(22,163,74,0.15) !important; }
+[data-theme="light"] .bg-red-500\/10 { background-color: rgba(220,38,38,0.1) !important; }
+[data-theme="light"] .bg-blue-500\/10 { background-color: rgba(59,130,246,0.1) !important; }
+[data-theme="light"] .bg-yellow-500\/10 { background-color: rgba(234,179,8,0.1) !important; }
+/* Scrollbar */
+[data-theme="light"] ::-webkit-scrollbar-track { background: #f0f2f5; }
+[data-theme="light"] ::-webkit-scrollbar-thumb { background: #c0c0d0; }
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: #a0a0b0; }
+/* Cards and surfaces */
+[data-theme="light"] .bg-white\/5 { background-color: rgba(0,0,0,0.03) !important; }
+[data-theme="light"] .bg-white\/\[0\.03\] { background-color: rgba(0,0,0,0.02) !important; }
+[data-theme="light"] .bg-white\/\[0\.05\] { background-color: rgba(0,0,0,0.03) !important; }
+[data-theme="light"] .bg-white\/10 { background-color: rgba(0,0,0,0.05) !important; }
+[data-theme="light"] .bg-white\/\[0\.02\] { background-color: rgba(0,0,0,0.015) !important; }
+/* Hover states */
+[data-theme="light"] .hover\:bg-white\/5:hover { background-color: rgba(0,0,0,0.05) !important; }
+[data-theme="light"] .hover\:bg-white\/10:hover { background-color: rgba(0,0,0,0.08) !important; }
+[data-theme="light"] .hover\:bg-white\/\[0\.02\]:hover { background-color: rgba(0,0,0,0.03) !important; }
+[data-theme="light"] .hover\:bg-surface-light:hover { background-color: #ececf0 !important; }
+/* Sidebar */
+[data-theme="light"] aside { background-color: #fafafa !important; border-color: #e0e0e8 !important; }
+/* Shadow for depth */
+[data-theme="light"] .shadow-2xl { box-shadow: 0 4px 20px rgba(0,0,0,0.08) !important; }
+/* Keep back/lay colors same in both themes */
+[data-theme="light"] .text-profit { color: #16a34a !important; }
+[data-theme="light"] .text-loss { color: #dc2626 !important; }
+/* Keep white text on colored backgrounds (descendant and same-element) */
+[data-theme="light"] .bg-red-600 .text-white,
+[data-theme="light"] .bg-red-600.text-white,
+[data-theme="light"] .bg-red-700.text-white { color: #ffffff !important; }
+[data-theme="light"] .bg-green-600 .text-white,
+[data-theme="light"] .bg-green-600.text-white { color: #ffffff !important; }
+/* Footer */
+[data-theme="light"] footer { background-color: #fafafa !important; border-color: #e0e0e8 !important; }
+/* Bottom mobile nav */
+[data-theme="light"] nav.fixed.bottom-0 { background-color: #ffffff !important; border-color: #e0e0e8 !important; }
+
+/* ── Light mode: Additional edge-case overrides ── */
+/* text-gray-100 — nearly invisible on white */
+[data-theme="light"] .text-gray-100 { color: #2a2a4a !important; }
+/* Announcement ticker — dark bg, keep white text */
+/* Announcement ticker — stays blue with white text in both themes */
+[data-theme="light"] .bg-\[\#1a6fb5\] { background-color: #1a6fb5 !important; }
+[data-theme="light"] .bg-\[\#1a6fb5\] * { color: #ffffff !important; }
+/* Match ticker — becomes light bg with dark text in light mode */
+[data-theme="light"] .bg-\[\#2a2d3a\] { background-color: #e8eaef !important; }
+[data-theme="light"] .bg-\[\#2a2d3a\] * { color: #1a1a2e !important; }
+[data-theme="light"] .bg-\[\#2a2d3a\] .text-white { color: #1a1a2e !important; }
+[data-theme="light"] .bg-\[\#2a2d3a\] .text-gray-300 { color: #6b6b8a !important; }
+[data-theme="light"] .bg-\[\#2a2d3a\] .text-green-400 { color: #16a34a !important; }
+/* RunLadder — green/red text should stay vibrant */
+[data-theme="light"] .text-green-400 { color: #16a34a !important; }
+[data-theme="light"] .text-red-400 { color: #dc2626 !important; }
+/* Ensure back/lay cell text stays black in both themes */
+[data-theme="light"] .bg-\[\#72BBEF\] .text-black,
+[data-theme="light"] .bg-\[\#FAA9BA\] .text-black,
+[data-theme="light"] .bg-\[\#A8D8F0\] .text-black,
+[data-theme="light"] .bg-\[\#F7C3CF\] .text-black { color: #000000 !important; }
+/* animate-pulse text should be visible */
+[data-theme="light"] .animate-pulse { color: inherit; }
+/* Sport filter tabs active state */
+[data-theme="light"] .bg-lotus\/20 { background-color: rgba(13, 148, 136, 0.15) !important; }
+[data-theme="light"] .text-lotus { color: #0D9488 !important; }
+/* Disabled buttons */
+[data-theme="light"] .disabled\:bg-gray-700:disabled { background-color: #e0e0e8 !important; color: #8888a0 !important; }
+/* Focus borders */
+[data-theme="light"] .focus\:border-lotus\/60:focus { border-color: rgba(13, 148, 136, 0.6) !important; }
+[data-theme="light"] .focus\:border-gray-600:focus { border-color: #b0b0c0 !important; }
+[data-theme="light"] .focus\:border-lotus:focus { border-color: #0D9488 !important; }
+
+/* ── Light mode: Comprehensive form & panel overrides ── */
+/* All text-white on form elements should be dark */
+[data-theme="light"] input.text-white,
+[data-theme="light"] select.text-white,
+[data-theme="light"] textarea.text-white { color: #1a1a2e !important; }
+/* Ensure buttons on teal/lotus backgrounds stay white */
+[data-theme="light"] .bg-lotus { color: #ffffff !important; }
+[data-theme="light"] .bg-lotus-light { color: #ffffff !important; }
+[data-theme="light"] .bg-lotus-dark { color: #ffffff !important; }
+[data-theme="light"] .hover\:bg-lotus-light:hover { color: #ffffff !important; }
+/* Panel sidebar and header */
+[data-theme="light"] aside .text-gray-400 { color: #6b6b8a !important; }
+[data-theme="light"] aside .text-gray-500 { color: #8888a0 !important; }
+[data-theme="light"] header.border-b { border-color: #e0e0e8 !important; }
+/* Copy/credential buttons */
+[data-theme="light"] .bg-surface.text-white { color: #1a1a2e !important; }
+/* Dropdown option hover — needs visible highlight */
+[data-theme="light"] .hover\:bg-white\/5:hover { background-color: #f0f2f5 !important; }
+/* font-mono inputs visible */
+[data-theme="light"] .font-mono { color: #1a1a2e; }
+/* text-blue-400 links */
+[data-theme="light"] .text-blue-400 { color: #2563eb !important; }
+[data-theme="light"] .text-blue-500 { color: #3b82f6 !important; }
+[data-theme="light"] .text-amber-400 { color: #d97706 !important; }
+[data-theme="light"] .text-amber-500 { color: #b45309 !important; }
+[data-theme="light"] .text-purple-400 { color: #7c3aed !important; }
+/* bg-loss text */
+[data-theme="light"] .bg-loss\/5 { background-color: rgba(220,38,38,0.05) !important; }
+[data-theme="light"] .bg-loss\/10 { background-color: rgba(220,38,38,0.1) !important; }
+[data-theme="light"] .bg-profit\/10 { background-color: rgba(22,163,74,0.1) !important; }
+[data-theme="light"] .bg-lotus\/10 { background-color: rgba(13,148,136,0.1) !important; }
+/* Overlay and modal backgrounds */
+[data-theme="light"] .bg-black\/60 { background-color: rgba(0,0,0,0.4) !important; }
+/* Tab buttons (active vs inactive) */
+[data-theme="light"] .bg-lotus\/20 .text-lotus { color: #0D9488 !important; }
+/* Cap text (small text like BAL, EXP) */
+[data-theme="light"] .text-\[10px\] { color: inherit; }
+[data-theme="light"] .text-\[11px\] { color: inherit; }
+/* Nav dropdown links */
+[data-theme="light"] .hover\:text-white:hover { color: #1a1a2e !important; }
+/* Account page sections */
+[data-theme="light"] .text-xs.text-gray-400 { color: #6b6b8a !important; }
+/* Pagination */
+[data-theme="light"] .bg-gray-900 { background-color: #e8e8f0 !important; color: #4a4a6a !important; }
+[data-theme="light"] .hover\:bg-gray-800:hover { background-color: #e0e0e8 !important; }
+/* Card hover */
+[data-theme="light"] .hover\:bg-surface-light:hover { background-color: #f0f0f4 !important; }
+
+/* Toast notifications — solid visible backgrounds in light mode */
+[data-theme="light"] .light-toast-success { background-color: #ecfdf5 !important; color: #166534 !important; border-color: #22c55e !important; }
+[data-theme="light"] .light-toast-success svg { color: #16a34a !important; }
+[data-theme="light"] .light-toast-success p { color: #166534 !important; }
+[data-theme="light"] .light-toast-success button { color: #166534 !important; }
+[data-theme="light"] .light-toast-error { background-color: #fef2f2 !important; color: #991b1b !important; border-color: #ef4444 !important; }
+[data-theme="light"] .light-toast-error svg, [data-theme="light"] .light-toast-error p, [data-theme="light"] .light-toast-error button { color: #991b1b !important; }
+[data-theme="light"] .light-toast-info { background-color: #eff6ff !important; color: #1e40af !important; border-color: #3b82f6 !important; }
+[data-theme="light"] .light-toast-info svg, [data-theme="light"] .light-toast-info p, [data-theme="light"] .light-toast-info button { color: #1e40af !important; }
+[data-theme="light"] .light-toast-warning { background-color: #fefce8 !important; color: #854d0e !important; border-color: #eab308 !important; }
+[data-theme="light"] .light-toast-warning svg, [data-theme="light"] .light-toast-warning p, [data-theme="light"] .light-toast-warning button { color: #854d0e !important; }
+
+/* Hide number input spinners */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0c14;
+}
+::-webkit-scrollbar-thumb {
+  background: #2d3143;
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3d4155;
+}
+
+[data-theme="light"] ::-webkit-scrollbar-track {
+  background: #f0f2f5;
+}
+[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: #c0c4cc;
+}
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: #a0a4ac;
+}
+
+/* ============================================
+   FUNCTIONAL CSS ONLY — no fancy effects
+   ============================================ */
+
+/* Odds flash on price change */
+.odds-up { animation: flashGreen 0.5s ease; }
+.odds-down { animation: flashRed 0.5s ease; }
+@keyframes flashGreen { 0%,100% { background: inherit; } 50% { background: rgba(34,197,94,0.15); } }
+@keyframes flashRed { 0%,100% { background: inherit; } 50% { background: rgba(239,68,68,0.15); } }
+
+/* Live pulse */
+@keyframes livePulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+.animate-live-pulse { animation: livePulse 2s ease-in-out infinite; }
+
+/* Slide up for mobile betslip */
+@keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+.animate-slide-up { animation: slideUp 0.3s ease-out; }
+
+/* Marquee for bottom ticker */
+@keyframes marquee { from { transform: translateX(100%); } to { transform: translateX(-100%); } }
+.animate-marquee { animation: marquee 40s linear infinite; }
+
+/* Float for minimal hero accent */
+@keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+.animate-float { animation: float 6s ease-in-out infinite; }
+
+/* Suspended market overlay */
+.suspended { position: relative; }
+.suspended::after {
+  content: 'SUSPENDED';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.6);
+  color: #facc15;
+  font-weight: bold;
+  font-size: 11px;
+  letter-spacing: 2px;
+  z-index: 5;
+}
+
+/* Safe area for mobile bottom bar */
+.safe-area-pb { padding-bottom: env(safe-area-inset-bottom, 0); }
+
+/* LEGACY classes kept for compatibility but simplified */
+.card-shine { position: relative; overflow: hidden;
+}
+.card-shine::before {
+  content: '';
+  position: absolute;
+  top: -50%;
+  left: -150%;
+  width: 200%;
+  height: 200%;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    rgba(255, 215, 0, 0.08) 40%,
+    rgba(255, 215, 0, 0.25) 50%,
+    rgba(255, 215, 0, 0.08) 60%,
+    transparent 100%
+  );
+  transform: rotate(30deg);
+  transition: left 0.7s ease;
+  pointer-events: none;
+  z-index: 2;
+}
+.card-shine:hover::before {
+  left: 150%;
+}
+
+/* ============================================
+   GOLD GLOW EFFECT
+   ============================================ */
+.glow-gold {
+  transition: box-shadow 0.3s ease, transform 0.3s ease;
+}
+.glow-gold:hover {
+  box-shadow: 0 0 20px rgba(255, 215, 0, 0.35), 0 0 50px rgba(255, 215, 0, 0.1);
+}
+
+/* ============================================
+   SPARKLE / PARTICLE ANIMATIONS
+   ============================================ */
+@keyframes sparkle {
+  0%, 100% { opacity: 0; transform: scale(0) rotate(0deg); }
+  50% { opacity: 1; transform: scale(1) rotate(180deg); }
+}
+
+@keyframes sparkleFloat {
+  0% { transform: translateY(0) translateX(0) scale(0); opacity: 0; }
+  20% { opacity: 1; transform: translateY(-20px) translateX(10px) scale(1); }
+  80% { opacity: 0.5; transform: translateY(-80px) translateX(-10px) scale(0.5); }
+  100% { opacity: 0; transform: translateY(-120px) translateX(20px) scale(0); }
+}
+
+.sparkle-particle {
+  animation: sparkleFloat 3s ease-in-out infinite;
+}
+
+/* ============================================
+   PULSE GLOW FOR LIVE BADGES
+   ============================================ */
+@keyframes pulseGlow {
+  0%, 100% { box-shadow: 0 0 4px #ff0000; }
+  50% { box-shadow: 0 0 12px #ff0000, 0 0 24px rgba(255, 0, 0, 0.3); }
+}
+.live-pulse {
+  animation: pulseGlow 2s ease-in-out infinite;
+}
+
+@keyframes pulseDot {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+  50% { opacity: 0.7; box-shadow: 0 0 0 4px rgba(239, 68, 68, 0); }
+}
+.pulse-dot {
+  animation: pulseDot 1.5s ease-in-out infinite;
+}
+
+/* ============================================
+   GRADIENT TEXT
+   ============================================ */
+.text-gradient {
+  background: linear-gradient(135deg, #0D9488, #14B8A6);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.text-gradient-lotus {
+  background: linear-gradient(135deg, #0D9488, #14B8A6);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ============================================
+   FLOATING ANIMATION
+   ============================================ */
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+/* ============================================
+   HERO BACKGROUND ANIMATIONS
+   ============================================ */
+@keyframes heroShimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+@keyframes gradientShift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.hero-gradient {
+  background: linear-gradient(135deg, #0a0c14 0%, #1a0a2e 25%, #16082a 50%, #0d1117 75%, #0a0c14 100%);
+  background-size: 400% 400%;
+  animation: gradientShift 15s ease infinite;
+}
+
+.hero-gradient-casino {
+  background: linear-gradient(135deg, #0a0c14 0%, #1a1000 20%, #2a1500 40%, #1a0a2e 60%, #0a0c14 100%);
+  background-size: 400% 400%;
+  animation: gradientShift 12s ease infinite;
+}
+
+/* ============================================
+   CAROUSEL ANIMATION
+   ============================================ */
+@keyframes scrollCarousel {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+.auto-scroll {
+  animation: scrollCarousel 30s linear infinite;
+}
+.auto-scroll:hover {
+  animation-play-state: paused;
+}
+
+/* ============================================
+   BLINKING ODDS
+   ============================================ */
+@keyframes blinkOdds {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.blink-odds {
+  animation: blinkOdds 1s ease-in-out infinite;
+}
+
+/* ============================================
+   EXISTING ANIMATIONS (preserved)
+   ============================================ */
+@keyframes livePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.animate-live-pulse {
+  animation: livePulse 1.5s ease-in-out infinite;
+}
+
+@keyframes flashGreen {
+  0%, 100% { background: inherit; }
+  50% { background: #2d6b2d; }
+}
+@keyframes flashRed {
+  0%, 100% { background: inherit; }
+  50% { background: #6b2d2d; }
+}
+.odds-up {
+  animation: flashGreen 0.6s ease;
+}
+.odds-down {
+  animation: flashRed 0.6s ease;
+}
+
+/* Back/Lay color utility classes */
+.back-cell {
+  background: #72bbef;
+  color: #000;
+}
+.back-cell-dark {
+  background: #a8d8f0;
+  color: #000;
+}
+.lay-cell {
+  background: #faa9ba;
+  color: #000;
+}
+.lay-cell-dark {
+  background: #f7c3cf;
+  color: #000;
+}
+
+/* Suspended overlay */
+.suspended {
+  position: relative;
+}
+.suspended::after {
+  content: "SUSPENDED";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.7);
+  color: #ff4444;
+  font-weight: bold;
+  font-size: 12px;
+  letter-spacing: 2px;
+  z-index: 10;
+  pointer-events: none;
+}
+
+/* Ticker scroll animation */
+@keyframes ticker {
+  from { transform: translateX(100%); }
+  to { transform: translateX(-100%); }
+}
+.ticker-scroll {
+  animation: ticker 30s linear infinite;
+}
+.ticker-scroll:hover {
+  animation-play-state: paused;
+}
+
+@keyframes marquee {
+  0% { transform: translateX(100%); }
+  100% { transform: translateX(-100%); }
+}
+.animate-marquee {
+  animation: marquee 30s linear infinite;
+}
+
+/* Bet slip entry animation */
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-in {
+  animation: slideIn 0.2s ease-out;
+}
+
+@keyframes slideUp {
+  0% { transform: translateY(100%); }
+  100% { transform: translateY(0); }
+}
+.animate-slide-up {
+  animation: slideUp 0.3s ease-out;
+}
+
+@keyframes selectionGlow {
+  0%, 100% { box-shadow: none; }
+  50% { box-shadow: 0 0 8px rgba(255, 215, 0, 0.3); }
+}
+.selection-glow {
+  animation: selectionGlow 2s ease-in-out infinite;
+}
+
+.safe-area-pb {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ============================================
+   NEW BADGE PULSE
+   ============================================ */
+@keyframes badgePulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+.badge-pulse {
+  animation: badgePulse 2s ease-in-out infinite;
+}
+
+/* ============================================
+   HORIZONTAL SCROLL SNAP
+   ============================================ */
+.scroll-snap-x {
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+}
+.scroll-snap-x > * {
+  scroll-snap-align: start;
+}
+
+/* ============================================
+   PLAY BUTTON OVERLAY
+   ============================================ */
+.play-overlay {
+  opacity: 0;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+  transform: scale(0.8);
+}
+.group:hover .play-overlay {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* ============================================
+   CATEGORY TAB ACTIVE INDICATOR
+   ============================================ */
+.tab-active {
+  position: relative;
+}
+.tab-active::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #0D9488, #14B8A6);
+  border-radius: 1px;
+}
+
+/* ============================================
+   MATCH NAME MARQUEE ON MOBILE (train effect)
+   ============================================ */
+@keyframes marqueeText {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+.marquee-container {
+  overflow: hidden;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+@media (max-width: 640px) {
+  .marquee-container.marquee-active .marquee-content {
+    display: inline-block;
+    animation: marqueeText 8s linear infinite;
+  }
+}
+
+/* On desktop (sm+), never animate — just truncate */
+@media (min-width: 641px) {
+  .marquee-container {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .marquee-container .marquee-content {
+    animation: none !important;
+  }
+}
+
+/* Prevent ANY horizontal scroll on mobile */
+html, body {
+  overflow-x: hidden !important;
+  max-width: 100vw;
+}
+
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}

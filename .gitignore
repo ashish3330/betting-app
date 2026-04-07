@@ -1,0 +1,37 @@
+# Binaries
+bin/
+*.exe
+*.out
+
+# Dependencies
+frontend/node_modules/
+vendor/
+
+# Environment
+.env
+.env.local
+frontend/.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Build outputs
+coverage.out
+coverage.html
+docs/swagger/
+frontend/.next/
+frontend/tsconfig.tsbuildinfo
+
+# Keys
+keys/
+*.pem
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
