@@ -127,6 +127,8 @@ type Bet struct {
 	SelectionID    int64   `json:"selection_id"`
 	UserID         int64   `json:"user_id"`
 	Side           string  `json:"side"`
+	DisplaySide    string  `json:"display_side"`
+	MarketType     string  `json:"market_type"`
 	Price          float64 `json:"price"`
 	Stake          float64 `json:"stake"`
 	MatchedStake   float64 `json:"matched_stake"`
@@ -965,10 +967,22 @@ func (s *Store) PlaceAndMatch(userID int64, marketID string, selectionID int64, 
 	// The house (operator) takes the other side — no order book, no unmatched/partial.
 	status := "matched"
 
+	// Determine market type and display side
+	var mType, dSide string
+	if m, ok := s.markets[marketID]; ok {
+		mType = m.MarketType
+	}
+	if mType == "fancy" || mType == "session" {
+		if side == "back" { dSide = "yes" } else { dSide = "no" }
+	} else {
+		dSide = side
+	}
+
 	// Record the bet as fully matched
 	s.bets[betID] = &Bet{
 		ID: betID, MarketID: marketID, SelectionID: selectionID,
-		UserID: userID, Side: side, Price: price, Stake: stake,
+		UserID: userID, Side: side, DisplaySide: dSide, MarketType: mType,
+		Price: price, Stake: stake,
 		MatchedStake: stake, UnmatchedStake: 0,
 		Status: status, ClientRef: clientRef, CreatedAt: now.Format(time.RFC3339),
 	}

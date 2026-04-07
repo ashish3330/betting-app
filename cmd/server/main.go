@@ -1290,11 +1290,13 @@ func handleUserBets(w http.ResponseWriter, r *http.Request) {
 	validStatuses := map[string]bool{"matched": true, "settled": true, "cancelled": true, "void": true}
 	openStatuses := map[string]bool{"matched": true}
 
-	// Enrich bets with market_name and selection_name
+	// Enrich bets with market_name, selection_name, market_type, display_side
 	type enrichedBet struct {
 		*Bet
 		MarketName    string `json:"market_name"`
 		SelectionName string `json:"selection_name"`
+		MarketType    string `json:"market_type"`
+		DisplaySide   string `json:"display_side"`
 		ProfitLoss    float64 `json:"profit_loss"`
 	}
 	result := make([]enrichedBet, 0, len(bets))
@@ -1318,6 +1320,7 @@ func handleUserBets(w http.ResponseWriter, r *http.Request) {
 		eb := enrichedBet{Bet: b, ProfitLoss: b.Profit}
 		if m, ok := store.markets[b.MarketID]; ok {
 			eb.MarketName = m.Name
+			eb.MarketType = m.MarketType
 		}
 		if runners, ok := store.runners[b.MarketID]; ok {
 			for _, r := range runners {
@@ -1326,6 +1329,16 @@ func handleUserBets(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 			}
+		}
+		// For fancy/session: show "yes"/"no" instead of "back"/"lay"
+		if eb.MarketType == "fancy" || eb.MarketType == "session" {
+			if b.Side == "back" {
+				eb.DisplaySide = "yes"
+			} else {
+				eb.DisplaySide = "no"
+			}
+		} else {
+			eb.DisplaySide = b.Side
 		}
 		result = append(result, eb)
 	}

@@ -12,6 +12,8 @@ interface Bet {
   market_id: string;
   market_name?: string;
   selection_name?: string;
+  market_type?: string;
+  display_side?: string;
   side: "back" | "lay";
   price: number;
   stake: number;
@@ -51,14 +53,23 @@ function getStatusBadge(status: string, profitLoss?: number) {
 }
 
 function calcPotentialProfit(bet: Bet): number {
-  if (bet.side === "back") {
-    return bet.stake * (bet.price - 1);
+  const isFancy = bet.market_type === "fancy" || bet.market_type === "session";
+  const ds = bet.display_side || bet.side;
+  if (isFancy) {
+    // Fancy: profit = stake * rate / 100 for YES, stake for NO
+    return ds === "yes" || bet.side === "back" ? bet.stake * bet.price / 100 : bet.stake;
   }
-  // For lay bets, potential profit is the backer's stake (which equals our stake)
+  if (bet.side === "back") return bet.stake * (bet.price - 1);
   return bet.stake;
 }
 
 function calcLiability(bet: Bet): number | null {
+  const isFancy = bet.market_type === "fancy" || bet.market_type === "session";
+  const ds = bet.display_side || bet.side;
+  if (isFancy) {
+    // Fancy: liability = stake * rate / 100 for NO, stake for YES
+    return ds === "no" || bet.side === "lay" ? bet.stake * bet.price / 100 : null;
+  }
   if (bet.side !== "lay") return null;
   return bet.stake * (bet.price - 1);
 }
@@ -211,14 +222,17 @@ export default function BetsPage() {
                   <div className="flex items-start justify-between">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        {(bet.market_type === "fancy" || bet.market_type === "session") && (
+                          <span className="text-[8px] font-bold px-1 py-0.5 rounded bg-purple-500/20 text-purple-400">FANCY</span>
+                        )}
                         <span
                           className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                            bet.side === "back"
+                            (bet.display_side || bet.side) === "back" || (bet.display_side || bet.side) === "yes"
                               ? "bg-back/20 text-back"
                               : "bg-lay/20 text-lay"
                           }`}
                         >
-                          {bet.side.toUpperCase()}
+                          {(bet.display_side || bet.side).toUpperCase()}
                         </span>
                         <span
                           className={`text-[10px] px-1.5 py-0.5 rounded ${statusBadge.className}`}

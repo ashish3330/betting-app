@@ -64,10 +64,11 @@ export default function MarketDetailPage() {
     stake: number;
     status: string;
     timestamp: number;
+    isFancy: boolean;
   }>>([]);
 
   // Bets fetched from API for this market
-  const [marketBets, setMarketBets] = useState<{id:string, side:string, price:number, stake:number, status:string, created_at:string, selection_name?:string, market_name?:string}[]>([]);
+  const [marketBets, setMarketBets] = useState<{id:string, side:string, display_side?:string, market_type?:string, price:number, stake:number, status:string, created_at:string, selection_name?:string, market_name?:string}[]>([]);
 
   // All markets for this event (match_odds, bookmaker, fancy, etc.)
   const [eventMarkets, setEventMarkets] = useState<MarketInfo[]>([]);
@@ -309,6 +310,7 @@ export default function MarketDetailPage() {
         stake,
         status: result.status,
         timestamp: Date.now(),
+        isFancy: isFancy,
       }, ...prev].slice(0, 20));
     }
 
@@ -534,15 +536,16 @@ export default function MarketDetailPage() {
                 {recentBets.map((bet) => (
                   <div key={bet.id} className="px-3 py-2">
                     <div className="flex items-center justify-between">
-                      <span className="text-[12px] font-medium text-white truncate">{bet.runnerName}</span>
-                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                        bet.status === 'matched' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
-                      }`}>{bet.status.toUpperCase()}</span>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        {bet.isFancy && <span className="text-[8px] font-bold px-1 py-0.5 rounded bg-purple-500/20 text-purple-400">FANCY</span>}
+                        <span className="text-[12px] font-medium text-white truncate">{bet.runnerName}</span>
+                      </div>
+                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">PLACED</span>
                     </div>
                     <div className="flex items-center gap-2 mt-1">
                       <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                         bet.side === 'back' ? 'bg-[#72BBEF]/20 text-[#72BBEF]' : 'bg-[#FAA9BA]/20 text-[#FAA9BA]'
-                      }`}>{bet.side.toUpperCase()}</span>
+                      }`}>{bet.isFancy ? (bet.side === 'back' ? 'YES' : 'NO') : bet.side.toUpperCase()}</span>
                       <span className="text-[11px] text-gray-400">@ {bet.price.toFixed(2)}</span>
                       <span className="text-[11px] text-gray-300 font-medium">{'\u20B9'}{bet.stake.toLocaleString('en-IN')}</span>
                       <span className="text-[10px] text-gray-600 ml-auto">
@@ -570,20 +573,24 @@ export default function MarketDetailPage() {
               </div>
             ) : (
               <div className="divide-y divide-gray-800/30">
-                {marketBets.map((bet) => (
+                {marketBets.map((bet) => {
+                  const betIsFancy = bet.market_type === "fancy" || bet.market_type === "session";
+                  const ds = bet.display_side || bet.side;
+                  return (
                   <div key={bet.id} className="px-3 py-2">
                     <div className="flex items-center justify-between">
-                      <span className="text-[12px] font-medium text-white truncate">{bet.selection_name || 'Selection'}</span>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        {betIsFancy && <span className="text-[8px] font-bold px-1 py-0.5 rounded bg-purple-500/20 text-purple-400">FANCY</span>}
+                        <span className="text-[12px] font-medium text-white truncate">{bet.selection_name || 'Selection'}</span>
+                      </div>
                       <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                        bet.status === 'matched' ? 'bg-green-500/20 text-green-400' :
-                        bet.status === 'pending' ? 'bg-yellow-500/20 text-yellow-400' :
-                        'bg-red-500/20 text-red-400'
-                      }`}>{bet.status.toUpperCase()}</span>
+                        bet.status === 'matched' ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'
+                      }`}>{bet.status === 'matched' ? 'PLACED' : bet.status.toUpperCase()}</span>
                     </div>
                     <div className="flex items-center gap-2 mt-1">
                       <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                        bet.side === 'back' ? 'bg-[#72BBEF]/20 text-[#72BBEF]' : 'bg-[#FAA9BA]/20 text-[#FAA9BA]'
-                      }`}>{bet.side.toUpperCase()}</span>
+                        ds === 'back' || ds === 'yes' ? 'bg-[#72BBEF]/20 text-[#72BBEF]' : 'bg-[#FAA9BA]/20 text-[#FAA9BA]'
+                      }`}>{ds.toUpperCase()}</span>
                       <span className="text-[11px] text-gray-400">@ {bet.price.toFixed(2)}</span>
                       <span className="text-[11px] text-gray-300 font-medium">{'\u20B9'}{bet.stake.toLocaleString('en-IN')}</span>
                       <span className="text-[10px] text-gray-600 ml-auto">
@@ -592,7 +599,8 @@ export default function MarketDetailPage() {
                     </div>
                     <div className="text-[9px] text-gray-600 mt-0.5">ID: {bet.id}</div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -930,13 +938,20 @@ function RunnerRow({
               ))}
             </div>
 
-            {/* Profit / Liability display */}
-            <span className="text-[11px] text-gray-400 ml-auto whitespace-nowrap">
-              {side === 'back' ? 'Profit' : 'Liability'}:{' '}
-              <span className={side === 'back' ? 'text-green-400 font-bold' : 'text-red-400 font-bold'}>
-                {'\u20B9'}{profitOrLiability.toFixed(0)}
+            {/* Side label + Profit / Liability display */}
+            <div className="flex items-center gap-2 ml-auto">
+              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                side === 'back' ? 'bg-[#72BBEF]/20 text-[#72BBEF]' : 'bg-[#FAA9BA]/20 text-[#FAA9BA]'
+              }`}>
+                {isFancy ? (side === 'back' ? 'YES' : 'NO') : side.toUpperCase()}
               </span>
-            </span>
+              <span className="text-[11px] text-gray-400 whitespace-nowrap">
+                {side === 'back' ? 'Profit' : 'Liability'}:{' '}
+                <span className={side === 'back' ? 'text-green-400 font-bold' : 'text-red-400 font-bold'}>
+                  {'\u20B9'}{profitOrLiability.toFixed(0)}
+                </span>
+              </span>
+            </div>
 
             {/* Place / Confirm button */}
             <button
