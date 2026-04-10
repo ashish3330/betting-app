@@ -3,10 +3,14 @@ package middleware
 import (
 	"context"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
 )
+
+// validRequestID matches a UUID or an alphanumeric string up to 64 characters.
+var validRequestID = regexp.MustCompile(`^[a-zA-Z0-9\-]{1,64}$`)
 
 const RequestIDKey contextKey = "request_id"
 
@@ -18,7 +22,7 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' ws: wss:; font-src 'self' https://fonts.gstatic.com")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' ws: wss:; font-src 'self' https://fonts.gstatic.com; frame-ancestors 'none'; base-uri 'self'")
 		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		w.Header().Set("Pragma", "no-cache")
@@ -31,7 +35,7 @@ func SecurityHeaders(next http.Handler) http.Handler {
 func RequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reqID := r.Header.Get("X-Request-ID")
-		if reqID == "" {
+		if reqID == "" || !validRequestID.MatchString(reqID) {
 			reqID = uuid.New().String()
 		}
 
@@ -63,9 +67,11 @@ func CORSWithWhitelist(allowedOrigins []string) func(http.Handler) http.Handler 
 
 			if allowAll {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
+				// Do not set Allow-Credentials with wildcard origin
 			} else if originSet[strings.ToLower(origin)] {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
 				w.Header().Set("Vary", "Origin")
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
 			} else if origin != "" {
 				// Origin not allowed
 				if r.Method == http.MethodOptions {
@@ -78,9 +84,8 @@ func CORSWithWhitelist(allowedOrigins []string) func(http.Handler) http.Handler 
 			}
 
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, X-Device-ID")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, X-Device-ID, X-CSRF-Token")
 			w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID, X-RateLimit-Remaining")
-			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 
 			if r.Method == http.MethodOptions {

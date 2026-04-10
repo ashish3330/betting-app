@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
 )
 
@@ -32,7 +33,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 	markets, err := h.service.List(r.Context(), sport, status, inPlay)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to list markets")
 		return
 	}
 	writeJSON(w, http.StatusOK, markets)
@@ -42,20 +43,26 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	marketID := r.PathValue("id")
 	m, err := h.service.Get(r.Context(), marketID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, "market not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, m)
 }
 
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
+	role := middleware.RoleFromContext(r.Context())
+	if role != models.Role("superadmin") && role != models.Role("admin") {
+		writeError(w, http.StatusForbidden, "insufficient permissions")
+		return
+	}
+
 	var m models.Market
 	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if err := h.service.Create(r.Context(), &m); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to create market")
 		return
 	}
 	writeJSON(w, http.StatusCreated, m)

@@ -181,6 +181,32 @@ func runMigrations(log *slog.Logger) error {
 		`CREATE INDEX IF NOT EXISTS idx_audit_user ON betting.audit_log(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_login_user ON auth.login_history(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_payment_user ON betting.payment_transactions(user_id)`,
+
+		// ── Compatibility patches for legacy schemas ──
+		// audit_log may have older schema with actor_id; ensure new columns exist
+		`ALTER TABLE betting.audit_log ADD COLUMN IF NOT EXISTS user_id BIGINT DEFAULT 0`,
+		`ALTER TABLE betting.audit_log ADD COLUMN IF NOT EXISTS username TEXT DEFAULT ''`,
+		`ALTER TABLE betting.audit_log ADD COLUMN IF NOT EXISTS details TEXT DEFAULT ''`,
+		`ALTER TABLE betting.audit_log ADD COLUMN IF NOT EXISTS ip TEXT DEFAULT ''`,
+		// bets table may be missing market_type from legacy schema
+		`ALTER TABLE betting.bets ADD COLUMN IF NOT EXISTS market_type TEXT DEFAULT ''`,
+		// notifications check constraint may be too restrictive
+		`ALTER TABLE betting.notifications DROP CONSTRAINT IF EXISTS notifications_type_check`,
+		`ALTER TABLE betting.notifications ADD CONSTRAINT notifications_type_check CHECK (type IN ('bet_matched','bet_placed','bet_settled','bet_won','bet_lost','deposit_complete','deposit','withdrawal_complete','withdrawal','credit','cashout_available','kyc_update','promotion','system','responsible_gambling','login','info','warning','success','error'))`,
+
+		// ── KYC documents ──
+		`CREATE TABLE IF NOT EXISTS betting.kyc_documents (
+			id BIGSERIAL PRIMARY KEY,
+			user_id BIGINT NOT NULL REFERENCES auth.users(id),
+			doc_type TEXT NOT NULL DEFAULT '',
+			filename TEXT NOT NULL DEFAULT '',
+			size_bytes BIGINT DEFAULT 0,
+			content_type TEXT DEFAULT '',
+			storage_url TEXT DEFAULT '',
+			status TEXT DEFAULT 'pending_review',
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_kyc_user ON betting.kyc_documents(user_id)`,
 	}
 
 	for _, m := range migrations {
@@ -301,9 +327,12 @@ func dbAllUsers() []*User {
 	for rows.Next() {
 		u := &User{}
 		var parentID sql.NullInt64
-		rows.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.Path, &parentID,
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.Path, &parentID,
 			&u.Balance, &u.Exposure, &u.CreditLimit, &u.CommissionRate,
-			&u.Status, &u.ReferralCode, &u.OTPEnabled, &u.IsDemo, &u.CreatedAt)
+			&u.Status, &u.ReferralCode, &u.OTPEnabled, &u.IsDemo, &u.CreatedAt); err != nil {
+			logger.Error("dbAllUsers scan error, skipping row", "error", err)
+			continue
+		}
 		if parentID.Valid {
 			pid := parentID.Int64
 			u.ParentID = &pid
@@ -322,7 +351,7 @@ func dbSaveBet(b *Bet) {
 	_, err := db.Exec(`
 		INSERT INTO betting.bets (id, market_id, selection_id, user_id, side, price, stake, matched_stake, unmatched_stake, profit, status, client_ref, market_type, display_side, created_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-		ON CONFLICT (id, created_at) DO UPDATE SET matched_stake=$8, unmatched_stake=$9, profit=$10, status=$11`,
+		ON CONFLICT (id) DO UPDATE SET matched_stake=$8, unmatched_stake=$9, profit=$10, status=$11`,
 		b.ID, b.MarketID, b.SelectionID, b.UserID, b.Side, b.Price, b.Stake,
 		b.MatchedStake, b.UnmatchedStake, b.Profit, b.Status, b.ClientRef, b.MarketType, b.DisplaySide, b.CreatedAt)
 	if err != nil {
@@ -343,8 +372,11 @@ func dbGetUserBets(userID int64) []*Bet {
 	for rows.Next() {
 		b := &Bet{}
 		var marketType, displaySide sql.NullString
-		rows.Scan(&b.ID, &b.MarketID, &b.SelectionID, &b.UserID, &b.Side, &b.Price, &b.Stake,
-			&b.MatchedStake, &b.UnmatchedStake, &b.Profit, &b.Status, &b.ClientRef, &marketType, &displaySide, &b.CreatedAt)
+		if err := rows.Scan(&b.ID, &b.MarketID, &b.SelectionID, &b.UserID, &b.Side, &b.Price, &b.Stake,
+			&b.MatchedStake, &b.UnmatchedStake, &b.Profit, &b.Status, &b.ClientRef, &marketType, &displaySide, &b.CreatedAt); err != nil {
+			logger.Error("dbGetUserBets scan error, skipping row", "error", err)
+			continue
+		}
 		if marketType.Valid {
 			b.MarketType = marketType.String
 		}
@@ -352,6 +384,9 @@ func dbGetUserBets(userID int64) []*Bet {
 			b.DisplaySide = displaySide.String
 		}
 		bets = append(bets, b)
+	}
+	if err := rows.Err(); err != nil {
+		logger.Error("dbGetUserBets rows iteration error", "error", err)
 	}
 	return bets
 }
@@ -386,7 +421,12 @@ func dbGetLedger(userID int64, limit, offset int) []*LedgerEntry {
 	var entries []*LedgerEntry
 	for rows.Next() {
 		e := &LedgerEntry{}
-		rows.Scan(&e.ID, &e.UserID, &e.Amount, &e.Type, &e.Reference, &e.BetID, &e.CreatedAt)
+		var betID sql.NullString
+		if err := rows.Scan(&e.ID, &e.UserID, &e.Amount, &e.Type, &e.Reference, &betID, &e.CreatedAt); err != nil {
+			logger.Error("dbGetLedger scan error, skipping row", "error", err)
+			continue
+		}
+		e.BetID = betID.String
 		entries = append(entries, e)
 	}
 	if err := rows.Err(); err != nil {
@@ -420,7 +460,10 @@ func dbGetNotifications(userID int64, unreadOnly bool, limit, offset int) []*Not
 	var notifs []*Notification
 	for rows.Next() {
 		n := &Notification{}
-		rows.Scan(&n.ID, &n.UserID, &n.Type, &n.Title, &n.Message, &n.Read, &n.Created)
+		if err := rows.Scan(&n.ID, &n.UserID, &n.Type, &n.Title, &n.Message, &n.Read, &n.Created); err != nil {
+			logger.Error("dbGetNotifications scan error, skipping row", "error", err)
+			continue
+		}
 		notifs = append(notifs, n)
 	}
 	if err := rows.Err(); err != nil {
@@ -453,7 +496,9 @@ func dbMarkAllNotificationsRead(userID int64) int {
 // ── DB-backed Audit Log ───────────────────────────────────────────────────────
 
 func dbAddAudit(userID int64, username, action, details, ip string) {
-	if _, err := db.Exec(`INSERT INTO betting.audit_log (user_id, username, action, details, ip) VALUES ($1,$2,$3,$4,$5)`,
+	// audit_log has both legacy schema (actor_id, entity_type, entity_id) and new schema (user_id, username, details, ip)
+	// Use new columns added by setup migration; entity fields are optional with safe defaults.
+	if _, err := db.Exec(`INSERT INTO betting.audit_log (user_id, username, action, details, ip, entity_type, entity_id) VALUES ($1,$2,$3,$4,$5,'system','-')`,
 		userID, username, action, details, ip); err != nil {
 		logger.Error("dbAddAudit failed", "error", err)
 	}
@@ -478,7 +523,10 @@ func dbGetLoginHistory(userID int64, limit int) []*LoginRecord {
 	var records []*LoginRecord
 	for rows.Next() {
 		r := &LoginRecord{}
-		rows.Scan(&r.UserID, &r.IP, &r.UserAgent, &r.LoginAt, &r.Success)
+		if err := rows.Scan(&r.UserID, &r.IP, &r.UserAgent, &r.LoginAt, &r.Success); err != nil {
+			logger.Error("dbGetLoginHistory scan error, skipping row", "error", err)
+			continue
+		}
 		records = append(records, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -500,8 +548,11 @@ func dbAllBets() []*Bet {
 	var bets []*Bet
 	for rows.Next() {
 		b := &Bet{}
-		rows.Scan(&b.ID, &b.MarketID, &b.SelectionID, &b.UserID, &b.Side, &b.Price, &b.Stake,
-			&b.MatchedStake, &b.UnmatchedStake, &b.Profit, &b.Status, &b.ClientRef, &b.CreatedAt)
+		if err := rows.Scan(&b.ID, &b.MarketID, &b.SelectionID, &b.UserID, &b.Side, &b.Price, &b.Stake,
+			&b.MatchedStake, &b.UnmatchedStake, &b.Profit, &b.Status, &b.ClientRef, &b.CreatedAt); err != nil {
+			logger.Error("dbAllBets scan error, skipping row", "error", err)
+			continue
+		}
 		bets = append(bets, b)
 	}
 	if err := rows.Err(); err != nil {
@@ -523,7 +574,10 @@ func dbGetAuditLog(limit int) []*AuditEntry {
 	var entries []*AuditEntry
 	for rows.Next() {
 		e := &AuditEntry{}
-		rows.Scan(&e.ID, &e.UserID, &e.Username, &e.Action, &e.Details, &e.IP, &e.Timestamp)
+		if err := rows.Scan(&e.ID, &e.UserID, &e.Username, &e.Action, &e.Details, &e.IP, &e.Timestamp); err != nil {
+			logger.Error("dbGetAuditLog scan error, skipping row", "error", err)
+			continue
+		}
 		entries = append(entries, e)
 	}
 	if err := rows.Err(); err != nil {
@@ -543,7 +597,10 @@ func dbGetAuditLogForUser(userID int64, limit int) []*AuditEntry {
 	var entries []*AuditEntry
 	for rows.Next() {
 		e := &AuditEntry{}
-		rows.Scan(&e.ID, &e.UserID, &e.Username, &e.Action, &e.Details, &e.IP, &e.Timestamp)
+		if err := rows.Scan(&e.ID, &e.UserID, &e.Username, &e.Action, &e.Details, &e.IP, &e.Timestamp); err != nil {
+			logger.Error("dbGetAuditLogForUser scan error, skipping row", "error", err)
+			continue
+		}
 		entries = append(entries, e)
 	}
 	if err := rows.Err(); err != nil {
@@ -584,7 +641,13 @@ func dbGetUserPayments(userID int64) []*PaymentTx {
 	var txns []*PaymentTx
 	for rows.Next() {
 		tx := &PaymentTx{}
-		rows.Scan(&tx.ID, &tx.UserID, &tx.Direction, &tx.Method, &tx.Amount, &tx.Currency, &tx.Status, &tx.UPIID, &tx.Wallet, &tx.CreatedAt)
+		var upiID, wallet sql.NullString
+		if err := rows.Scan(&tx.ID, &tx.UserID, &tx.Direction, &tx.Method, &tx.Amount, &tx.Currency, &tx.Status, &upiID, &wallet, &tx.CreatedAt); err != nil {
+			logger.Error("dbGetUserPayments scan error, skipping row", "error", err)
+			continue
+		}
+		tx.UPIID = upiID.String
+		tx.Wallet = wallet.String
 		txns = append(txns, tx)
 	}
 	if err := rows.Err(); err != nil {
@@ -655,9 +718,12 @@ func dbGetChildren(userID int64) []*User {
 	for rows.Next() {
 		u := &User{}
 		var parentID sql.NullInt64
-		rows.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.Path, &parentID,
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.Path, &parentID,
 			&u.Balance, &u.Exposure, &u.CreditLimit, &u.CommissionRate,
-			&u.Status, &u.ReferralCode, &u.OTPEnabled, &u.IsDemo, &u.CreatedAt)
+			&u.Status, &u.ReferralCode, &u.OTPEnabled, &u.IsDemo, &u.CreatedAt); err != nil {
+			logger.Error("dbGetChildren scan error, skipping row", "error", err)
+			continue
+		}
 		if parentID.Valid {
 			pid := parentID.Int64
 			u.ParentID = &pid
@@ -685,9 +751,12 @@ func dbGetDirectChildren(userID int64) []*User {
 	for rows.Next() {
 		u := &User{}
 		var parentID sql.NullInt64
-		rows.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.Path, &parentID,
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.Path, &parentID,
 			&u.Balance, &u.Exposure, &u.CreditLimit, &u.CommissionRate,
-			&u.Status, &u.ReferralCode, &u.OTPEnabled, &u.IsDemo, &u.CreatedAt)
+			&u.Status, &u.ReferralCode, &u.OTPEnabled, &u.IsDemo, &u.CreatedAt); err != nil {
+			logger.Error("dbGetDirectChildren scan error, skipping row", "error", err)
+			continue
+		}
 		if parentID.Valid {
 			pid := parentID.Int64
 			u.ParentID = &pid

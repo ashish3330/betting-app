@@ -129,15 +129,45 @@ func (s *Service) GenerateOffer(ctx context.Context, betID string, userID int64)
 	return offer, nil
 }
 
-// AcceptOffer processes a cashout
+// AcceptOffer processes a cashout.
+// Wallet operations are written to the settlement_events outbox table within the
+// same transaction that marks the bet settled and the offer accepted. This avoids
+// the previous bug where the transaction could commit but subsequent wallet calls
+// could fail, leaving the wallet in an inconsistent state.
 func (s *Service) AcceptOffer(ctx context.Context, offerID string, userID int64) (*CashoutOffer, error) {
+	// --- Step 1: Check for expiry outside the serializable transaction. ---
+	// If the offer is expired, mark it with a simple UPDATE and return early.
+	// This avoids the previous confusing pattern of committing the serializable
+	// tx just to persist an expiry status.
+	var currentStatus string
+	var expiresAt time.Time
+	err := s.db.QueryRowContext(ctx,
+		`SELECT status, expires_at FROM cashout_offers WHERE id = $1 AND user_id = $2`,
+		offerID, userID,
+	).Scan(&currentStatus, &expiresAt)
+	if err != nil {
+		return nil, fmt.Errorf("offer not found: %w", err)
+	}
+	if currentStatus != string(CashoutOffered) {
+		return nil, fmt.Errorf("offer already %s", currentStatus)
+	}
+	if time.Now().After(expiresAt) {
+		// Mark expired outside the main transaction — this is a simple status update.
+		_, _ = s.db.ExecContext(ctx,
+			"UPDATE cashout_offers SET status = 'expired' WHERE id = $1 AND status = 'offered'",
+			offerID,
+		)
+		return nil, fmt.Errorf("offer has expired, request a new one")
+	}
+
+	// --- Step 2: Serializable transaction for acceptance + outbox write. ---
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
-	// Get and lock offer
+	// Re-check and lock offer inside the serializable tx
 	var offer CashoutOffer
 	err = tx.QueryRowContext(ctx,
 		`SELECT id, bet_id, user_id, original_stake, original_price, cashout_amount, status, offered_at, expires_at
@@ -154,9 +184,6 @@ func (s *Service) AcceptOffer(ctx context.Context, offerID string, userID int64)
 	}
 
 	if time.Now().After(offer.ExpiresAt) {
-		// Mark as expired
-		tx.ExecContext(ctx, "UPDATE cashout_offers SET status = 'expired' WHERE id = $1", offerID)
-		tx.Commit()
 		return nil, fmt.Errorf("offer has expired, request a new one")
 	}
 
@@ -171,22 +198,30 @@ func (s *Service) AcceptOffer(ctx context.Context, offerID string, userID int64)
 	}
 
 	// Settle the bet as cashed out
+	pnl := offer.CashoutAmount - offer.OriginalStake
 	_, err = tx.ExecContext(ctx,
 		`UPDATE bets SET status = 'settled', profit = $1, settled_at = $2 WHERE id = $3`,
-		offer.CashoutAmount-offer.OriginalStake, now, offer.BetID,
+		pnl, now, offer.BetID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("settle bet: %w", err)
 	}
 
+	// Write cashout settlement event to the outbox within the same transaction.
+	// The settlement outbox processor will handle ReleaseFunds + SettleBet atomically.
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO settlement_events
+		     (market_id, bet_id, user_id, event_type, amount, commission, held_stake, status, created_at)
+		 VALUES ('cashout', $1, $2, 'settle', $3, 0, $4, 'pending', NOW())`,
+		offer.BetID, userID, pnl, offer.OriginalStake,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("write cashout outbox event: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
-
-	// Process wallet: release held funds + credit cashout amount
-	pnl := offer.CashoutAmount - offer.OriginalStake
-	s.wallet.ReleaseFunds(ctx, userID, offer.OriginalStake, offer.BetID)
-	s.wallet.SettleBet(ctx, userID, offer.BetID, pnl, 0) // No commission on cashout
 
 	offer.Status = CashoutAccepted
 	offer.AcceptedAt = &now

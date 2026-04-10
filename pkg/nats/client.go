@@ -21,6 +21,9 @@ func NewClient(url string, logger *slog.Logger) (*Client, error) {
 		nats.Name("lotus-exchange"),
 		nats.ReconnectWait(2 * time.Second),
 		nats.MaxReconnects(-1),
+		// Cap Drain() so graceful shutdown cannot block forever when a
+		// broker is unreachable or a slow subscriber is backed up.
+		nats.DrainTimeout(30 * time.Second),
 		nats.ReconnectHandler(func(c *nats.Conn) {
 			logger.Info("NATS reconnected", "url", c.ConnectedUrl())
 		}),
@@ -69,7 +72,7 @@ func (c *Client) Publish(ctx context.Context, subject string, data []byte) error
 	return nil
 }
 
-func (c *Client) Subscribe(ctx context.Context, stream, consumer, filterSubject string, handler func(msg jetstream.Msg)) error {
+func (c *Client) Subscribe(ctx context.Context, stream, consumer, filterSubject string, handler func(msg jetstream.Msg)) (jetstream.ConsumeContext, error) {
 	cons, err := c.js.CreateOrUpdateConsumer(ctx, stream, jetstream.ConsumerConfig{
 		Durable:       consumer,
 		FilterSubject: filterSubject,
@@ -78,17 +81,17 @@ func (c *Client) Subscribe(ctx context.Context, stream, consumer, filterSubject 
 		AckWait:       30 * time.Second,
 	})
 	if err != nil {
-		return fmt.Errorf("create consumer %s: %w", consumer, err)
+		return nil, fmt.Errorf("create consumer %s: %w", consumer, err)
 	}
 
-	_, err = cons.Consume(func(msg jetstream.Msg) {
+	cc, err := cons.Consume(func(msg jetstream.Msg) {
 		handler(msg)
 	})
 	if err != nil {
-		return fmt.Errorf("consume %s: %w", consumer, err)
+		return nil, fmt.Errorf("consume %s: %w", consumer, err)
 	}
 
-	return nil
+	return cc, nil
 }
 
 func (c *Client) Conn() *nats.Conn { return c.conn }
@@ -97,7 +100,10 @@ func (c *Client) JetStream() jetstream.JetStream { return c.js }
 
 func (c *Client) Close() {
 	if c.conn != nil {
-		c.conn.Drain()
-		c.conn.Close()
+		// Drain flushes in-flight messages and then closes the connection,
+		// so an explicit Close() afterwards is unnecessary.
+		if err := c.conn.Drain(); err != nil {
+			c.logger.Warn("NATS drain error", "error", err)
+		}
 	}
 }

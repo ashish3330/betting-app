@@ -70,7 +70,7 @@ export default function AdminPage() {
         />
         <StatCard
           label="Bets Today"
-          value={dashboard?.bets_today?.toLocaleString("en-IN") || "0"}
+          value={dashboard?.total_bets_today?.toLocaleString("en-IN") || "0"}
           icon={
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
@@ -80,7 +80,7 @@ export default function AdminPage() {
         />
         <StatCard
           label="Volume Today"
-          value={`\u20B9${formatLargeNumber(dashboard?.volume_today || 0)}`}
+          value={`\u20B9${formatLargeNumber(dashboard?.total_volume_today || 0)}`}
           icon={
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
@@ -100,7 +100,7 @@ export default function AdminPage() {
         />
         <StatCard
           label="Markets Live"
-          value={dashboard?.markets_live?.toString() || "0"}
+          value={dashboard?.active_markets?.toString() || "0"}
           icon={
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5.636 18.364a9 9 0 010-12.728m12.728 0a9 9 0 010 12.728M9.172 15.828a4 4 0 010-7.656m5.656 0a4 4 0 010 7.656" />

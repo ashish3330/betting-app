@@ -25,7 +25,15 @@ export default function LoginPage() {
     setLoading(true);
     setError("");
     try {
-      const result = await login(username, password);
+      const result = await login(username, password) as {
+        user?: { role?: string };
+        requires_otp?: boolean;
+        user_id?: number;
+      };
+      if (result?.requires_otp && result?.user_id) {
+        router.push(`/login/otp?user_id=${result.user_id}`);
+        return;
+      }
       const role = result?.user?.role || "client";
       router.push(role === "client" ? "/" : "/panel");
     } catch (err) {

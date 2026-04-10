@@ -1,8 +1,12 @@
 package matching
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
@@ -10,12 +14,14 @@ import (
 )
 
 type Handler struct {
-	engine  *Engine
-	wallet  *wallet.Service
+	engine *Engine
+	wallet *wallet.Service
+	db     *sql.DB
+	logger *slog.Logger
 }
 
-func NewHandler(engine *Engine, walletSvc *wallet.Service) *Handler {
-	return &Handler{engine: engine, wallet: walletSvc}
+func NewHandler(engine *Engine, walletSvc *wallet.Service, db *sql.DB, logger *slog.Logger) *Handler {
+	return &Handler{engine: engine, wallet: walletSvc, db: db, logger: logger}
 }
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
@@ -25,6 +31,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 }
 
 func (h *Handler) PlaceBet(w http.ResponseWriter, r *http.Request) {
+	// Issue #6: Request body size limit
+	r.Body = http.MaxBytesReader(w, r.Body, 65536)
+
 	var req models.PlaceBetRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -38,7 +47,7 @@ func (h *Handler) PlaceBet(w http.ResponseWriter, r *http.Request) {
 
 	userID := middleware.UserIDFromContext(r.Context())
 
-	// Calculate liability and hold funds
+	// Issue #1: Calculate full liability BEFORE matching and hold funds first
 	var holdAmount float64
 	if req.Side == models.BetSideBack {
 		holdAmount = req.Stake
@@ -46,19 +55,41 @@ func (h *Handler) PlaceBet(w http.ResponseWriter, r *http.Request) {
 		holdAmount = req.Stake * (req.Price - 1) // lay liability
 	}
 
+	// Hold the full amount before placing the order
+	// Use a temporary bet ID for the hold; we'll get the real one from PlaceAndMatch
+	if err := h.wallet.HoldFunds(r.Context(), userID, holdAmount, fmt.Sprintf("pre:%s:%s", req.MarketID, req.ClientRef)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Place and match atomically
 	result, err := h.engine.PlaceAndMatch(r.Context(), &req, userID)
 	if err != nil {
+		// Issue #5: Rollback the fund hold if PlaceAndMatch fails
+		if releaseErr := h.wallet.ReleaseFunds(r.Context(), userID, holdAmount, fmt.Sprintf("pre:%s:%s", req.MarketID, req.ClientRef)); releaseErr != nil {
+			h.logger.ErrorContext(r.Context(), "failed to release funds after PlaceAndMatch failure",
+				"user_id", userID, "amount", holdAmount, "error", releaseErr)
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	// Hold funds for unmatched portion
-	if result.UnmatchedStake > 0 {
-		unmatchedHold := holdAmount * (result.UnmatchedStake / req.Stake)
-		if err := h.wallet.HoldFunds(r.Context(), userID, unmatchedHold, result.BetID); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
+	// Release the hold for the matched portion (settlement handles matched funds separately)
+	if result.MatchedStake > 0 {
+		matchedHold := holdAmount * (result.MatchedStake / req.Stake)
+		if releaseErr := h.wallet.ReleaseFunds(r.Context(), userID, matchedHold, fmt.Sprintf("pre:%s:%s", req.MarketID, req.ClientRef)); releaseErr != nil {
+			h.logger.ErrorContext(r.Context(), "failed to release matched portion hold",
+				"user_id", userID, "amount", matchedHold, "bet_id", result.BetID, "error", releaseErr)
+		}
+	}
+
+	// Issue #4: Persist order to PostgreSQL so it survives Redis restarts
+	if h.db != nil {
+		if persistErr := h.engine.PersistOrder(r.Context(), h.db, &req, userID, result); persistErr != nil {
+			h.logger.ErrorContext(r.Context(), "failed to persist order to database",
+				"bet_id", result.BetID, "error", persistErr)
+			// Non-fatal: the order is already in Redis and funds are held.
+			// A recovery process can reconcile later.
 		}
 	}
 
@@ -75,9 +106,32 @@ func (h *Handler) CancelBet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.engine.CancelOrder(r.Context(), marketID, betID, side); err != nil {
+	// Ownership is now verified atomically inside the Lua cancel script,
+	// so there is no window where the order is removed before we check ownership.
+	userID := middleware.UserIDFromContext(r.Context())
+
+	cancelled, err := h.engine.CancelOrder(r.Context(), marketID, betID, side, userID)
+	if err != nil {
+		if strings.Contains(err.Error(), "belongs to another user") {
+			writeError(w, http.StatusForbidden, "you do not own this order")
+			return
+		}
 		writeError(w, http.StatusNotFound, err.Error())
 		return
+	}
+
+	// Release held funds for the unmatched (cancelled) portion
+	var releaseAmount float64
+	if cancelled.Side == models.BetSideBack {
+		releaseAmount = cancelled.Remaining
+	} else {
+		releaseAmount = cancelled.Remaining * (cancelled.Price - 1) // lay liability
+	}
+	if releaseAmount > 0 {
+		if releaseErr := h.wallet.ReleaseFunds(r.Context(), userID, releaseAmount, betID); releaseErr != nil {
+			h.logger.ErrorContext(r.Context(), "failed to release funds on cancel",
+				"user_id", userID, "amount", releaseAmount, "bet_id", betID, "error", releaseErr)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": "order cancelled", "bet_id": betID})

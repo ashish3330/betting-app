@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"os"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -131,17 +133,26 @@ type rateLimiterEntry struct {
 	lastSeen time.Time
 }
 
-func NewIPRateLimiter(rps int, burst int) *IPRateLimiter {
+// NewIPRateLimiter creates a rate limiter with a background cleanup goroutine
+// that is tied to the provided context. When the context is cancelled the
+// cleanup goroutine exits, preventing goroutine leaks.
+func NewIPRateLimiter(ctx context.Context, rps int, burst int) *IPRateLimiter {
 	rl := &IPRateLimiter{
 		limiters: make(map[string]*rateLimiterEntry),
 		rps:      rate.Limit(rps),
 		burst:    burst,
 	}
-	// Cleanup stale entries every 3 minutes
+	// Cleanup stale entries every 3 minutes; stops when ctx is cancelled.
 	go func() {
+		ticker := time.NewTicker(3 * time.Minute)
+		defer ticker.Stop()
 		for {
-			time.Sleep(3 * time.Minute)
-			rl.cleanup()
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				rl.cleanup()
+			}
 		}
 	}()
 	return rl
@@ -174,8 +185,27 @@ func (rl *IPRateLimiter) cleanup() {
 	}
 }
 
+// PerIPRateLimiter creates a per-IP rate limiter whose cleanup goroutine
+// runs indefinitely. Use PerIPRateLimiterWithContext for controllable lifetime.
 func PerIPRateLimiter(rps int, burst int) func(http.Handler) http.Handler {
-	rl := NewIPRateLimiter(rps, burst)
+	rl := NewIPRateLimiter(context.Background(), rps, burst)
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := extractIP(r)
+			if !rl.getLimiter(ip).Allow() {
+				w.Header().Set("Retry-After", "1")
+				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// PerIPRateLimiterWithContext is like PerIPRateLimiter but accepts a context
+// to control the lifetime of the background cleanup goroutine.
+func PerIPRateLimiterWithContext(ctx context.Context, rps int, burst int) func(http.Handler) http.Handler {
+	rl := NewIPRateLimiter(ctx, rps, burst)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ip := extractIP(r)
@@ -190,7 +220,7 @@ func PerIPRateLimiter(rps int, burst int) func(http.Handler) http.Handler {
 }
 
 func PerUserRateLimiter(rps int, burst int) func(http.Handler) http.Handler {
-	rl := NewIPRateLimiter(rps, burst) // reuse same structure, keyed by user ID
+	rl := NewIPRateLimiter(context.Background(), rps, burst) // reuse same structure, keyed by user ID
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			userID := UserIDFromContext(r.Context())
@@ -312,19 +342,38 @@ func PathFromContext(ctx context.Context) string {
 // IP extraction
 // ---------------------------------------------------------------------------
 
+// trustedProxies is the set of proxy IPs allowed to set X-Forwarded-For.
+// Populated from TRUSTED_PROXIES env var (comma-separated), defaults to
+// loopback addresses.
+var trustedProxies = func() map[string]bool {
+	raw := os.Getenv("TRUSTED_PROXIES")
+	if raw == "" {
+		raw = "127.0.0.1,::1"
+	}
+	m := make(map[string]bool)
+	for _, p := range strings.Split(raw, ",") {
+		m[strings.TrimSpace(p)] = true
+	}
+	return m
+}()
+
 func extractIP(r *http.Request) string {
-	// Check X-Forwarded-For first (behind proxy/LB)
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.SplitN(xff, ",", 2)
-		return strings.TrimSpace(parts[0])
+	// Determine the direct-connection IP first.
+	remoteIP := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(remoteIP); err == nil {
+		remoteIP = host
 	}
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return xri
+
+	// Only trust proxy headers when the direct connection is from a trusted proxy.
+	if trustedProxies[remoteIP] {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.SplitN(xff, ",", 2)
+			return strings.TrimSpace(parts[0])
+		}
+		if xri := r.Header.Get("X-Real-IP"); xri != "" {
+			return xri
+		}
 	}
-	// Fall back to RemoteAddr
-	ip := r.RemoteAddr
-	if idx := strings.LastIndex(ip, ":"); idx != -1 {
-		ip = ip[:idx]
-	}
-	return ip
+
+	return remoteIP
 }

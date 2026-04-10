@@ -3,15 +3,58 @@ package casino
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/wallet"
 	"github.com/redis/go-redis/v9"
 )
+
+// withSerializableRetry executes fn inside a serializable transaction,
+// retrying up to maxRetries times on PostgreSQL serialization failures
+// (SQLSTATE 40001).
+func withSerializableRetry(ctx context.Context, db *sql.DB, maxRetries int, fn func(tx *sql.Tx) error) error {
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		if err != nil {
+			return fmt.Errorf("begin tx: %w", err)
+		}
+
+		err = fn(tx)
+		if err != nil {
+			tx.Rollback()
+			if isSerializationFailure(err) && attempt < maxRetries {
+				continue
+			}
+			return err
+		}
+
+		err = tx.Commit()
+		if err != nil {
+			if isSerializationFailure(err) && attempt < maxRetries {
+				continue
+			}
+			return fmt.Errorf("commit: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("serializable transaction failed after %d retries", maxRetries)
+}
+
+// isSerializationFailure checks whether the error is a PostgreSQL
+// serialization failure (SQLSTATE 40001).
+func isSerializationFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "40001") || strings.Contains(msg, "could not serialize access")
+}
 
 // ---------------------------------------------------------------------------
 // Game types -- covers every game on Lotus / myplazone9 platforms
@@ -403,6 +446,19 @@ func (s *Service) CreateSession(ctx context.Context, userID int64, gameType Game
 		return nil, fmt.Errorf("game %s is not available", gameType)
 	}
 
+	// Enforce concurrent session limit (max 3 active sessions per user).
+	var activeCount int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM casino_sessions WHERE user_id = $1 AND status = 'active'`,
+		userID,
+	).Scan(&activeCount)
+	if err != nil {
+		return nil, fmt.Errorf("check active sessions: %w", err)
+	}
+	if activeCount >= 3 {
+		return nil, fmt.Errorf("maximum concurrent sessions reached (limit: 3)")
+	}
+
 	sessionID := generateSessionID()
 	token := generateToken()
 	expiresAt := time.Now().Add(4 * time.Hour)
@@ -422,7 +478,7 @@ func (s *Service) CreateSession(ctx context.Context, userID int64, gameType Game
 		ExpiresAt:  expiresAt,
 	}
 
-	_, err := s.db.ExecContext(ctx,
+	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO casino_sessions (id, user_id, game_type, provider_id, status, stream_url, token, created_at, expires_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		session.ID, session.UserID, session.GameType, session.ProviderID,
@@ -444,7 +500,7 @@ func (s *Service) CreateSession(ctx context.Context, userID int64, gameType Game
 func (s *Service) ValidateSession(ctx context.Context, sessionID, token string) (*CasinoSession, error) {
 	// Check Redis first
 	cachedToken, err := s.redis.Get(ctx, fmt.Sprintf("casino:session:%s", sessionID)).Result()
-	if err == nil && cachedToken == token {
+	if err == nil && subtle.ConstantTimeCompare([]byte(cachedToken), []byte(token)) == 1 {
 		// Fast path: token valid, fetch session details
 		var session CasinoSession
 		err := s.db.QueryRowContext(ctx,
@@ -469,10 +525,17 @@ func (s *Service) ValidateSession(ctx context.Context, sessionID, token string) 
 }
 
 func (s *Service) CloseSession(ctx context.Context, sessionID string) error {
-	_, err := s.db.ExecContext(ctx,
-		"UPDATE casino_sessions SET status = 'closed' WHERE id = $1", sessionID)
+	res, err := s.db.ExecContext(ctx,
+		"UPDATE casino_sessions SET status = 'closed' WHERE id = $1 AND status = 'active'", sessionID)
 	if err != nil {
 		return fmt.Errorf("close session: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("close session: rows affected: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("session %s is not active or does not exist", sessionID)
 	}
 
 	s.redis.Del(ctx, fmt.Sprintf("casino:session:%s", sessionID))
@@ -480,47 +543,54 @@ func (s *Service) CloseSession(ctx context.Context, sessionID string) error {
 }
 
 // HandleSettlementWebhook processes settlement callbacks from casino providers.
-// Idempotent via round_id.
+// Idempotent via (session_id, round_id) unique constraint using INSERT ... ON CONFLICT DO NOTHING.
+// The webhook is authenticated via HMAC signature at the handler level.
 func (s *Service) HandleSettlementWebhook(ctx context.Context, sessionID, roundID string, stake, payout float64) error {
-	session, err := s.ValidateSession(ctx, sessionID, "")
+	// Look up the session directly -- webhook authentication is handled by HMAC signature verification
+	var session CasinoSession
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, user_id, game_type, provider_id, status FROM casino_sessions WHERE id = $1`,
+		sessionID,
+	).Scan(&session.ID, &session.UserID, &session.GameType, &session.ProviderID, &session.Status)
 	if err != nil {
-		// Try direct DB lookup for webhook processing
-		var userID int64
-		err = s.db.QueryRowContext(ctx,
-			"SELECT user_id FROM casino_sessions WHERE id = $1",
-			sessionID,
-		).Scan(&userID)
-		if err != nil {
-			return fmt.Errorf("session not found: %w", err)
-		}
-		session = &CasinoSession{ID: sessionID, UserID: userID}
+		return fmt.Errorf("session not found")
 	}
 
-	// Idempotency check
-	var exists bool
-	s.db.QueryRowContext(ctx,
-		"SELECT EXISTS(SELECT 1 FROM casino_bets WHERE session_id = $1 AND round_id = $2)",
-		sessionID, roundID,
-	).Scan(&exists)
-	if exists {
-		return nil // Already processed
-	}
-
-	// Record casino bet
 	betID := generateSessionID()
-	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO casino_bets (id, session_id, user_id, game_type, round_id, stake, payout, status, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, 'settled', NOW())`,
-		betID, sessionID, session.UserID, session.GameType, roundID, stake, payout,
-	)
-	if err != nil {
-		return fmt.Errorf("record casino bet: %w", err)
-	}
-
-	// Settle wallet: payout - stake = net P&L
 	pnl := payout - stake
-	if err := s.wallet.SettleBet(ctx, session.UserID, betID, pnl, 0); err != nil {
-		return fmt.Errorf("settle casino bet: %w", err)
+
+	// Wrap the casino bet INSERT and wallet settlement in a single
+	// serializable transaction with retry logic. The INSERT uses
+	// ON CONFLICT (session_id, round_id) DO NOTHING for atomic idempotency,
+	// eliminating the TOCTOU race from the previous SELECT EXISTS + INSERT.
+	err = withSerializableRetry(ctx, s.db, 3, func(dbTx *sql.Tx) error {
+		res, err := dbTx.ExecContext(ctx,
+			`INSERT INTO casino_bets (id, session_id, user_id, game_type, round_id, stake, payout, status, created_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, 'settled', NOW())
+			 ON CONFLICT (session_id, round_id) DO NOTHING`,
+			betID, sessionID, session.UserID, session.GameType, roundID, stake, payout,
+		)
+		if err != nil {
+			return fmt.Errorf("record casino bet: %w", err)
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("casino bet rows affected: %w", err)
+		}
+		if rows == 0 {
+			// Already processed (idempotent duplicate) -- no error, no further processing.
+			return nil
+		}
+
+		// Settle wallet within the same transaction so bet insert + wallet
+		// update are atomic.
+		if err := s.wallet.SettleBetTx(ctx, dbTx, session.UserID, betID, pnl, 0); err != nil {
+			return fmt.Errorf("settle casino bet: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	s.logger.InfoContext(ctx, "casino bet settled",
@@ -531,7 +601,7 @@ func (s *Service) HandleSettlementWebhook(ctx context.Context, sessionID, roundI
 
 func (s *Service) GetSessionHistory(ctx context.Context, userID int64, limit int) ([]*CasinoSession, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, user_id, game_type, provider_id, status, stream_url, token, created_at, expires_at
+		`SELECT id, user_id, game_type, provider_id, status, stream_url, created_at, expires_at
 		 FROM casino_sessions WHERE user_id = $1
 		 ORDER BY created_at DESC LIMIT $2`,
 		userID, limit,
@@ -545,7 +615,7 @@ func (s *Service) GetSessionHistory(ctx context.Context, userID int64, limit int
 	for rows.Next() {
 		cs := &CasinoSession{}
 		if err := rows.Scan(&cs.ID, &cs.UserID, &cs.GameType, &cs.ProviderID,
-			&cs.Status, &cs.StreamURL, &cs.Token, &cs.CreatedAt, &cs.ExpiresAt); err != nil {
+			&cs.Status, &cs.StreamURL, &cs.CreatedAt, &cs.ExpiresAt); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, cs)
@@ -553,14 +623,30 @@ func (s *Service) GetSessionHistory(ctx context.Context, userID int64, limit int
 	return sessions, rows.Err()
 }
 
+// GetSessionOwner returns the user_id that owns the given session.
+func (s *Service) GetSessionOwner(ctx context.Context, sessionID string) (int64, error) {
+	var userID int64
+	err := s.db.QueryRowContext(ctx,
+		"SELECT user_id FROM casino_sessions WHERE id = $1", sessionID,
+	).Scan(&userID)
+	if err != nil {
+		return 0, fmt.Errorf("session not found")
+	}
+	return userID, nil
+}
+
 func generateSessionID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand.Read failed: %v", err))
+	}
 	return hex.EncodeToString(b)
 }
 
 func generateToken() string {
 	b := make([]byte, 32)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand.Read failed: %v", err))
+	}
 	return hex.EncodeToString(b)
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
@@ -16,6 +17,7 @@ import (
 type MockProvider struct {
 	volatility     float64
 	updateInterval time.Duration
+	mu             sync.Mutex
 	rng            *rand.Rand
 }
 
@@ -499,7 +501,7 @@ func (m *MockProvider) Subscribe(ctx context.Context, marketIDs []string, update
 				var runners []models.Runner
 				for selID, state := range rs {
 					drift := 0.0
-					diffusion := m.volatility * m.rng.NormFloat64()
+					diffusion := m.volatility * m.lockedNormFloat64()
 					state.basePrice *= math.Exp(drift + diffusion)
 					state.basePrice = math.Max(1.01, math.Min(1000.0, state.basePrice))
 
@@ -508,7 +510,7 @@ func (m *MockProvider) Subscribe(ctx context.Context, marketIDs []string, update
 						runs := m.poissonSample(lambda)
 						state.score += runs
 
-						if m.rng.Float64() < 0.02 {
+						if m.lockedFloat64() < 0.02 {
 							state.wickets++
 							state.basePrice *= 1.0 + m.volatility*3
 						}
@@ -695,13 +697,34 @@ func (m *MockProvider) handicapMarket(id, eventID string, startTime time.Time) *
 // RNG helpers
 // ---------------------------------------------------------------------------
 
+// lockedNormFloat64 returns a normally-distributed random value, safe for concurrent use.
+func (m *MockProvider) lockedNormFloat64() float64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rng.NormFloat64()
+}
+
+// lockedFloat64 returns a uniform [0,1) random value, safe for concurrent use.
+func (m *MockProvider) lockedFloat64() float64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rng.Float64()
+}
+
+// lockedIntn returns a uniform random int in [0,n), safe for concurrent use.
+func (m *MockProvider) lockedIntn(n int) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rng.Intn(n)
+}
+
 func (m *MockProvider) poissonSample(lambda float64) int {
 	L := math.Exp(-lambda)
 	k := 0
 	p := 1.0
 	for {
 		k++
-		p *= m.rng.Float64()
+		p *= m.lockedFloat64()
 		if p <= L {
 			break
 		}
@@ -711,10 +734,10 @@ func (m *MockProvider) poissonSample(lambda float64) int {
 
 func (m *MockProvider) randomSize() float64 {
 	sizes := []float64{100, 250, 500, 1000, 2500, 5000, 10000}
-	return sizes[m.rng.Intn(len(sizes))]
+	return sizes[m.lockedIntn(len(sizes))]
 }
 
 func (m *MockProvider) randomBallOutcome() string {
 	outcomes := []string{"0", "1", "1", "2", "4", "6", "W", "1", "0", "1", "2", "1"}
-	return outcomes[m.rng.Intn(len(outcomes))]
+	return outcomes[m.lockedIntn(len(outcomes))]
 }

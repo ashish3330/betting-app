@@ -60,6 +60,14 @@ class ApiClient {
       }
     }
 
+    // Send CSRF token for state-changing requests
+    if (method === "POST" || method === "PUT" || method === "DELETE") {
+      const csrfToken = decryptLocalStorage("csrf_token");
+      if (csrfToken) {
+        headers["X-CSRF-Token"] = csrfToken;
+      }
+    }
+
     // Encrypt POST/PUT request bodies
     if ((method === "POST" || method === "PUT") && rest.body && typeof rest.body === "string") {
       const originalBody = JSON.parse(rest.body as string);
@@ -415,7 +423,7 @@ class ApiClient {
   }
 
   async fetchGamesByCategory(category: string) {
-    return this.request<CasinoGame[]>(`/api/v1/casino/games?category=${category}`);
+    return this.request<CasinoGame[]>(`/api/v1/casino/games/${encodeURIComponent(category)}`);
   }
 
   async createCasinoSession(gameType: string, providerId: string) {
@@ -818,11 +826,13 @@ export interface Notification {
 
 export interface AdminDashboard {
   active_users: number;
-  bets_today: number;
-  volume_today: number;
-  revenue_today: number;
-  markets_live: number;
+  total_bets_today: number;
+  total_volume_today: number;
+  active_markets: number;
   total_exposure: number;
+  revenue_today: number;
+  online_users: number;
+  peak_concurrent: number;
 }
 
 export interface ResponsibleGamblingLimits {

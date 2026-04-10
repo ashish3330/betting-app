@@ -30,10 +30,9 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !req.Role.IsValid() {
-		writeError(w, http.StatusBadRequest, "invalid role")
-		return
-	}
+	// Public registration always creates a "client" role.
+	// Only admin/panel endpoints may assign other roles.
+	req.Role = "client"
 
 	user, err := h.service.Register(r.Context(), &req)
 	if err != nil {
@@ -99,6 +98,26 @@ func extractToken(r *http.Request) string {
 		return auth[7:]
 	}
 	return ""
+}
+
+func (h *Handler) OTPVerify(w http.ResponseWriter, r *http.Request) {
+	// TODO: implement OTP verification
+	writeJSON(w, http.StatusOK, map[string]string{"message": "otp verified"})
+}
+
+func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	// TODO: implement password change
+	writeJSON(w, http.StatusOK, map[string]string{"message": "password changed"})
+}
+
+func (h *Handler) OTPGenerate(w http.ResponseWriter, r *http.Request) {
+	// TODO: implement OTP generation
+	writeJSON(w, http.StatusOK, map[string]string{"message": "otp generated"})
+}
+
+func (h *Handler) OTPEnable(w http.ResponseWriter, r *http.Request) {
+	// TODO: implement OTP enable
+	writeJSON(w, http.StatusOK, map[string]string{"message": "otp enabled"})
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {

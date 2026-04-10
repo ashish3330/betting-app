@@ -19,7 +19,7 @@ interface AuthState {
   balance: WalletBalance | null;
   login: (username: string, password: string) => Promise<{ user: User; access_token: string; refresh_token: string }>;
   demoLogin: () => Promise<{ user: User }>;
-  logout: () => void;
+  logout: () => Promise<void>;
   refreshBalance: () => Promise<void>;
 }
 
@@ -30,7 +30,7 @@ const AuthContext = createContext<AuthState>({
   balance: null,
   login: async () => ({ user: {} as User, access_token: "", refresh_token: "" }),
   demoLogin: async () => ({ user: {} as User }),
-  logout: () => {},
+  logout: async () => {},
   refreshBalance: async () => {},
 });
 
@@ -91,10 +91,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return data;
   };
 
-  const logout = () => {
+  const logout = async () => {
+    // Invalidate server session before clearing local state
+    const token = decryptLocalStorage("access_token");
+    if (token) {
+      try {
+        await fetch(
+          `${process.env.NEXT_PUBLIC_API_URL || ""}/api/v1/auth/logout`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+      } catch {
+        // Proceed with local cleanup even if server call fails
+      }
+    }
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
     localStorage.removeItem("user");
+    localStorage.removeItem("csrf_token");
     setUser(null);
     setBalance(null);
   };

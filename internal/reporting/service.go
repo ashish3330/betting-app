@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 type Service struct {
@@ -86,11 +88,14 @@ func (s *Service) GetUserPnL(ctx context.Context, userID int64, from, to time.Ti
 	}
 
 	// Get commission
-	s.postgres.QueryRowContext(ctx,
+	err = s.postgres.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(ABS(amount)), 0) FROM ledger
 		 WHERE user_id = $1 AND type = 'commission' AND created_at BETWEEN $2 AND $3`,
 		userID, from, to,
 	).Scan(&report.Commission)
+	if err != nil {
+		return nil, fmt.Errorf("get commission: %w", err)
+	}
 
 	report.NetProfit = report.GrossProfit - report.Commission
 	return report, nil
@@ -125,39 +130,63 @@ func (s *Service) GetDashboardStats(ctx context.Context) (*DashboardStats, error
 	stats := &DashboardStats{}
 	today := time.Now().Truncate(24 * time.Hour)
 
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	g, ctx := errgroup.WithContext(ctx)
+
 	// Active users (bet in last 24h)
-	s.postgres.QueryRowContext(ctx,
-		"SELECT COUNT(DISTINCT user_id) FROM bets WHERE created_at >= $1",
-		today,
-	).Scan(&stats.ActiveUsers)
+	g.Go(func() error {
+		return s.postgres.QueryRowContext(ctx,
+			"SELECT COUNT(DISTINCT user_id) FROM bets WHERE created_at >= $1",
+			today,
+		).Scan(&stats.ActiveUsers)
+	})
 
 	// Bets today
-	s.postgres.QueryRowContext(ctx,
-		"SELECT COUNT(*), COALESCE(SUM(stake), 0) FROM bets WHERE created_at >= $1",
-		today,
-	).Scan(&stats.TotalBetsToday, &stats.TotalVolumeToday)
+	g.Go(func() error {
+		return s.postgres.QueryRowContext(ctx,
+			"SELECT COUNT(*), COALESCE(SUM(stake), 0) FROM bets WHERE created_at >= $1",
+			today,
+		).Scan(&stats.TotalBetsToday, &stats.TotalVolumeToday)
+	})
 
 	// Active markets
-	s.postgres.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM markets WHERE status = 'open'",
-	).Scan(&stats.ActiveMarkets)
+	g.Go(func() error {
+		return s.postgres.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM markets WHERE status = 'open'",
+		).Scan(&stats.ActiveMarkets)
+	})
 
 	// Total exposure
-	s.postgres.QueryRowContext(ctx,
-		"SELECT COALESCE(SUM(exposure), 0) FROM users WHERE status = 'active'",
-	).Scan(&stats.TotalExposure)
+	g.Go(func() error {
+		return s.postgres.QueryRowContext(ctx,
+			"SELECT COALESCE(SUM(exposure), 0) FROM users WHERE status = 'active'",
+		).Scan(&stats.TotalExposure)
+	})
 
 	// Revenue (commissions) today
-	s.postgres.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(ABS(amount)), 0) FROM ledger
-		 WHERE type = 'commission' AND created_at >= $1`,
-		today,
-	).Scan(&stats.RevenueToday)
+	g.Go(func() error {
+		return s.postgres.QueryRowContext(ctx,
+			`SELECT COALESCE(SUM(ABS(amount)), 0) FROM ledger
+			 WHERE type = 'commission' AND created_at >= $1`,
+			today,
+		).Scan(&stats.RevenueToday)
+	})
+
+	if err := g.Wait(); err != nil {
+		return nil, fmt.Errorf("dashboard stats: %w", err)
+	}
 
 	return stats, nil
 }
 
 func (s *Service) GetBetVolumeTrend(ctx context.Context, from, to time.Time, intervalMinutes int) ([]BetVolumePoint, error) {
+	allowedIntervals := map[int]bool{1: true, 5: true, 10: true, 15: true, 30: true, 60: true}
+	if !allowedIntervals[intervalMinutes] {
+		return nil, fmt.Errorf("invalid interval: must be one of 1, 5, 10, 15, 30, 60")
+	}
+
 	query := fmt.Sprintf(`
 		SELECT
 			date_trunc('minute', created_at) - (EXTRACT(MINUTE FROM created_at)::int %% %d) * INTERVAL '1 minute' AS bucket,
@@ -219,41 +248,77 @@ func (s *Service) GetHierarchyPnL(ctx context.Context, parentUserID int64, from,
 
 // IngestToClickHouse copies settled bets to ClickHouse for analytics
 func (s *Service) IngestToClickHouse(ctx context.Context, since time.Time) (int, error) {
+	const batchLimit = 5000
+
 	rows, err := s.postgres.QueryContext(ctx,
 		`SELECT id, market_id, user_id, side, price, stake, matched_stake, profit, status, created_at, matched_at, settled_at
 		 FROM bets
-		 WHERE settled_at >= $1 AND status = 'settled'`,
-		since,
+		 WHERE settled_at >= $1 AND status = 'settled'
+		 ORDER BY settled_at ASC
+		 LIMIT $2`,
+		since, batchLimit,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("fetch settled bets: %w", err)
 	}
 	defer rows.Close()
 
-	count := 0
+	// Collect all rows first for batch insert
+	type betRow struct {
+		id, marketID, side, status string
+		userID                     int64
+		price, stake, matchedStake, profit float64
+		createdAt                  time.Time
+		matchedAt, settledAt       *time.Time
+	}
+
+	var batch []betRow
 	for rows.Next() {
-		var id, marketID, side, status string
-		var userID int64
-		var price, stake, matchedStake, profit float64
-		var createdAt time.Time
-		var matchedAt, settledAt *time.Time
-
-		if err := rows.Scan(&id, &marketID, &userID, &side, &price, &stake,
-			&matchedStake, &profit, &status, &createdAt, &matchedAt, &settledAt); err != nil {
-			return count, err
+		var b betRow
+		if err := rows.Scan(&b.id, &b.marketID, &b.userID, &b.side, &b.price, &b.stake,
+			&b.matchedStake, &b.profit, &b.status, &b.createdAt, &b.matchedAt, &b.settledAt); err != nil {
+			return 0, fmt.Errorf("scan bet row: %w", err)
 		}
+		batch = append(batch, b)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate bet rows: %w", err)
+	}
 
-		// Insert into ClickHouse
-		_, err := s.clickhouse.ExecContext(ctx,
-			`INSERT INTO raw_bets (bet_id, market_id, user_id, side, price, stake, matched_stake, profit, status, timestamp, matched_at, settled_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-			id, marketID, userID, side, price, stake, matchedStake, profit, status, createdAt, matchedAt, settledAt,
+	if len(batch) == 0 {
+		return 0, nil
+	}
+
+	// Batch insert into ClickHouse using a transaction
+	tx, err := s.clickhouse.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin clickhouse tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO raw_bets (bet_id, market_id, user_id, side, price, stake, matched_stake, profit, status, timestamp, matched_at, settled_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`)
+	if err != nil {
+		return 0, fmt.Errorf("prepare clickhouse stmt: %w", err)
+	}
+	defer stmt.Close()
+
+	count := 0
+	for _, b := range batch {
+		_, err := stmt.ExecContext(ctx,
+			b.id, b.marketID, b.userID, b.side, b.price, b.stake,
+			b.matchedStake, b.profit, b.status, b.createdAt, b.matchedAt, b.settledAt,
 		)
 		if err != nil {
-			s.logger.WarnContext(ctx, "clickhouse insert failed", "bet_id", id, "error", err)
+			s.logger.WarnContext(ctx, "clickhouse insert failed", "bet_id", b.id, "error", err)
 			continue
 		}
 		count++
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit clickhouse tx: %w", err)
 	}
 
 	s.logger.InfoContext(ctx, "ingested to clickhouse", "count", count)

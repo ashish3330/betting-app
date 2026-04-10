@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
 )
@@ -33,7 +34,7 @@ func (h *Handler) GetStatus(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	profile, err := h.service.GetKYCStatus(r.Context(), userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to retrieve KYC status")
 		return
 	}
 	writeJSON(w, http.StatusOK, profile)
@@ -49,7 +50,13 @@ func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 
 	profile, err := h.service.SubmitKYC(r.Context(), userID, &req)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		// Validation errors are safe to return; internal errors are not
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "KYC already") {
+			writeError(w, http.StatusBadRequest, errMsg)
+		} else {
+			writeError(w, http.StatusBadRequest, "failed to submit KYC")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, profile)
@@ -65,7 +72,7 @@ func (h *Handler) PendingList(w http.ResponseWriter, r *http.Request) {
 
 	profiles, err := h.service.GetPendingKYC(r.Context(), limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to retrieve pending KYC list")
 		return
 	}
 	writeJSON(w, http.StatusOK, profiles)
@@ -81,7 +88,7 @@ func (h *Handler) Approve(w http.ResponseWriter, r *http.Request) {
 
 	adminID := middleware.UserIDFromContext(r.Context())
 	if err := h.service.ApproveKYC(r.Context(), userID, adminID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to approve KYC")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "KYC approved"})
@@ -105,7 +112,7 @@ func (h *Handler) Reject(w http.ResponseWriter, r *http.Request) {
 
 	adminID := middleware.UserIDFromContext(r.Context())
 	if err := h.service.RejectKYC(r.Context(), userID, adminID, req.Reason); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to reject KYC")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "KYC rejected"})

@@ -86,12 +86,13 @@ export default function PlayGamePage() {
 
       {/* Game iframe */}
       <div className="flex-1 relative dark-section">
-        {stream ? (
+        {stream && stream.iframe_url?.startsWith("https://") ? (
           <iframe
             src={stream.iframe_url}
             className="w-full h-full border-0"
             allow="autoplay; fullscreen"
             sandbox="allow-scripts allow-same-origin"
+            referrerPolicy="no-referrer"
           />
         ) : (
           <div className="flex items-center justify-center h-full">

@@ -192,11 +192,11 @@ export default function Navbar({ onToggleSidebar, sidebarOpen = false, liveCount
             <>
               {/* Deposit / Withdraw stacked — visible on all screens */}
               <div className="flex flex-col gap-0.5">
-                <Link href="/account/deposit"
+                <Link href="/wallet/deposit"
                   className="bg-green-600 hover:bg-green-700 text-white text-[8px] sm:text-[10px] font-bold px-1.5 sm:px-2.5 py-0.5 rounded transition text-center leading-tight">
                   Deposit
                 </Link>
-                <Link href="/account/withdraw"
+                <Link href="/wallet/withdraw"
                   className="bg-red-600 hover:bg-red-700 text-white text-[8px] sm:text-[10px] font-bold px-1.5 sm:px-2.5 py-0.5 rounded transition text-center leading-tight">
                   Withdraw
                 </Link>
@@ -383,13 +383,13 @@ export default function Navbar({ onToggleSidebar, sidebarOpen = false, liveCount
                     Account Settings
                   </DropdownLink>
                   <DropdownLink
-                    href="/account/deposit"
+                    href="/wallet/deposit"
                     onClick={() => setAccountOpen(false)}
                   >
                     Deposit
                   </DropdownLink>
                   <DropdownLink
-                    href="/account/withdraw"
+                    href="/wallet/withdraw"
                     onClick={() => setAccountOpen(false)}
                   >
                     Withdraw

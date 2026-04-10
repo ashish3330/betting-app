@@ -38,7 +38,8 @@ func (h *Handler) UPIDeposit(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	tx, err := h.service.InitiateUPIDeposit(r.Context(), userID, &req)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		h.service.logger.Error("UPI deposit initiation failed", "error", err, "user_id", userID)
+		writeError(w, http.StatusBadRequest, "failed to initiate UPI deposit")
 		return
 	}
 
@@ -55,7 +56,8 @@ func (h *Handler) CryptoDeposit(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	tx, err := h.service.InitiateCryptoDeposit(r.Context(), userID, &req)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		h.service.logger.Error("crypto deposit initiation failed", "error", err, "user_id", userID)
+		writeError(w, http.StatusBadRequest, "failed to initiate crypto deposit")
 		return
 	}
 
@@ -72,7 +74,8 @@ func (h *Handler) Withdraw(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	tx, err := h.service.InitiateWithdrawal(r.Context(), userID, &req)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		h.service.logger.Error("withdrawal initiation failed", "error", err, "user_id", userID)
+		writeError(w, http.StatusBadRequest, "failed to initiate withdrawal")
 		return
 	}
 
@@ -97,7 +100,8 @@ func (h *Handler) GetTransactions(w http.ResponseWriter, r *http.Request) {
 
 	txns, err := h.service.GetUserTransactions(r.Context(), userID, limit, offset)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		h.service.logger.Error("get transactions failed", "error", err, "user_id", userID)
+		writeError(w, http.StatusInternalServerError, "failed to retrieve transactions")
 		return
 	}
 
@@ -108,7 +112,8 @@ func (h *Handler) GetTransaction(w http.ResponseWriter, r *http.Request) {
 	txID := r.PathValue("id")
 	tx, err := h.service.GetTransaction(r.Context(), txID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		h.service.logger.Error("get transaction failed", "error", err, "tx_id", txID)
+		writeError(w, http.StatusNotFound, "transaction not found")
 		return
 	}
 
@@ -123,31 +128,55 @@ func (h *Handler) GetTransaction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) RazorpayWebhook(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to read body")
 		return
 	}
 
 	signature := r.Header.Get("X-Razorpay-Signature")
-	if err := h.service.HandleRazorpayWebhook(r.Context(), body, signature); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if !h.service.verifyRazorpaySignature(body, signature) {
+		h.service.logger.Warn("razorpay webhook: invalid signature")
+		writeError(w, http.StatusUnauthorized, "invalid signature")
 		return
+	}
+
+	// After signature verification succeeds, always return 200 to prevent
+	// retry storms from the payment provider. Log errors server-side.
+	if err := h.service.HandleRazorpayWebhook(r.Context(), body, signature); err != nil {
+		h.service.logger.Error("razorpay webhook processing failed", "error", err)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) CryptoWebhook(w http.ResponseWriter, r *http.Request) {
-	var webhook CryptoWebhook
-	if err := json.NewDecoder(r.Body).Decode(&webhook); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read body")
 		return
 	}
 
-	if err := h.service.HandleCryptoWebhook(r.Context(), &webhook); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	// Verify HMAC-SHA256 signature before processing the webhook.
+	signature := r.Header.Get("X-Webhook-Signature")
+	if !h.service.VerifyCryptoSignature(body, signature) {
+		h.service.logger.Warn("crypto webhook: invalid signature")
+		writeError(w, http.StatusUnauthorized, "invalid signature")
 		return
+	}
+
+	var webhook CryptoWebhook
+	if err := json.Unmarshal(body, &webhook); err != nil {
+		// Signature was valid but body is malformed -- return 200 to avoid retries.
+		h.service.logger.Error("crypto webhook: invalid JSON body", "error", err)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+
+	// After signature verification succeeds, always return 200 to prevent
+	// retry storms from the payment provider. Log errors server-side.
+	if err := h.service.HandleCryptoWebhook(r.Context(), &webhook); err != nil {
+		h.service.logger.Error("crypto webhook processing failed", "error", err)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

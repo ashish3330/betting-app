@@ -15,28 +15,48 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// Score multiplier and epoch offset for composite score computation.
+// Composite score encodes price-time priority into a single float64 for Redis sorted sets.
+//   Back side:  score = price * scoreMultiplier + (epochOffset - timestamp)  -> highest price, earliest time first
+//   Lay side:   score = price * scoreMultiplier + timestamp                  -> lowest price, earliest time first
+// epochOffset must exceed any plausible Unix timestamp to keep scores positive.
+const (
+	scoreMultiplier int64 = 10000000000 // 1e10 — enough room for timestamps up to ~9.9 billion
+	epochOffset     int64 = 9999999999  // ~year 2286, safely above current Unix timestamps (~1.7e9)
+)
+
 // Redis Lua script for atomic order matching with integer arithmetic.
 // Amounts are in paise/cents (multiplied by 100 at the Go level).
-// Composite score enforces price-time priority (FIFO at same price level):
-//   Back side:  score = price * 1000000 + (999999999 - timestamp_seconds)  -> highest price, earliest time first
-//   Lay side:   score = price * 1000000 + timestamp_seconds                -> lowest price, earliest time first
+// The suspension check is performed atomically inside the script so that no
+// race exists between the Go-level check and the actual matching.
 const luaMatchScript = `
-local backKey = KEYS[1]
-local layKey  = KEYS[2]
-local orderJSON = ARGV[1]
-local side      = ARGV[2]
+local backKey      = KEYS[1]
+local layKey       = KEYS[2]
+local suspendedKey = KEYS[3]
+local orderJSON    = ARGV[1]
+local side         = ARGV[2]
+
+-- Atomic suspension check: reject if market is suspended
+if redis.call('EXISTS', suspendedKey) == 1 then
+    return redis.error_reply("ERR market is suspended")
+end
 
 local ok, order = pcall(cjson.decode, orderJSON)
 if not ok then
     return redis.error_reply("ERR invalid order JSON: " .. tostring(order))
 end
 
+local SCORE_MULT  = 10000000000
+local EPOCH_OFF   = 9999999999
+
 local fills = {}
 local remainingStake = tonumber(order.stake)
+local orderUserID = tostring(order.user_id)
 
 if side == "back" then
     -- Back order matches against lay orders at same or lower price (lowest first)
-    local layOrders = redis.call('ZRANGEBYSCORE', layKey, '-inf', tostring(order.price * 1000000 + 999999999))
+    local maxLayScore = tostring(order.price * SCORE_MULT + EPOCH_OFF)
+    local layOrders = redis.call('ZRANGEBYSCORE', layKey, '-inf', maxLayScore)
     for _, layJSON in ipairs(layOrders) do
         if remainingStake <= 0 then break end
         local lok, lay = pcall(cjson.decode, layJSON)
@@ -47,29 +67,33 @@ if side == "back" then
         if tonumber(lay.price) > tonumber(order.price) then
             break
         end
-        local layRemaining = tonumber(lay.remaining)
-        local fillSize = remainingStake
-        if layRemaining < fillSize then
-            fillSize = layRemaining
-        end
-        remainingStake = remainingStake - fillSize
-        lay.remaining = layRemaining - fillSize
+        -- Self-trade prevention: skip orders from the same user
+        if tostring(lay.user_id) ~= orderUserID then
+            local layRemaining = tonumber(lay.remaining)
+            local fillSize = remainingStake
+            if layRemaining < fillSize then
+                fillSize = layRemaining
+            end
+            remainingStake = remainingStake - fillSize
+            lay.remaining = layRemaining - fillSize
 
-        fills[#fills + 1] = cjson.encode({
-            counter_bet_id = lay.id,
-            price = lay.price,
-            size = fillSize
-        })
+            fills[#fills + 1] = cjson.encode({
+                counter_bet_id = lay.id,
+                price = lay.price,
+                size = fillSize
+            })
 
-        redis.call('ZREM', layKey, layJSON)
-        if lay.remaining > 0 then
-            local newScore = tonumber(lay.price) * 1000000 + tonumber(lay.timestamp)
-            redis.call('ZADD', layKey, newScore, cjson.encode(lay))
+            redis.call('ZREM', layKey, layJSON)
+            if lay.remaining > 0 then
+                local newScore = tonumber(lay.price) * SCORE_MULT + tonumber(lay.timestamp)
+                redis.call('ZADD', layKey, newScore, cjson.encode(lay))
+            end
         end
     end
 else
     -- Lay order matches against back orders at same or higher price (highest first)
-    local backOrders = redis.call('ZREVRANGEBYSCORE', backKey, '+inf', tostring(order.price * 1000000))
+    local minBackScore = tostring(order.price * SCORE_MULT)
+    local backOrders = redis.call('ZREVRANGEBYSCORE', backKey, '+inf', minBackScore)
     for _, backJSON in ipairs(backOrders) do
         if remainingStake <= 0 then break end
         local bok, back = pcall(cjson.decode, backJSON)
@@ -80,24 +104,27 @@ else
         if tonumber(back.price) < tonumber(order.price) then
             break
         end
-        local backRemaining = tonumber(back.remaining)
-        local fillSize = remainingStake
-        if backRemaining < fillSize then
-            fillSize = backRemaining
-        end
-        remainingStake = remainingStake - fillSize
-        back.remaining = backRemaining - fillSize
+        -- Self-trade prevention: skip orders from the same user
+        if tostring(back.user_id) ~= orderUserID then
+            local backRemaining = tonumber(back.remaining)
+            local fillSize = remainingStake
+            if backRemaining < fillSize then
+                fillSize = backRemaining
+            end
+            remainingStake = remainingStake - fillSize
+            back.remaining = backRemaining - fillSize
 
-        fills[#fills + 1] = cjson.encode({
-            counter_bet_id = back.id,
-            price = back.price,
-            size = fillSize
-        })
+            fills[#fills + 1] = cjson.encode({
+                counter_bet_id = back.id,
+                price = back.price,
+                size = fillSize
+            })
 
-        redis.call('ZREM', backKey, backJSON)
-        if back.remaining > 0 then
-            local newScore = tonumber(back.price) * 1000000 + (999999999 - tonumber(back.timestamp))
-            redis.call('ZADD', backKey, newScore, cjson.encode(back))
+            redis.call('ZREM', backKey, backJSON)
+            if back.remaining > 0 then
+                local newScore = tonumber(back.price) * SCORE_MULT + (EPOCH_OFF - tonumber(back.timestamp))
+                redis.call('ZADD', backKey, newScore, cjson.encode(back))
+            end
         end
     end
 end
@@ -106,10 +133,10 @@ end
 if remainingStake > 0 then
     order.remaining = remainingStake
     if side == "back" then
-        local score = tonumber(order.price) * 1000000 + (999999999 - tonumber(order.timestamp))
+        local score = tonumber(order.price) * SCORE_MULT + (EPOCH_OFF - tonumber(order.timestamp))
         redis.call('ZADD', backKey, score, cjson.encode(order))
     else
-        local score = tonumber(order.price) * 1000000 + tonumber(order.timestamp)
+        local score = tonumber(order.price) * SCORE_MULT + tonumber(order.timestamp)
         redis.call('ZADD', layKey, score, cjson.encode(order))
     end
 end
@@ -121,11 +148,34 @@ return cjson.encode({
 })
 `
 
+// Lua script for atomic cancel: scans the sorted set for the order by betID,
+// verifies ownership, removes it, and returns the order JSON. This replaces the
+// non-atomic Go-level ZSCAN+ZREM pattern.
+const luaCancelScript = `
+local key    = KEYS[1]
+local betID  = ARGV[1]
+local userID = ARGV[2]
+
+local members = redis.call('ZRANGE', key, 0, -1)
+for _, memberJSON in ipairs(members) do
+    local ok, order = pcall(cjson.decode, memberJSON)
+    if ok and order.id == betID then
+        if tostring(order.user_id) ~= userID then
+            return redis.error_reply("ERR order belongs to another user")
+        end
+        redis.call('ZREM', key, memberJSON)
+        return memberJSON
+    end
+end
+return redis.error_reply("ERR order not found: " .. betID)
+`
+
 type Engine struct {
-	redis       *redis.Client
-	logger      *slog.Logger
-	orderPool   sync.Pool
-	matchScript *redis.Script
+	redis        *redis.Client
+	logger       *slog.Logger
+	orderPool    sync.Pool
+	matchScript  *redis.Script
+	cancelScript *redis.Script
 }
 
 // redisOrder uses integer amounts (paise/cents) internally to avoid float precision issues.
@@ -159,7 +209,8 @@ func NewEngine(rdb *redis.Client, logger *slog.Logger) *Engine {
 		orderPool: sync.Pool{
 			New: func() interface{} { return &redisOrder{} },
 		},
-		matchScript: redis.NewScript(luaMatchScript),
+		matchScript:  redis.NewScript(luaMatchScript),
+		cancelScript: redis.NewScript(luaCancelScript),
 	}
 }
 
@@ -214,17 +265,9 @@ func (e *Engine) ResumeMarket(ctx context.Context, marketID string) error {
 }
 
 // PlaceAndMatch places an order and atomically matches it against the opposing side.
-// Returns an error if the market is suspended.
+// The suspension check is performed atomically inside the Lua script to prevent
+// race conditions between checking and matching.
 func (e *Engine) PlaceAndMatch(ctx context.Context, req *models.PlaceBetRequest, userID int64) (*models.MatchResult, error) {
-	// Circuit breaker: check if market is suspended
-	suspended, err := e.IsMarketSuspended(ctx, req.MarketID)
-	if err != nil {
-		return nil, fmt.Errorf("check suspension: %w", err)
-	}
-	if suspended {
-		return nil, fmt.Errorf("market %s is suspended", req.MarketID)
-	}
-
 	betID := uuid.New().String()
 
 	order := e.orderPool.Get().(*redisOrder)
@@ -246,9 +289,10 @@ func (e *Engine) PlaceAndMatch(ctx context.Context, req *models.PlaceBetRequest,
 
 	backKey := fmt.Sprintf("orderbook:%s:back", req.MarketID)
 	layKey := fmt.Sprintf("orderbook:%s:lay", req.MarketID)
+	suspendedKey := fmt.Sprintf("market:suspended:%s", req.MarketID)
 
 	result, err := e.matchScript.Run(ctx, e.redis,
-		[]string{backKey, layKey},
+		[]string{backKey, layKey, suspendedKey},
 		string(orderJSON), string(req.Side),
 	).Result()
 	if err != nil {
@@ -320,40 +364,44 @@ func (e *Engine) PlaceAndMatch(ctx context.Context, req *models.PlaceBetRequest,
 	return matchResult, nil
 }
 
-// CancelOrder removes an order from the Redis order book.
-func (e *Engine) CancelOrder(ctx context.Context, marketID, betID string, side models.BetSide) error {
+// CancelledOrder holds the details of a cancelled order for downstream processing.
+type CancelledOrder struct {
+	UserID    int64
+	Price     float64
+	Remaining float64
+	Side      models.BetSide
+}
+
+// CancelOrder atomically finds and removes an order from the Redis order book
+// using a Lua script that verifies ownership. Returns the cancelled order details.
+func (e *Engine) CancelOrder(ctx context.Context, marketID, betID string, side models.BetSide, userID int64) (*CancelledOrder, error) {
 	key := fmt.Sprintf("orderbook:%s:%s", marketID, side)
 
-	// Scan for the order and remove it
-	var cursor uint64
-	for {
-		keys, nextCursor, err := e.redis.ZScan(ctx, key, cursor, fmt.Sprintf("*%s*", betID), 100).Result()
-		if err != nil {
-			return fmt.Errorf("scan orderbook: %w", err)
-		}
-
-		for i := 0; i < len(keys); i += 2 {
-			member := keys[i]
-			var order redisOrder
-			if err := json.Unmarshal([]byte(member), &order); err != nil {
-				return fmt.Errorf("parse order during cancel scan: %w", err)
-			}
-			if order.ID == betID {
-				if err := e.redis.ZRem(ctx, key, member).Err(); err != nil {
-					return fmt.Errorf("remove order: %w", err)
-				}
-				e.logger.InfoContext(ctx, "order cancelled", "bet_id", betID, "market", marketID)
-				return nil
-			}
-		}
-
-		cursor = nextCursor
-		if cursor == 0 {
-			break
-		}
+	result, err := e.cancelScript.Run(ctx, e.redis,
+		[]string{key},
+		betID, fmt.Sprintf("%d", userID),
+	).Result()
+	if err != nil {
+		return nil, fmt.Errorf("cancel order: %w", err)
 	}
 
-	return fmt.Errorf("order not found: %s", betID)
+	resultStr, ok := result.(string)
+	if !ok {
+		return nil, fmt.Errorf("unexpected cancel result type: %T", result)
+	}
+
+	var order redisOrder
+	if err := json.Unmarshal([]byte(resultStr), &order); err != nil {
+		return nil, fmt.Errorf("parse cancelled order: %w", err)
+	}
+
+	e.logger.InfoContext(ctx, "order cancelled", "bet_id", betID, "market", marketID)
+	return &CancelledOrder{
+		UserID:    order.UserID,
+		Price:     toFloatPrice(order.Price),
+		Remaining: toFloatAmount(order.Remaining),
+		Side:      side,
+	}, nil
 }
 
 // GetOrderBook returns the best backs and lays aggregated by price level.
@@ -447,11 +495,18 @@ func (e *Engine) ExpireOrders(ctx context.Context, marketID string, before time.
 }
 
 // PersistOrder writes the order and its match result to the PostgreSQL bets table
-// so that data survives a Redis crash.
+// inside a single database transaction so that data is consistent even if the
+// process crashes mid-write.
 func (e *Engine) PersistOrder(ctx context.Context, db *sql.DB, req *models.PlaceBetRequest, userID int64, matchResult *models.MatchResult) error {
 	now := time.Now()
 
-	_, err := db.ExecContext(ctx,
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin persist tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback is a no-op after commit
+
+	_, err = tx.ExecContext(ctx,
 		`INSERT INTO bets (id, market_id, selection_id, user_id, side, price, stake,
 		                    matched_stake, unmatched_stake, status, client_ref, created_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
@@ -478,7 +533,7 @@ func (e *Engine) PersistOrder(ctx context.Context, db *sql.DB, req *models.Place
 
 	// Persist individual fills
 	for _, fill := range matchResult.Fills {
-		_, err := db.ExecContext(ctx,
+		_, err := tx.ExecContext(ctx,
 			`INSERT INTO bet_fills (bet_id, counter_bet_id, price, size, created_at)
 			 VALUES ($1, $2, $3, $4, $5)
 			 ON CONFLICT DO NOTHING`,
@@ -489,7 +544,7 @@ func (e *Engine) PersistOrder(ctx context.Context, db *sql.DB, req *models.Place
 		}
 
 		// Update the counter-order's matched/unmatched stakes in DB
-		_, err = db.ExecContext(ctx,
+		_, err = tx.ExecContext(ctx,
 			`UPDATE bets SET
 			     matched_stake = matched_stake + $1,
 			     unmatched_stake = GREATEST(unmatched_stake - $1, 0),
@@ -505,6 +560,9 @@ func (e *Engine) PersistOrder(ctx context.Context, db *sql.DB, req *models.Place
 		}
 	}
 
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit persist tx: %w", err)
+	}
 	return nil
 }
 
@@ -557,9 +615,9 @@ func (e *Engine) RecoverOrders(ctx context.Context, db *sql.DB) (int, error) {
 		key := fmt.Sprintf("orderbook:%s:%s", marketID, side)
 		var score float64
 		if side == "back" {
-			score = float64(order.Price)*1000000 + float64(999999999-order.Timestamp)
+			score = float64(order.Price)*float64(scoreMultiplier) + float64(epochOffset-order.Timestamp)
 		} else {
-			score = float64(order.Price)*1000000 + float64(order.Timestamp)
+			score = float64(order.Price)*float64(scoreMultiplier) + float64(order.Timestamp)
 		}
 
 		if err := e.redis.ZAdd(ctx, key, redis.Z{

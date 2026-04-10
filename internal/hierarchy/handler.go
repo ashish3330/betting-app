@@ -29,7 +29,7 @@ func (h *Handler) GetChildren(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	children, err := h.service.GetChildren(r.Context(), userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to load children")
 		return
 	}
 	writeJSON(w, http.StatusOK, children)
@@ -39,7 +39,7 @@ func (h *Handler) GetDirectChildren(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	children, err := h.service.GetDirectChildren(r.Context(), userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to load direct children")
 		return
 	}
 	writeJSON(w, http.StatusOK, children)
@@ -59,7 +59,7 @@ func (h *Handler) TransferCredit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.service.TransferCredit(r.Context(), &req); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, "credit transfer failed")
 		return
 	}
 
@@ -112,8 +112,21 @@ func (h *Handler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Prevent reactivation of self-excluded users during exclusion period
+	if req.Status == "active" {
+		excluded, until, checkErr := h.service.IsUserSelfExcluded(r.Context(), id)
+		if checkErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to check self-exclusion status")
+			return
+		}
+		if excluded {
+			writeError(w, http.StatusForbidden, "user is self-excluded until "+until.Format("2006-01-02")+"; cannot reactivate during exclusion period")
+			return
+		}
+	}
+
 	if err := h.service.UpdateUserStatus(r.Context(), id, req.Status); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to update user status")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "status updated"})

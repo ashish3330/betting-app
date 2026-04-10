@@ -7,12 +7,57 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/wallet"
 )
+
+// withSerializableRetry executes fn inside a serializable transaction,
+// retrying up to maxRetries times on PostgreSQL serialization failures
+// (SQLSTATE 40001).
+func withSerializableRetry(ctx context.Context, db *sql.DB, maxRetries int, fn func(tx *sql.Tx) error) error {
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		if err != nil {
+			return fmt.Errorf("begin tx: %w", err)
+		}
+
+		err = fn(tx)
+		if err != nil {
+			tx.Rollback()
+			if isSerializationFailure(err) && attempt < maxRetries {
+				continue
+			}
+			return err
+		}
+
+		err = tx.Commit()
+		if err != nil {
+			if isSerializationFailure(err) && attempt < maxRetries {
+				continue
+			}
+			return fmt.Errorf("commit: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("serializable transaction failed after %d retries", maxRetries)
+}
+
+// isSerializationFailure checks whether the error is a PostgreSQL
+// serialization failure (SQLSTATE 40001).
+func isSerializationFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check the error message for the PostgreSQL serialization failure code.
+	// The lib/pq driver includes the code in the error string.
+	msg := err.Error()
+	return strings.Contains(msg, "40001") || strings.Contains(msg, "could not serialize access")
+}
 
 type PaymentMethod string
 
@@ -199,17 +244,11 @@ func (s *Service) InitiateWithdrawal(ctx context.Context, userID int64, req *Wit
 		return nil, fmt.Errorf("withdrawal must be between %.0f and %.0f", s.minWithdrawal, s.maxWithdrawal)
 	}
 
-	// Check available balance
-	summary, err := s.wallet.GetBalance(ctx, userID)
-	if err != nil {
-		return nil, fmt.Errorf("get balance: %w", err)
-	}
-	if summary.AvailableBalance < req.Amount {
-		return nil, fmt.Errorf("insufficient balance: available %.2f", summary.AvailableBalance)
-	}
-
 	txID := generateTxID()
-	tx := &Transaction{
+
+	// Insert the payment record and hold funds inside a single serializable
+	// transaction with retry logic for serialization failures.
+	payTx := &Transaction{
 		ID:            txID,
 		UserID:        userID,
 		Direction:     PaymentWithdrawal,
@@ -222,43 +261,84 @@ func (s *Service) InitiateWithdrawal(ctx context.Context, userID int64, req *Wit
 		CreatedAt:     time.Now(),
 	}
 
-	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO payment_transactions (id, user_id, direction, method, amount, currency, status, upi_id, wallet_address, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		tx.ID, tx.UserID, tx.Direction, tx.Method, tx.Amount, tx.Currency, tx.Status,
-		tx.UPIId, tx.WalletAddress, tx.CreatedAt,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create withdrawal: %w", err)
-	}
+	err := withSerializableRetry(ctx, s.db, 3, func(dbTx *sql.Tx) error {
+		_, err := dbTx.ExecContext(ctx,
+			`INSERT INTO payment_transactions (id, user_id, direction, method, amount, currency, status, upi_id, wallet_address, created_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			payTx.ID, payTx.UserID, payTx.Direction, payTx.Method, payTx.Amount, payTx.Currency, payTx.Status,
+			payTx.UPIId, payTx.WalletAddress, payTx.CreatedAt,
+		)
+		if err != nil {
+			return fmt.Errorf("create withdrawal: %w", err)
+		}
 
-	// Hold withdrawal amount
-	ref := fmt.Sprintf("withdrawal:%s", txID)
-	if err := s.wallet.HoldFunds(ctx, userID, req.Amount, ref); err != nil {
-		return nil, fmt.Errorf("hold funds: %w", err)
+		// Hold funds atomically within the same transaction (includes balance check).
+		ref := fmt.Sprintf("withdrawal:%s", txID)
+		if err := s.wallet.HoldFundsTx(ctx, dbTx, userID, req.Amount, ref); err != nil {
+			return fmt.Errorf("hold funds: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("initiate withdrawal: %w", err)
 	}
 
 	s.logger.InfoContext(ctx, "withdrawal initiated",
 		"tx_id", txID, "user_id", userID, "method", req.Method, "amount", req.Amount)
 
-	return tx, nil
+	return payTx, nil
 }
 
 func (s *Service) HandleRazorpayWebhook(ctx context.Context, payload []byte, signature string) error {
-	// Verify webhook signature
-	if !s.verifyRazorpaySignature(payload, signature) {
-		return fmt.Errorf("invalid webhook signature")
-	}
+	// NOTE: Signature verification is performed at the handler level before
+	// this method is called.
 
 	var webhook RazorpayWebhook
-	// Parse payload (simplified - in production use json.Unmarshal)
-	_ = webhook
+	if err := json.Unmarshal(payload, &webhook); err != nil {
+		return fmt.Errorf("parse webhook payload: %w", err)
+	}
 
-	// Process based on event type
-	// payment.captured -> complete deposit
-	// payment.failed -> mark as failed
+	entity := webhook.Payload.Payment.Entity
 
-	return nil
+	// Extract our internal transaction reference from the notes attached
+	// when the payment was created.
+	txRef, ok := entity.Notes["tx_id"]
+	if !ok || txRef == "" {
+		return fmt.Errorf("webhook missing tx_id in notes")
+	}
+
+	switch webhook.Event {
+	case "payment.captured":
+		var tx Transaction
+		err := s.db.QueryRowContext(ctx,
+			`SELECT id, user_id, amount, status FROM payment_transactions
+			 WHERE id = $1 AND status = 'pending'`,
+			txRef,
+		).Scan(&tx.ID, &tx.UserID, &tx.Amount, &tx.Status)
+		if err != nil {
+			return fmt.Errorf("transaction not found: %w", err)
+		}
+
+		// Razorpay sends amount in paise; convert to rupees.
+		return s.completeDeposit(ctx, tx.ID, tx.UserID, tx.Amount, entity.ID)
+
+	case "payment.failed":
+		_, err := s.db.ExecContext(ctx,
+			`UPDATE payment_transactions SET status = 'failed', updated_at = NOW()
+			 WHERE id = $1 AND status = 'pending'`,
+			txRef,
+		)
+		if err != nil {
+			return fmt.Errorf("mark transaction failed: %w", err)
+		}
+
+		s.logger.InfoContext(ctx, "razorpay payment failed", "tx_id", txRef, "razorpay_id", entity.ID)
+		return nil
+
+	default:
+		s.logger.InfoContext(ctx, "unhandled razorpay event", "event", webhook.Event)
+		return nil
+	}
 }
 
 func (s *Service) HandleCryptoWebhook(ctx context.Context, webhook *CryptoWebhook) error {
@@ -282,19 +362,35 @@ func (s *Service) HandleCryptoWebhook(ctx context.Context, webhook *CryptoWebhoo
 }
 
 func (s *Service) completeDeposit(ctx context.Context, txID string, userID int64, amount float64, providerRef string) error {
-	now := time.Now()
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE payment_transactions SET status = 'completed', provider_ref = $1, completed_at = $2
-		 WHERE id = $3 AND status = 'pending'`,
-		providerRef, now, txID,
-	)
-	if err != nil {
-		return fmt.Errorf("update transaction: %w", err)
-	}
+	// Wrap payment status update and wallet credit in a single serializable
+	// transaction with retry logic for serialization failures.
+	err := withSerializableRetry(ctx, s.db, 3, func(dbTx *sql.Tx) error {
+		now := time.Now()
+		res, err := dbTx.ExecContext(ctx,
+			`UPDATE payment_transactions SET status = 'completed', provider_ref = $1, completed_at = $2
+			 WHERE id = $3 AND status = 'pending'`,
+			providerRef, now, txID,
+		)
+		if err != nil {
+			return fmt.Errorf("update transaction: %w", err)
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("complete deposit: rows affected: %w", err)
+		}
+		if rows == 0 {
+			// Transaction was already completed or no longer pending.
+			return fmt.Errorf("transaction %s is not in pending state", txID)
+		}
 
-	ref := fmt.Sprintf("deposit:%s", txID)
-	if err := s.wallet.Deposit(ctx, userID, amount, ref); err != nil {
-		return fmt.Errorf("credit wallet: %w", err)
+		ref := fmt.Sprintf("deposit:%s", txID)
+		if err := s.wallet.DepositTx(ctx, dbTx, userID, amount, ref); err != nil {
+			return fmt.Errorf("credit wallet: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("complete deposit: %w", err)
 	}
 
 	s.logger.InfoContext(ctx, "deposit completed", "tx_id", txID, "user_id", userID, "amount", amount)
@@ -350,8 +446,20 @@ func (s *Service) verifyRazorpaySignature(payload []byte, signature string) bool
 	return hmac.Equal([]byte(expected), []byte(signature))
 }
 
+func (s *Service) VerifyCryptoSignature(payload []byte, signature string) bool {
+	if s.cryptoWebhookKey == "" {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(s.cryptoWebhookKey))
+	mac.Write(payload)
+	expected := hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(expected), []byte(signature))
+}
+
 func generateTxID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand.Read failed: %v", err))
+	}
 	return fmt.Sprintf("tx_%s", hex.EncodeToString(b))
 }

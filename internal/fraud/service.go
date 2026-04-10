@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -22,14 +22,17 @@ const (
 )
 
 type Alert struct {
-	ID        string    `json:"id"`
-	UserID    int64     `json:"user_id"`
-	Type      string    `json:"type"`
-	Risk      RiskLevel `json:"risk_level"`
-	Details   string    `json:"details"`
-	Score     float64   `json:"score"`
-	Resolved  bool      `json:"resolved"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         string     `json:"id"`
+	UserID     int64      `json:"user_id"`
+	Type       string     `json:"type"`
+	Risk       RiskLevel  `json:"risk_level"`
+	Details    string     `json:"details"`
+	Score      float64    `json:"score"`
+	Resolved   bool       `json:"resolved"`
+	ResolvedBy *int64     `json:"resolved_by,omitempty"`
+	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
+	Resolution string     `json:"resolution,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
 }
 
 type UserRiskProfile struct {
@@ -68,12 +71,21 @@ type Thresholds struct {
 	ArbSpreadLimit    float64
 }
 
+// luaFreqCount is a Lua script that atomically performs the sliding window
+// frequency count: remove expired entries, add the new entry, set expiry,
+// and return the current count.
+var luaFreqCount = redis.NewScript(`
+	redis.call('ZREMRANGEBYSCORE', KEYS[1], '0', ARGV[1])
+	redis.call('ZADD', KEYS[1], ARGV[2], ARGV[3])
+	redis.call('EXPIRE', KEYS[1], 120)
+	return redis.call('ZCARD', KEYS[1])
+`)
+
 type Service struct {
 	db         *sql.DB
 	redis      *redis.Client
 	logger     *slog.Logger
 	thresholds Thresholds
-	alertsMu   sync.Mutex
 }
 
 func NewService(db *sql.DB, rdb *redis.Client, logger *slog.Logger) *Service {
@@ -102,16 +114,20 @@ func (s *Service) AnalyzeBet(ctx context.Context, pattern *BetPattern) (*UserRis
 	var flags []string
 	var riskScore float64
 
-	// 1. Bet frequency check (Redis sliding window)
+	// 1. Bet frequency check (Redis sliding window via atomic Lua script)
 	freqKey := fmt.Sprintf("fraud:freq:%d", pattern.UserID)
 	now := time.Now().UnixMilli()
 	windowStart := now - 60000 // 1 minute window
 
-	s.redis.ZRemRangeByScore(ctx, freqKey, "0", fmt.Sprintf("%d", windowStart))
-	s.redis.ZAdd(ctx, freqKey, redis.Z{Score: float64(now), Member: now})
-	s.redis.Expire(ctx, freqKey, 2*time.Minute)
-
-	count, _ := s.redis.ZCard(ctx, freqKey).Result()
+	count, err := luaFreqCount.Run(ctx, s.redis, []string{freqKey},
+		fmt.Sprintf("%d", windowStart),
+		float64(now),
+		now,
+	).Int64()
+	if err != nil {
+		s.logger.WarnContext(ctx, "frequency check failed", "user_id", pattern.UserID, "error", err)
+		count = 0
+	}
 	profile.BetFrequency = float64(count)
 
 	if profile.BetFrequency > s.thresholds.MaxBetsPerMinute {
@@ -216,7 +232,7 @@ func (s *Service) AnalyzeBet(ctx context.Context, pattern *BetPattern) (*UserRis
 	// Create alert if high risk
 	if profile.RiskLevel == RiskHigh || profile.RiskLevel == RiskCritical {
 		alert := &Alert{
-			ID:        fmt.Sprintf("alert-%d-%d", pattern.UserID, time.Now().UnixNano()),
+			ID:        fmt.Sprintf("alert-%d-%s", pattern.UserID, uuid.New().String()),
 			UserID:    pattern.UserID,
 			Type:      "bet_analysis",
 			Risk:      profile.RiskLevel,
@@ -277,10 +293,18 @@ func (s *Service) GetAlerts(ctx context.Context, resolved *bool, limit int) ([]*
 	return alerts, rows.Err()
 }
 
-func (s *Service) ResolveAlert(ctx context.Context, alertID string) error {
+func (s *Service) ResolveAlert(ctx context.Context, alertID string, adminID int64, resolution string) error {
+	now := time.Now()
 	_, err := s.db.ExecContext(ctx,
-		"UPDATE fraud_alerts SET resolved = true WHERE id = $1", alertID)
-	return err
+		`UPDATE fraud_alerts SET resolved = true, resolved_by = $1, resolved_at = $2, resolution = $3
+		 WHERE id = $4`,
+		adminID, now, resolution, alertID)
+	if err != nil {
+		return fmt.Errorf("resolve alert: %w", err)
+	}
+	s.logger.InfoContext(ctx, "fraud alert resolved",
+		"alert_id", alertID, "admin_id", adminID, "resolved_at", now)
+	return nil
 }
 
 func (s *Service) GetUserRiskScore(ctx context.Context, userID int64) (float64, RiskLevel, error) {

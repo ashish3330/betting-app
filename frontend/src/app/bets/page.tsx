@@ -132,16 +132,16 @@ export default function BetsPage() {
     const matchedBets = betList.filter(
       (b) => b.status === "matched" || b.status === "open" || b.status === "partially_matched"
     );
+    const results = await Promise.all(
+      matchedBets.map((bet) =>
+        api.getCashoutOffer(bet.id)
+          .then((data) => ({ id: bet.id, offer: data.offer }))
+          .catch(() => ({ id: bet.id, offer: 0 }))
+      )
+    );
     const offers: Record<string, number> = {};
-    for (const bet of matchedBets) {
-      try {
-        const data = await api.getCashoutOffer(bet.id);
-        if (data.offer && data.offer > 0) {
-          offers[bet.id] = data.offer;
-        }
-      } catch {
-        // silent
-      }
+    for (const { id, offer } of results) {
+      if (offer && offer > 0) offers[id] = offer;
     }
     setCashoutOffers(offers);
   }, []);

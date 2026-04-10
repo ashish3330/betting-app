@@ -3,6 +3,7 @@ package settlement
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -329,13 +330,23 @@ func (s *Service) VoidMarket(ctx context.Context, marketID string) error {
 
 // ProcessOutbox reads pending settlement events and executes the corresponding
 // wallet operations. This is idempotent and safe to retry.
+// Uses FOR UPDATE SKIP LOCKED to prevent concurrent processors from claiming the same events.
 func (s *Service) ProcessOutbox(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx,
+	// Use a transaction with FOR UPDATE SKIP LOCKED so concurrent callers
+	// don't process the same events.
+	claimTx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin claim tx: %w", err)
+	}
+	defer claimTx.Rollback()
+
+	rows, err := claimTx.QueryContext(ctx,
 		`SELECT id, market_id, bet_id, user_id, event_type, amount, commission, held_stake
 		 FROM settlement_events
 		 WHERE status = 'pending'
 		 ORDER BY id ASC
-		 LIMIT 1000`,
+		 LIMIT 500
+		 FOR UPDATE SKIP LOCKED`,
 	)
 	if err != nil {
 		return fmt.Errorf("query outbox: %w", err)
@@ -355,25 +366,58 @@ func (s *Service) ProcessOutbox(ctx context.Context) error {
 		return fmt.Errorf("iterate outbox: %w", err)
 	}
 
+	// Mark claimed events as "processing" within the claim transaction so
+	// they are not picked up again if the process crashes.
+	for _, ev := range events {
+		_, err := claimTx.ExecContext(ctx,
+			"UPDATE settlement_events SET status = 'processing' WHERE id = $1",
+			ev.ID,
+		)
+		if err != nil {
+			return fmt.Errorf("mark event %d as processing: %w", ev.ID, err)
+		}
+	}
+	if err := claimTx.Commit(); err != nil {
+		return fmt.Errorf("commit claim tx: %w", err)
+	}
+
 	for _, ev := range events {
 		var processErr error
 
 		switch ev.EventType {
 		case "settle":
-			// Release held funds then settle P&L
+			// Release held funds then settle P&L.
+			// Handle ErrDuplicateOperation: if ReleaseFunds was already applied
+			// (e.g. on retry after partial failure), treat it as success and
+			// proceed to SettleBet.
 			if err := s.wallet.ReleaseFunds(ctx, ev.UserID, ev.HeldStake, ev.BetID); err != nil {
-				processErr = fmt.Errorf("release funds for bet %s: %w", ev.BetID, err)
+				if errors.Is(err, wallet.ErrDuplicateOperation) {
+					s.logger.InfoContext(ctx, "ReleaseFunds already applied, continuing to SettleBet",
+						"event_id", ev.ID, "bet_id", ev.BetID)
+				} else {
+					processErr = fmt.Errorf("release funds for bet %s: %w", ev.BetID, err)
+				}
 			}
 			if processErr == nil {
 				if err := s.wallet.SettleBet(ctx, ev.UserID, ev.BetID, ev.Amount, ev.Commission); err != nil {
-					processErr = fmt.Errorf("settle bet %s: %w", ev.BetID, err)
+					if errors.Is(err, wallet.ErrDuplicateOperation) {
+						s.logger.InfoContext(ctx, "SettleBet already applied",
+							"event_id", ev.ID, "bet_id", ev.BetID)
+					} else {
+						processErr = fmt.Errorf("settle bet %s: %w", ev.BetID, err)
+					}
 				}
 			}
 
 		case "void_release":
 			// Just release the held stake
 			if err := s.wallet.ReleaseFunds(ctx, ev.UserID, ev.HeldStake, ev.BetID); err != nil {
-				processErr = fmt.Errorf("void release for bet %s: %w", ev.BetID, err)
+				if errors.Is(err, wallet.ErrDuplicateOperation) {
+					s.logger.InfoContext(ctx, "void ReleaseFunds already applied",
+						"event_id", ev.ID, "bet_id", ev.BetID)
+				} else {
+					processErr = fmt.Errorf("void release for bet %s: %w", ev.BetID, err)
+				}
 			}
 
 		default:
@@ -464,14 +508,17 @@ func (s *Service) RollbackSettlement(ctx context.Context, marketID string) error
 		return fmt.Errorf("revert bet statuses: %w", err)
 	}
 
-	// Write compensating settlement events (reverse the P&L)
+	// Write compensating settlement events (reverse the P&L).
+	// Set held_stake to the original matched_stake so ProcessOutbox will
+	// re-hold the funds (restoring exposure) when processing the reversal.
 	for _, bet := range bets {
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO settlement_events
 			     (market_id, bet_id, user_id, event_type, amount, commission, held_stake, status, created_at)
-			 VALUES ($1, $2, $3, 'settle', $4, 0, 0, 'pending', NOW())`,
+			 VALUES ($1, $2, $3, 'settle', $4, 0, $5, 'pending', NOW())`,
 			marketID, bet.ID, bet.UserID,
 			-bet.Profit, // reverse the original P&L
+			bet.MatchedStake, // restore exposure hold
 		)
 		if err != nil {
 			return fmt.Errorf("write rollback outbox for bet %s: %w", bet.ID, err)

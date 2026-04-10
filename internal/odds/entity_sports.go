@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
@@ -74,7 +75,7 @@ func (e *EntitySportsProvider) FetchMarkets(ctx context.Context, sport string) (
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10 MB limit
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -111,37 +112,52 @@ func (e *EntitySportsProvider) FetchMarkets(ctx context.Context, sport string) (
 }
 
 func (e *EntitySportsProvider) Subscribe(ctx context.Context, marketIDs []string, updates chan<- *models.OddsUpdate) error {
-	// Poll-based subscription with exponential backoff on failures
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+	// Poll-based subscription with concurrent fetching per market.
+	// Each market gets its own goroutine with independent backoff.
+	var wg sync.WaitGroup
 
-	backoff := time.Second
-	maxBackoff := 30 * time.Second
+	for _, mid := range marketIDs {
+		wg.Add(1)
+		go func(marketID string) {
+			defer wg.Done()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			for _, mid := range marketIDs {
-				update, err := e.fetchLiveOdds(ctx, mid)
-				if err != nil {
-					e.logger.WarnContext(ctx, "fetch odds failed, backing off",
-						"market", mid, "error", err, "backoff", backoff)
-					time.Sleep(backoff)
-					backoff = min(backoff*2, maxBackoff)
-					continue
-				}
-				backoff = time.Second // reset on success
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
 
+			backoff := time.Second
+			maxBackoff := 30 * time.Second
+
+			for {
 				select {
-				case updates <- update:
 				case <-ctx.Done():
-					return ctx.Err()
+					return
+				case <-ticker.C:
+					update, err := e.fetchLiveOdds(ctx, marketID)
+					if err != nil {
+						e.logger.WarnContext(ctx, "fetch odds failed, backing off",
+							"market", marketID, "error", err, "backoff", backoff)
+						select {
+						case <-time.After(backoff):
+						case <-ctx.Done():
+							return
+						}
+						backoff = min(backoff*2, maxBackoff)
+						continue
+					}
+					backoff = time.Second // reset on success
+
+					select {
+					case updates <- update:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
-		}
+		}(mid)
 	}
+
+	wg.Wait()
+	return ctx.Err()
 }
 
 func (e *EntitySportsProvider) fetchLiveOdds(ctx context.Context, marketID string) (*models.OddsUpdate, error) {

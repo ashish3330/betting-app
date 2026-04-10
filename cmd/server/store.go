@@ -761,13 +761,22 @@ func (s *Store) GetUserByUsername(username string) *User {
 	u := s.usersByName[username]
 	s.mu.RUnlock()
 	if u != nil {
-		// Sync balance from DB for freshness
+		// Sync balance from DB for freshness — mutation and copy must happen
+		// under the same write lock to avoid a data race with readers.
 		if useDB() {
 			bal, exp := dbSyncUserBalance(u.ID)
+			s.mu.Lock()
 			u.Balance = bal
 			u.Exposure = exp
+			cp := *u
+			s.mu.Unlock()
+			return &cp
 		}
-		return u
+		// Return a copy so callers cannot race on the struct fields.
+		s.mu.RLock()
+		cp := *u
+		s.mu.RUnlock()
+		return &cp
 	}
 	// Fallback: check DB directly (user created by another instance)
 	if useDB() {
@@ -776,7 +785,9 @@ func (s *Store) GetUserByUsername(username string) *User {
 			s.mu.Lock()
 			s.users[u.ID] = u
 			s.usersByName[u.Username] = u
+			cp := *u
 			s.mu.Unlock()
+			return &cp
 		}
 	}
 	return u
@@ -787,12 +798,21 @@ func (s *Store) GetUser(id int64) *User {
 	u := s.users[id]
 	s.mu.RUnlock()
 	if u != nil {
+		// Sync balance from DB for freshness — mutation and copy must happen
+		// under the same write lock to avoid a data race with readers.
 		if useDB() {
 			bal, exp := dbSyncUserBalance(u.ID)
+			s.mu.Lock()
 			u.Balance = bal
 			u.Exposure = exp
+			cp := *u
+			s.mu.Unlock()
+			return &cp
 		}
-		return u
+		s.mu.RLock()
+		cp := *u
+		s.mu.RUnlock()
+		return &cp
 	}
 	if useDB() {
 		u = dbGetUser(id)
@@ -800,7 +820,9 @@ func (s *Store) GetUser(id int64) *User {
 			s.mu.Lock()
 			s.users[u.ID] = u
 			s.usersByName[u.Username] = u
+			cp := *u
 			s.mu.Unlock()
+			return &cp
 		}
 	}
 	return u
@@ -954,6 +976,100 @@ type Fill struct {
 	CounterBetID string  `json:"counter_bet_id"`
 	Price        float64 `json:"price"`
 	Size         float64 `json:"size"`
+}
+
+// HoldAndPlaceBet atomically validates balance, exposure limits, duplicate
+// client_ref, holds funds, and places the bet — all under a single lock.
+// This eliminates the TOCTOU race between validation and execution.
+func (s *Store) HoldAndPlaceBet(userID int64, marketID string, selectionID int64, side string, price, stake float64, clientRef string, holdAmount float64) (*MatchResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Re-validate under lock: balance
+	u, ok := s.users[userID]
+	if !ok {
+		return nil, fmt.Errorf("user not found")
+	}
+	if u.Available() < holdAmount {
+		return nil, fmt.Errorf("insufficient balance: available %.2f, required %.2f", u.Available(), holdAmount)
+	}
+
+	// Re-validate under lock: market status
+	m, marketExists := s.markets[marketID]
+	if !marketExists {
+		return nil, fmt.Errorf("market not found")
+	}
+	if m.Status != "open" {
+		return nil, fmt.Errorf("market is %s, cannot place bets", m.Status)
+	}
+
+	// Re-validate under lock: per-market exposure limit
+	existingExposure := 0.0
+	for _, b := range s.bets {
+		if b.UserID == userID && b.MarketID == marketID && (b.Status == "unmatched" || b.Status == "matched" || b.Status == "partial") {
+			if b.Side == "back" {
+				existingExposure += b.Stake
+			} else {
+				existingExposure += b.Stake * (b.Price - 1)
+			}
+		}
+	}
+	maxMarketExposure := u.Balance * 0.5
+	if existingExposure+holdAmount > maxMarketExposure && maxMarketExposure > 0 {
+		return nil, fmt.Errorf("market exposure limit exceeded: existing %.0f + new %.0f > limit %.0f (50%% of balance)", existingExposure, holdAmount, maxMarketExposure)
+	}
+
+	// Re-validate under lock: duplicate client_ref
+	if clientRef != "" {
+		for _, b := range s.bets {
+			if b.ClientRef == clientRef && b.UserID == userID {
+				return nil, fmt.Errorf("duplicate bet: client_ref already used")
+			}
+		}
+	}
+
+	// Hold funds FIRST — before placing the bet
+	u.Exposure = roundMoney(u.Exposure + holdAmount)
+	now := time.Now()
+	betID := "bet-" + randHex(8)
+	s.addLedger(userID, -holdAmount, "hold", "hold:"+betID, betID, now.Format(time.RFC3339))
+	if useDB() {
+		dbUpdateBalance(userID, u.Balance, u.Exposure)
+	}
+
+	// House model: every bet is immediately fully matched.
+	status := "matched"
+
+	// Determine market type and display side
+	var mType, dSide string
+	mType = m.MarketType
+	if mType == "fancy" || mType == "session" {
+		if side == "back" { dSide = "yes" } else { dSide = "no" }
+	} else {
+		dSide = side
+	}
+
+	// Record the bet as fully matched
+	s.bets[betID] = &Bet{
+		ID: betID, MarketID: marketID, SelectionID: selectionID,
+		UserID: userID, Side: side, DisplaySide: dSide, MarketType: mType,
+		Price: price, Stake: stake,
+		MatchedStake: stake, UnmatchedStake: 0,
+		Status: status, ClientRef: clientRef, CreatedAt: now.Format(time.RFC3339),
+	}
+
+	// Update market total matched
+	m.TotalMatched += stake
+
+	// Persist to DB
+	if useDB() {
+		dbSaveBet(s.bets[betID])
+	}
+
+	return &MatchResult{
+		BetID: betID, MatchedStake: stake,
+		UnmatchedStake: 0, Status: status, Fills: nil,
+	}, nil
 }
 
 func (s *Store) PlaceAndMatch(userID int64, marketID string, selectionID int64, side string, price, stake float64, clientRef string) (*MatchResult, error) {
@@ -1531,13 +1647,14 @@ func (s *Store) GenerateOTP(userID int64) string {
 }
 
 func (s *Store) VerifyOTP(userID int64, code string) bool {
-	s.mu.RLock()
+	// Use a single write lock for atomic read+delete to prevent two concurrent
+	// requests from verifying the same OTP (TOCTOU).
+	s.mu.Lock()
 	entry, ok := s.otpStore[userID]
-	s.mu.RUnlock()
 	if !ok || time.Now().After(entry.Expiry) || entry.Code != code {
+		s.mu.Unlock()
 		return false
 	}
-	s.mu.Lock()
 	delete(s.otpStore, userID)
 	s.mu.Unlock()
 	return true

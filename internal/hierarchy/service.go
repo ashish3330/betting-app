@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
 	"github.com/redis/go-redis/v9"
 )
@@ -141,7 +143,7 @@ func (s *Service) TransferCredit(ctx context.Context, req *models.CreditTransfer
 	}
 
 	// Ledger entries
-	ref := fmt.Sprintf("transfer:%d:%d:%.0f", req.FromUserID, req.ToUserID, req.Amount)
+	ref := fmt.Sprintf("transfer:%d:%d:%s", req.FromUserID, req.ToUserID, uuid.New().String())
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO ledger (user_id, amount, type, reference, created_at)
 		 VALUES ($1, $2, 'transfer', $3, NOW()), ($4, $5, 'transfer', $6, NOW())`,
@@ -183,6 +185,24 @@ func (s *Service) UpdateUserStatus(ctx context.Context, userID int64, status str
 		status, userID,
 	)
 	return err
+}
+
+// IsUserSelfExcluded checks whether the given user has an active self-exclusion
+// period that has not yet expired.
+func (s *Service) IsUserSelfExcluded(ctx context.Context, userID int64) (bool, time.Time, error) {
+	var until time.Time
+	err := s.db.QueryRowContext(ctx,
+		`SELECT self_excluded_until FROM responsible_gambling
+		 WHERE user_id = $1 AND self_excluded_until > NOW()`,
+		userID,
+	).Scan(&until)
+	if err == sql.ErrNoRows {
+		return false, time.Time{}, nil
+	}
+	if err != nil {
+		return false, time.Time{}, fmt.Errorf("check self-exclusion: %w", err)
+	}
+	return true, until, nil
 }
 
 func (s *Service) IsAncestor(ctx context.Context, ancestorID, descendantID int64) (bool, error) {

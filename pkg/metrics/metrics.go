@@ -261,7 +261,10 @@ func isID(s string) bool {
 		return true
 	}
 	// Check if it starts with tx_ or alert- (transaction IDs)
-	if len(s) > 3 && (s[:3] == "tx_" || s[:6] == "alert-") {
+	if len(s) > 3 && s[:3] == "tx_" {
+		return true
+	}
+	if len(s) >= 6 && s[:6] == "alert-" {
 		return true
 	}
 	return false

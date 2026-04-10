@@ -132,27 +132,37 @@ services:
       - backend
 
   # ---------------------------------------------------------------
-  # Gateway -- main Go API service
+  # Gateway -- API gateway / reverse proxy
   # ---------------------------------------------------------------
   gateway:
     build:
       context: ..
       dockerfile: deployments/Dockerfile
+    command: ["/app/gateway"]
     restart: unless-stopped
     ports:
       - "${HTTP_PORT:-8080}:8080"
-      - "${WS_PORT:-8081}:8081"
     env_file:
       - ../.env
     environment:
       HTTP_PORT: "8080"
-      WS_PORT: "8081"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,auth,public"
       REDIS_URL: "redis:6379"
       REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
       NATS_URL: "nats://nats:4222"
       CLICKHOUSE_URL: "tcp://clickhouse:9000"
       ENVIRONMENT: "${ENVIRONMENT:-production}"
+      AUTH_SERVICE_URL: "http://auth-service:8081"
+      WALLET_SERVICE_URL: "http://wallet-service:8082"
+      MATCHING_ENGINE_URL: "http://matching-engine:8083"
+      PAYMENT_SERVICE_URL: "http://payment-service:8084"
+      CASINO_SERVICE_URL: "http://casino-service:8085"
+      ODDS_SERVICE_URL: "http://odds-service:8086"
+      FRAUD_SERVICE_URL: "http://fraud-service:8087"
+      REPORTING_SERVICE_URL: "http://reporting-service:8088"
+      RISK_SERVICE_URL: "http://risk-service:8089"
+      HIERARCHY_SERVICE_URL: "http://hierarchy-service:8090"
+      NOTIFICATION_SERVICE_URL: "http://notification-service:8091"
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
       interval: 10s
@@ -175,9 +185,338 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
+      auth-service:
+        condition: service_started
+      wallet-service:
+        condition: service_started
+      matching-engine:
+        condition: service_started
+      payment-service:
+        condition: service_started
+      casino-service:
+        condition: service_started
+      odds-service:
+        condition: service_started
+      fraud-service:
+        condition: service_started
+      reporting-service:
+        condition: service_started
+      risk-service:
+        condition: service_started
+      hierarchy-service:
+        condition: service_started
+      notification-service:
+        condition: service_started
     networks:
       - backend
       - frontend
+
+  # ---------------------------------------------------------------
+  # Auth Service
+  # ---------------------------------------------------------------
+  auth-service:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    command: ["/app/auth-service"]
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    env_file:
+      - ../.env
+    environment:
+      HTTP_PORT: "8081"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=auth,public"
+      REDIS_URL: "redis:6379"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
+      NATS_URL: "nats://nats:4222"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------
+  # Wallet Service
+  # ---------------------------------------------------------------
+  wallet-service:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    command: ["/app/wallet-service"]
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    env_file:
+      - ../.env
+    environment:
+      HTTP_PORT: "8082"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
+      REDIS_URL: "redis:6379"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
+      NATS_URL: "nats://nats:4222"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------
+  # Matching Engine
+  # ---------------------------------------------------------------
+  matching-engine:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    command: ["/app/matching-engine"]
+    restart: unless-stopped
+    ports:
+      - "8083:8083"
+    env_file:
+      - ../.env
+    environment:
+      HTTP_PORT: "8083"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
+      REDIS_URL: "redis:6379"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
+      NATS_URL: "nats://nats:4222"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------
+  # Payment Service
+  # ---------------------------------------------------------------
+  payment-service:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    command: ["/app/payment-service"]
+    restart: unless-stopped
+    ports:
+      - "8084:8084"
+    env_file:
+      - ../.env
+    environment:
+      HTTP_PORT: "8084"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
+      REDIS_URL: "redis:6379"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
+      NATS_URL: "nats://nats:4222"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------
+  # Casino Service
+  # ---------------------------------------------------------------
+  casino-service:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    command: ["/app/casino-service"]
+    restart: unless-stopped
+    ports:
+      - "8085:8085"
+    env_file:
+      - ../.env
+    environment:
+      HTTP_PORT: "8085"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
+      REDIS_URL: "redis:6379"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
+      NATS_URL: "nats://nats:4222"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------
+  # Odds Service
+  # ---------------------------------------------------------------
+  odds-service:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    command: ["/app/odds-service"]
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    env_file:
+      - ../.env
+    environment:
+      HTTP_PORT: "8086"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
+      REDIS_URL: "redis:6379"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
+      NATS_URL: "nats://nats:4222"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------
+  # Fraud Service
+  # ---------------------------------------------------------------
+  fraud-service:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    command: ["/app/fraud-service"]
+    restart: unless-stopped
+    ports:
+      - "8087:8087"
+    env_file:
+      - ../.env
+    environment:
+      HTTP_PORT: "8087"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
+      REDIS_URL: "redis:6379"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
+      NATS_URL: "nats://nats:4222"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------
+  # Reporting Service
+  # ---------------------------------------------------------------
+  reporting-service:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    command: ["/app/reporting-service"]
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    env_file:
+      - ../.env
+    environment:
+      HTTP_PORT: "8088"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
+      REDIS_URL: "redis:6379"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
+      CLICKHOUSE_URL: "tcp://clickhouse:9000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------
+  # Risk Service
+  # ---------------------------------------------------------------
+  risk-service:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    command: ["/app/risk-service"]
+    restart: unless-stopped
+    ports:
+      - "8089:8089"
+    env_file:
+      - ../.env
+    environment:
+      HTTP_PORT: "8089"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
+      REDIS_URL: "redis:6379"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------
+  # Hierarchy Service
+  # ---------------------------------------------------------------
+  hierarchy-service:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    command: ["/app/hierarchy-service"]
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    env_file:
+      - ../.env
+    environment:
+      HTTP_PORT: "8090"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
+      REDIS_URL: "redis:6379"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------
+  # Notification Service
+  # ---------------------------------------------------------------
+  notification-service:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    command: ["/app/notification-service"]
+    restart: unless-stopped
+    ports:
+      - "8091:8091"
+    env_file:
+      - ../.env
+    environment:
+      HTTP_PORT: "8091"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
+      NATS_URL: "nats://nats:4222"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - backend
 
   # ---------------------------------------------------------------
   # Frontend -- Next.js application

@@ -1,7 +1,7 @@
 // AES-256-GCM encryption/decryption matching the Go backend.
 // Uses Web Crypto API for browser-native performance.
 
-const ENCRYPTION_SECRET = process.env.NEXT_PUBLIC_ENCRYPTION_SECRET || "lotus-exchange-2026-aes-secret-key";
+const ENCRYPTION_SECRET = process.env.NEXT_PUBLIC_ENCRYPTION_SECRET || "lotus-dev-local-encryption-key-change-in-prod-min-32-chars";
 
 let cachedKey: CryptoKey | null = null;
 

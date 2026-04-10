@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 type MarketStatus string
 
@@ -145,16 +148,28 @@ func (m *Market) CanAcceptBets() bool {
 	return m.Status == MarketOpen || m.Status == MarketInPlay
 }
 
-func (m *Market) Suspend() {
+func (m *Market) Suspend() error {
+	if m.Status != MarketOpen && m.Status != MarketInPlay {
+		return fmt.Errorf("cannot suspend market from state %q (allowed: open, in_play)", m.Status)
+	}
 	m.Status = MarketSuspended
+	return nil
 }
 
-func (m *Market) Resume() {
+func (m *Market) Resume() error {
+	if m.Status != MarketSuspended {
+		return fmt.Errorf("cannot resume market from state %q (allowed: suspended)", m.Status)
+	}
 	m.Status = MarketOpen
+	return nil
 }
 
-func (m *Market) Close() {
+func (m *Market) Close() error {
+	if m.Status != MarketOpen && m.Status != MarketSuspended && m.Status != MarketInPlay {
+		return fmt.Errorf("cannot close market from state %q (allowed: open, suspended, in_play)", m.Status)
+	}
 	m.Status = MarketClosed
+	return nil
 }
 
 // IsExchangeMarket returns true if this market supports back/lay exchange

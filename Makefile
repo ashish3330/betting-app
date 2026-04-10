@@ -1,4 +1,4 @@
-.PHONY: all build run dev test test-cover e2e lint mocks deps clean \
+.PHONY: all build build-all run start-all dev test test-cover e2e lint mocks deps clean \
        docker-up docker-down docker-build migrate reset-db seed \
        docs security loadtest prometheus
 
@@ -6,6 +6,9 @@
 # Variables
 # ---------------------------------------------------------------
 BINARY       := bin/gateway
+SERVICES     := gateway auth-service wallet-service matching-engine \
+                payment-service casino-service odds-service fraud-service \
+                reporting-service risk-service hierarchy-service notification-service
 COMPOSE      := docker compose -f deployments/docker-compose.yml
 DATABASE_URL ?= $(shell grep DATABASE_URL .env 2>/dev/null | cut -d= -f2-)
 
@@ -20,8 +23,23 @@ all: deps lint test build
 build:
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o $(BINARY) ./cmd/gateway
 
+build-all:
+	@mkdir -p bin
+	@for svc in $(SERVICES); do \
+		if [ -d "cmd/$$svc" ]; then \
+			echo "Building $$svc..."; \
+			CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/$$svc ./cmd/$$svc; \
+		else \
+			echo "Skipping $$svc (cmd/$$svc not found)"; \
+		fi; \
+	done
+	@echo "All services built."
+
 run: build
 	./$(BINARY)
+
+start-all: build-all
+	./scripts/start-all.sh
 
 # Run with hot reload (requires air: go install github.com/air-verse/air@latest)
 dev:

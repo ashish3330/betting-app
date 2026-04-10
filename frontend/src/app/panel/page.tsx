@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 
@@ -22,16 +23,32 @@ interface DashboardStats {
 }
 
 export default function PanelDashboard() {
-  const { user } = useAuth();
+  const { user, isLoggedIn, isLoading: authLoading } = useAuth();
+  const router = useRouter();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(true);
 
+  // Auth guard: redirect if not logged in or not admin/superadmin
   useEffect(() => {
+    if (authLoading) return;
+    if (!isLoggedIn) {
+      router.push("/login");
+      return;
+    }
+    const role = user?.role;
+    if (role !== "admin" && role !== "superadmin" && role !== "master" && role !== "agent") {
+      router.push("/");
+      return;
+    }
+  }, [authLoading, isLoggedIn, user, router]);
+
+  useEffect(() => {
+    if (authLoading || !isLoggedIn) return;
     api.request<DashboardStats>("/api/v1/panel/dashboard", { auth: true })
       .then(setStats)
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+  }, [authLoading, isLoggedIn]);
 
   if (loading) {
     return (

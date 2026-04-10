@@ -24,7 +24,12 @@ var encryptionKey []byte
 func initEncryption() {
 	secret := os.Getenv("ENCRYPTION_SECRET")
 	if secret == "" {
-		secret = "lotus-exchange-2026-aes-secret-key" // fallback for dev
+		fmt.Fprintln(os.Stderr, "FATAL: ENCRYPTION_SECRET environment variable is required")
+		os.Exit(1)
+	}
+	if len(secret) < 16 {
+		fmt.Fprintln(os.Stderr, "FATAL: ENCRYPTION_SECRET must be at least 16 characters")
+		os.Exit(1)
 	}
 	hash := sha256.Sum256([]byte(secret))
 	encryptionKey = hash[:]

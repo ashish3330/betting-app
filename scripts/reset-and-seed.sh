@@ -1,11 +1,38 @@
 #!/bin/bash
 # Reset database and seed fresh data for testing
 # Usage: ./scripts/reset-and-seed.sh
+#
+# Required environment variables (or set in .env):
+#   DATABASE_URL              - PostgreSQL connection string
+#   SEED_SUPERADMIN_PASSWORD  - Password for superadmin user
+#   SEED_ADMIN_PASSWORD       - Password for admin users
+#   SEED_MASTER_PASSWORD      - Password for master users
+#   SEED_AGENT_PASSWORD       - Password for agent users
+#   SEED_PLAYER_PASSWORD      - Password for player users
 
 set -e
 cd "$(dirname "$0")/.."
 
-DB_URL="${DATABASE_URL:-postgres://lotus:L0tus!Xchg2026@localhost:5432/bettingdb?sslmode=disable}"
+# Load .env file if present
+if [ -f .env ]; then
+  set -a
+  source .env
+  set +a
+fi
+
+# Validate required vars
+if [ -z "$DATABASE_URL" ]; then
+  echo "ERROR: DATABASE_URL is not set. Set it in your environment or .env file."
+  exit 1
+fi
+
+DB_URL="$DATABASE_URL"
+
+SEED_SUPERADMIN_PASSWORD="${SEED_SUPERADMIN_PASSWORD:?ERROR: SEED_SUPERADMIN_PASSWORD is not set}"
+SEED_ADMIN_PASSWORD="${SEED_ADMIN_PASSWORD:?ERROR: SEED_ADMIN_PASSWORD is not set}"
+SEED_MASTER_PASSWORD="${SEED_MASTER_PASSWORD:?ERROR: SEED_MASTER_PASSWORD is not set}"
+SEED_AGENT_PASSWORD="${SEED_AGENT_PASSWORD:?ERROR: SEED_AGENT_PASSWORD is not set}"
+SEED_PLAYER_PASSWORD="${SEED_PLAYER_PASSWORD:?ERROR: SEED_PLAYER_PASSWORD is not set}"
 
 echo "=== Resetting Database ==="
 psql "$DB_URL" -c "
@@ -37,22 +64,22 @@ API="${API_URL:-http://localhost:8080}"
 
 # Superadmin
 curl -s "$API/api/v1/auth/register" -X POST -H "Content-Type: application/json" \
-  -d '{"username":"superadmin","email":"superadmin@lotus.com","password":"Super@123","role":"superadmin"}' -o /dev/null -w "  superadmin: %{http_code}\n"
+  -d "{\"username\":\"superadmin\",\"email\":\"superadmin@lotus.com\",\"password\":\"${SEED_SUPERADMIN_PASSWORD}\",\"role\":\"superadmin\"}" -o /dev/null -w "  superadmin: %{http_code}\n"
 
 # Set root balance
 psql "$DB_URL" -c "UPDATE auth.users SET balance=10000000, credit_limit=10000000 WHERE id=1;" > /dev/null
 
 # Hierarchy
 curl -s "$API/api/v1/auth/register" -X POST -H "Content-Type: application/json" \
-  -d '{"username":"admin1","email":"admin1@lotus.com","password":"Admin@123","role":"admin"}' -o /dev/null -w "  admin1: %{http_code}\n"
+  -d "{\"username\":\"admin1\",\"email\":\"admin1@lotus.com\",\"password\":\"${SEED_ADMIN_PASSWORD}\",\"role\":\"admin\"}" -o /dev/null -w "  admin1: %{http_code}\n"
 curl -s "$API/api/v1/auth/register" -X POST -H "Content-Type: application/json" \
-  -d '{"username":"master1","email":"master1@lotus.com","password":"Master@123","role":"master"}' -o /dev/null -w "  master1: %{http_code}\n"
+  -d "{\"username\":\"master1\",\"email\":\"master1@lotus.com\",\"password\":\"${SEED_MASTER_PASSWORD}\",\"role\":\"master\"}" -o /dev/null -w "  master1: %{http_code}\n"
 curl -s "$API/api/v1/auth/register" -X POST -H "Content-Type: application/json" \
-  -d '{"username":"agent1","email":"agent1@lotus.com","password":"Agent@123","role":"agent"}' -o /dev/null -w "  agent1: %{http_code}\n"
+  -d "{\"username\":\"agent1\",\"email\":\"agent1@lotus.com\",\"password\":\"${SEED_AGENT_PASSWORD}\",\"role\":\"agent\"}" -o /dev/null -w "  agent1: %{http_code}\n"
 curl -s "$API/api/v1/auth/register" -X POST -H "Content-Type: application/json" \
-  -d '{"username":"player1","email":"player1@lotus.com","password":"Player@123","role":"client"}' -o /dev/null -w "  player1: %{http_code}\n"
+  -d "{\"username\":\"player1\",\"email\":\"player1@lotus.com\",\"password\":\"${SEED_PLAYER_PASSWORD}\",\"role\":\"client\"}" -o /dev/null -w "  player1: %{http_code}\n"
 curl -s "$API/api/v1/auth/register" -X POST -H "Content-Type: application/json" \
-  -d '{"username":"player2","email":"player2@lotus.com","password":"Player@123","role":"client"}' -o /dev/null -w "  player2: %{http_code}\n"
+  -d "{\"username\":\"player2\",\"email\":\"player2@lotus.com\",\"password\":\"${SEED_PLAYER_PASSWORD}\",\"role\":\"client\"}" -o /dev/null -w "  player2: %{http_code}\n"
 
 # Set hierarchy + balances
 psql "$DB_URL" -c "
@@ -73,13 +100,6 @@ echo "=== Clearing Frontend Cache ==="
 rm -rf frontend/.next/cache 2>/dev/null && echo "  Next.js cache cleared" || true
 
 echo ""
-echo "╔══════════════════════════════════════╗"
-echo "║         FRESH START READY            ║"
-echo "╠══════════════════════════════════════╣"
-echo "║  superadmin  Super@123  ₹1Cr        ║"
-echo "║  admin1      Admin@123  ₹5L         ║"
-echo "║  master1     Master@123 ₹2L         ║"
-echo "║  agent1      Agent@123  ₹1L         ║"
-echo "║  player1     Player@123 ₹50K        ║"
-echo "║  player2     Player@123 ₹50K        ║"
-echo "╚══════════════════════════════════════╝"
+echo "=== Fresh Start Ready ==="
+echo "  Users created: superadmin, admin1, master1, agent1, player1, player2"
+echo "  Passwords: as configured in SEED_*_PASSWORD environment variables"

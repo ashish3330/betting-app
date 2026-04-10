@@ -84,42 +84,108 @@ func (s *Service) GetLimits(ctx context.Context, userID int64) (*GamblingLimits,
 	return limits, nil
 }
 
+// UpdateLimits uses SELECT ... FOR UPDATE within a transaction to prevent
+// concurrent updates from causing a TOCTOU race (last-write-wins).
 func (s *Service) UpdateLimits(ctx context.Context, userID int64, req *UpdateLimitsRequest) (*GamblingLimits, error) {
-	// Limits can only be decreased immediately; increases take 24h cooling-off
-	current, err := s.GetLimits(ctx, userID)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("begin update-limits tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Lock the row to prevent concurrent modifications
+	current := &GamblingLimits{UserID: userID}
+	err = tx.QueryRowContext(ctx,
+		`SELECT daily_deposit_limit, weekly_deposit_limit, monthly_deposit_limit,
+		        daily_loss_limit, max_stake_per_bet, session_time_limit_mins,
+		        self_excluded_until, cooling_off_until, reality_check_interval_mins, updated_at
+		 FROM responsible_gambling WHERE user_id = $1 FOR UPDATE`, userID,
+	).Scan(&current.DailyDepositLimit, &current.WeeklyDepositLimit, &current.MonthlyDepositLimit,
+		&current.DailyLossLimit, &current.MaxStakePerBet, &current.SessionTimeLimitMins,
+		&current.SelfExcludedUntil, &current.CoolingOffUntil, &current.RealityCheckMins, &current.UpdatedAt)
+	if err == sql.ErrNoRows {
+		// Create default row if missing, then re-select with lock
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO responsible_gambling (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, userID)
+		if err != nil {
+			return nil, fmt.Errorf("create default limits: %w", err)
+		}
+		err = tx.QueryRowContext(ctx,
+			`SELECT daily_deposit_limit, weekly_deposit_limit, monthly_deposit_limit,
+			        daily_loss_limit, max_stake_per_bet, session_time_limit_mins,
+			        self_excluded_until, cooling_off_until, reality_check_interval_mins, updated_at
+			 FROM responsible_gambling WHERE user_id = $1 FOR UPDATE`, userID,
+		).Scan(&current.DailyDepositLimit, &current.WeeklyDepositLimit, &current.MonthlyDepositLimit,
+			&current.DailyLossLimit, &current.MaxStakePerBet, &current.SessionTimeLimitMins,
+			&current.SelfExcludedUntil, &current.CoolingOffUntil, &current.RealityCheckMins, &current.UpdatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("get newly created limits: %w", err)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("get limits for update: %w", err)
 	}
 
-	// Apply updates (only allow decreasing limits immediately)
+	var pendingIncreases []string
+
+	// Apply updates: decreases take effect immediately, increases are deferred 24h
 	if req.DailyDepositLimit != nil {
 		if *req.DailyDepositLimit > current.DailyDepositLimit {
-			// Schedule increase for 24h later
-			s.logger.InfoContext(ctx, "deposit limit increase scheduled (24h delay)",
-				"user_id", userID, "current", current.DailyDepositLimit, "requested", *req.DailyDepositLimit)
+			s.scheduleLimitIncrease(ctx, userID, "daily_deposit_limit", *req.DailyDepositLimit)
+			pendingIncreases = append(pendingIncreases, "daily_deposit_limit")
+		} else {
+			current.DailyDepositLimit = *req.DailyDepositLimit
 		}
-		current.DailyDepositLimit = *req.DailyDepositLimit
 	}
 	if req.WeeklyDepositLimit != nil {
-		current.WeeklyDepositLimit = *req.WeeklyDepositLimit
+		if *req.WeeklyDepositLimit > current.WeeklyDepositLimit {
+			s.scheduleLimitIncrease(ctx, userID, "weekly_deposit_limit", *req.WeeklyDepositLimit)
+			pendingIncreases = append(pendingIncreases, "weekly_deposit_limit")
+		} else {
+			current.WeeklyDepositLimit = *req.WeeklyDepositLimit
+		}
 	}
 	if req.MonthlyDepositLimit != nil {
-		current.MonthlyDepositLimit = *req.MonthlyDepositLimit
+		if *req.MonthlyDepositLimit > current.MonthlyDepositLimit {
+			s.scheduleLimitIncrease(ctx, userID, "monthly_deposit_limit", *req.MonthlyDepositLimit)
+			pendingIncreases = append(pendingIncreases, "monthly_deposit_limit")
+		} else {
+			current.MonthlyDepositLimit = *req.MonthlyDepositLimit
+		}
 	}
 	if req.DailyLossLimit != nil {
-		current.DailyLossLimit = req.DailyLossLimit
+		if current.DailyLossLimit != nil && *req.DailyLossLimit > *current.DailyLossLimit {
+			s.scheduleLimitIncrease(ctx, userID, "daily_loss_limit", *req.DailyLossLimit)
+			pendingIncreases = append(pendingIncreases, "daily_loss_limit")
+		} else {
+			current.DailyLossLimit = req.DailyLossLimit
+		}
 	}
 	if req.MaxStakePerBet != nil {
-		current.MaxStakePerBet = *req.MaxStakePerBet
+		if *req.MaxStakePerBet > current.MaxStakePerBet {
+			s.scheduleLimitIncrease(ctx, userID, "max_stake_per_bet", *req.MaxStakePerBet)
+			pendingIncreases = append(pendingIncreases, "max_stake_per_bet")
+		} else {
+			current.MaxStakePerBet = *req.MaxStakePerBet
+		}
 	}
 	if req.SessionTimeLimitMins != nil {
-		current.SessionTimeLimitMins = *req.SessionTimeLimitMins
+		if *req.SessionTimeLimitMins > current.SessionTimeLimitMins {
+			s.scheduleLimitIncrease(ctx, userID, "session_time_limit_mins", float64(*req.SessionTimeLimitMins))
+			pendingIncreases = append(pendingIncreases, "session_time_limit_mins")
+		} else {
+			current.SessionTimeLimitMins = *req.SessionTimeLimitMins
+		}
 	}
 	if req.RealityCheckMins != nil {
-		current.RealityCheckMins = *req.RealityCheckMins
+		if *req.RealityCheckMins > current.RealityCheckMins {
+			s.scheduleLimitIncrease(ctx, userID, "reality_check_interval_mins", float64(*req.RealityCheckMins))
+			pendingIncreases = append(pendingIncreases, "reality_check_interval_mins")
+		} else {
+			current.RealityCheckMins = *req.RealityCheckMins
+		}
 	}
 
-	_, err = s.db.ExecContext(ctx,
+	_, err = tx.ExecContext(ctx,
 		`UPDATE responsible_gambling SET
 			daily_deposit_limit = $1, weekly_deposit_limit = $2, monthly_deposit_limit = $3,
 			daily_loss_limit = $4, max_stake_per_bet = $5, session_time_limit_mins = $6,
@@ -133,10 +199,41 @@ func (s *Service) UpdateLimits(ctx context.Context, userID int64, req *UpdateLim
 		return nil, fmt.Errorf("update limits: %w", err)
 	}
 
-	s.logger.InfoContext(ctx, "gambling limits updated", "user_id", userID)
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit update-limits tx: %w", err)
+	}
+
+	if len(pendingIncreases) > 0 {
+		s.logger.InfoContext(ctx, "gambling limits updated with pending increases",
+			"user_id", userID, "pending", pendingIncreases)
+	} else {
+		s.logger.InfoContext(ctx, "gambling limits updated", "user_id", userID)
+	}
 	return current, nil
 }
 
+// scheduleLimitIncrease stores a pending limit increase that takes effect after 24h.
+func (s *Service) scheduleLimitIncrease(ctx context.Context, userID int64, field string, newValue float64) {
+	effectiveAt := time.Now().Add(24 * time.Hour)
+
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO pending_limit_increases (user_id, field_name, new_value, effective_at, created_at)
+		 VALUES ($1, $2, $3, $4, NOW())
+		 ON CONFLICT (user_id, field_name) DO UPDATE SET new_value = $3, effective_at = $4`,
+		userID, field, newValue, effectiveAt,
+	)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "failed to schedule limit increase",
+			"user_id", userID, "field", field, "error", err)
+		return
+	}
+
+	s.logger.InfoContext(ctx, "limit increase scheduled (24h delay)",
+		"user_id", userID, "field", field, "new_value", newValue, "effective_at", effectiveAt)
+}
+
+// SelfExclude wraps all DB operations (update responsible_gambling, suspend user,
+// void bets) in a single transaction to prevent partial application.
 func (s *Service) SelfExclude(ctx context.Context, userID int64, req *SelfExclusionRequest) error {
 	var until time.Time
 	now := time.Now()
@@ -160,7 +257,13 @@ func (s *Service) SelfExclude(ctx context.Context, userID int64, req *SelfExclus
 		return fmt.Errorf("invalid duration: %s", req.Duration)
 	}
 
-	_, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin self-exclude tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx,
 		`UPDATE responsible_gambling SET self_excluded_until = $1, updated_at = NOW() WHERE user_id = $2`,
 		until, userID,
 	)
@@ -168,12 +271,35 @@ func (s *Service) SelfExclude(ctx context.Context, userID int64, req *SelfExclus
 		return fmt.Errorf("self exclude: %w", err)
 	}
 
-	// Also suspend the user account
-	_, err = s.db.ExecContext(ctx,
+	// Suspend the user account
+	_, err = tx.ExecContext(ctx,
 		`UPDATE users SET status = 'suspended', updated_at = NOW() WHERE id = $1`, userID)
 	if err != nil {
 		return fmt.Errorf("suspend user: %w", err)
 	}
+
+	// Cancel/void any open bets for the excluded user
+	result, err := tx.ExecContext(ctx,
+		`UPDATE bets SET status = 'voided', settled_at = NOW(), profit = 0
+		 WHERE user_id = $1 AND status IN ('open', 'partial', 'matched')`, userID)
+	if err != nil {
+		return fmt.Errorf("void open bets during self-exclusion: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit self-exclude tx: %w", err)
+	}
+
+	voidedCount, _ := result.RowsAffected()
+	if voidedCount > 0 {
+		s.logger.WarnContext(ctx, "voided open bets due to self-exclusion",
+			"user_id", userID, "voided_count", voidedCount)
+	}
+
+	// Invalidate all active sessions by marking exclusion in Redis
+	// so auth middleware can check this during login/request validation
+	exclusionKey := fmt.Sprintf("self_excluded:%d", userID)
+	s.redis.Set(ctx, exclusionKey, until.Unix(), time.Until(until))
 
 	s.logger.WarnContext(ctx, "user self-excluded",
 		"user_id", userID, "until", until, "reason", req.Reason)
@@ -194,8 +320,33 @@ func (s *Service) SetCoolingOff(ctx context.Context, userID int64, hours int) er
 	return nil
 }
 
+// CheckCanBet runs the limit check and daily loss aggregation within a single
+// REPEATABLE READ transaction to prevent TOCTOU races where limits could change
+// or losses could accumulate between the two queries.
 func (s *Service) CheckCanBet(ctx context.Context, userID int64, stake float64) error {
-	limits, err := s.GetLimits(ctx, userID)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{
+		Isolation: sql.LevelRepeatableRead,
+		ReadOnly:  true,
+	})
+	if err != nil {
+		return fmt.Errorf("begin check-can-bet tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	limits := &GamblingLimits{UserID: userID}
+	err = tx.QueryRowContext(ctx,
+		`SELECT daily_deposit_limit, weekly_deposit_limit, monthly_deposit_limit,
+		        daily_loss_limit, max_stake_per_bet, session_time_limit_mins,
+		        self_excluded_until, cooling_off_until, reality_check_interval_mins, updated_at
+		 FROM responsible_gambling WHERE user_id = $1`, userID,
+	).Scan(&limits.DailyDepositLimit, &limits.WeeklyDepositLimit, &limits.MonthlyDepositLimit,
+		&limits.DailyLossLimit, &limits.MaxStakePerBet, &limits.SessionTimeLimitMins,
+		&limits.SelfExcludedUntil, &limits.CoolingOffUntil, &limits.RealityCheckMins, &limits.UpdatedAt)
+	if err == sql.ErrNoRows {
+		// No limits configured — use defaults, allow the bet
+		_ = tx.Rollback()
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("get limits: %w", err)
 	}
@@ -217,15 +368,18 @@ func (s *Service) CheckCanBet(ctx context.Context, userID int64, stake float64) 
 		return fmt.Errorf("stake %.2f exceeds maximum allowed %.2f", stake, limits.MaxStakePerBet)
 	}
 
-	// Check daily loss limit
+	// Check daily loss limit — within the same snapshot
 	if limits.DailyLossLimit != nil {
 		var dailyLoss float64
-		s.db.QueryRowContext(ctx,
+		err := tx.QueryRowContext(ctx,
 			`SELECT COALESCE(SUM(ABS(profit)), 0) FROM bets
 			 WHERE user_id = $1 AND status = 'settled' AND profit < 0
 			 AND settled_at >= CURRENT_DATE`,
 			userID,
 		).Scan(&dailyLoss)
+		if err != nil {
+			return fmt.Errorf("check daily loss: %w", err)
+		}
 
 		if dailyLoss >= *limits.DailyLossLimit {
 			return fmt.Errorf("daily loss limit of %.2f reached", *limits.DailyLossLimit)
@@ -304,4 +458,32 @@ func (s *Service) GetSessionDuration(ctx context.Context, userID int64) (time.Du
 	duration := time.Since(start)
 
 	return duration, limits.SessionTimeLimitMins, nil
+}
+
+// IsUserSelfExcluded checks if a user is currently self-excluded.
+// This should be called at the auth/login level to prevent excluded users from accessing the platform.
+func (s *Service) IsUserSelfExcluded(ctx context.Context, userID int64) (bool, error) {
+	// Fast path: check Redis cache first
+	exclusionKey := fmt.Sprintf("self_excluded:%d", userID)
+	_, err := s.redis.Get(ctx, exclusionKey).Result()
+	if err == nil {
+		return true, nil
+	}
+
+	// Fallback: check database
+	var excludedUntil *time.Time
+	err = s.db.QueryRowContext(ctx,
+		`SELECT self_excluded_until FROM responsible_gambling WHERE user_id = $1`, userID,
+	).Scan(&excludedUntil)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, fmt.Errorf("check self-exclusion: %w", err)
+	}
+
+	if excludedUntil != nil && time.Now().Before(*excludedUntil) {
+		return true, nil
+	}
+	return false, nil
 }

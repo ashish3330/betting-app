@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -24,7 +25,8 @@ var requestSigningSecret string
 func initSecurity() {
 	requestSigningSecret = os.Getenv("SIGNING_SECRET")
 	if requestSigningSecret == "" {
-		requestSigningSecret = "lotus-request-signing-2026" // fallback for dev
+		fmt.Fprintln(os.Stderr, "FATAL: SIGNING_SECRET environment variable is required")
+		os.Exit(1)
 	}
 }
 
@@ -51,7 +53,7 @@ type IPBlocker struct {
 	blockDuration time.Duration
 }
 
-func NewIPBlocker(maxStrikes int, blockDuration time.Duration) *IPBlocker {
+func NewIPBlocker(maxStrikes int, blockDuration time.Duration, stop <-chan struct{}) *IPBlocker {
 	b := &IPBlocker{
 		blocked:       make(map[string]time.Time),
 		strikes:       make(map[string]int),
@@ -60,9 +62,15 @@ func NewIPBlocker(maxStrikes int, blockDuration time.Duration) *IPBlocker {
 	}
 	// Cleanup expired blocks every 5 minutes
 	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
 		for {
-			time.Sleep(5 * time.Minute)
-			b.cleanup()
+			select {
+			case <-ticker.C:
+				b.cleanup()
+			case <-stop:
+				return
+			}
 		}
 	}()
 	return b
@@ -113,15 +121,21 @@ type ReplayGuard struct {
 	window time.Duration
 }
 
-func NewReplayGuard(window time.Duration) *ReplayGuard {
+func NewReplayGuard(window time.Duration, stop <-chan struct{}) *ReplayGuard {
 	g := &ReplayGuard{
 		seen:   make(map[string]time.Time),
 		window: window,
 	}
 	go func() {
+		ticker := time.NewTicker(window)
+		defer ticker.Stop()
 		for {
-			time.Sleep(window)
-			g.cleanup()
+			select {
+			case <-ticker.C:
+				g.cleanup()
+			case <-stop:
+				return
+			}
 		}
 	}()
 	return g
@@ -129,6 +143,7 @@ func NewReplayGuard(window time.Duration) *ReplayGuard {
 
 func (g *ReplayGuard) Check(nonce string) bool {
 	if nonce == "" {
+		slog.Warn("replay guard: request received without nonce, skipping check (backward compat)")
 		return true // No nonce = skip check (backwards compatible)
 	}
 	g.mu.Lock()
@@ -218,7 +233,7 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 		// Referrer policy
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		// Content Security Policy
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' ws: wss:; font-src 'self' https://fonts.gstatic.com")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' ws: wss:; font-src 'self' https://fonts.gstatic.com; frame-ancestors 'none'; base-uri 'self'")
 		// Permissions policy
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		// Cache control for API responses
@@ -231,26 +246,42 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 
 // ── IP Extraction ──────────────────────────────────────────────────────────
 
+// trustedProxies is the set of proxy IPs allowed to set X-Forwarded-For.
+var trustedProxies = func() map[string]bool {
+	raw := os.Getenv("TRUSTED_PROXIES")
+	if raw == "" {
+		raw = "127.0.0.1,::1"
+	}
+	m := make(map[string]bool)
+	for _, p := range strings.Split(raw, ",") {
+		m[strings.TrimSpace(p)] = true
+	}
+	return m
+}()
+
 func extractClientIP(r *http.Request) string {
-	// Check X-Forwarded-For (behind proxy/LB)
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.SplitN(xff, ",", 2)
-		ip := strings.TrimSpace(parts[0])
-		if net.ParseIP(ip) != nil {
-			return ip
-		}
-	}
-	// Check X-Real-IP
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		if net.ParseIP(xri) != nil {
-			return xri
-		}
-	}
-	// Fall back to RemoteAddr
+	// Determine the direct-connection IP first.
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
 	}
+
+	// Only trust proxy headers when the direct connection is from a trusted proxy.
+	if trustedProxies[host] {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.SplitN(xff, ",", 2)
+			ip := strings.TrimSpace(parts[0])
+			if net.ParseIP(ip) != nil {
+				return ip
+			}
+		}
+		if xri := r.Header.Get("X-Real-IP"); xri != "" {
+			if net.ParseIP(xri) != nil {
+				return xri
+			}
+		}
+	}
+
 	return host
 }
 
@@ -298,7 +329,7 @@ type PerIPRateLimiter struct {
 	burst    float64 // max tokens
 }
 
-func NewPerIPRateLimiter(rps, burst float64) *PerIPRateLimiter {
+func NewPerIPRateLimiter(rps, burst float64, stop <-chan struct{}) *PerIPRateLimiter {
 	rl := &PerIPRateLimiter{
 		limiters: make(map[string]*rateLimiterEntry),
 		rate:     rps,
@@ -306,16 +337,22 @@ func NewPerIPRateLimiter(rps, burst float64) *PerIPRateLimiter {
 	}
 	// Cleanup every 3 minutes
 	go func() {
+		ticker := time.NewTicker(3 * time.Minute)
+		defer ticker.Stop()
 		for {
-			time.Sleep(3 * time.Minute)
-			rl.mu.Lock()
-			cutoff := time.Now().Add(-5 * time.Minute)
-			for ip, e := range rl.limiters {
-				if e.lastCheck.Before(cutoff) {
-					delete(rl.limiters, ip)
+			select {
+			case <-ticker.C:
+				rl.mu.Lock()
+				cutoff := time.Now().Add(-5 * time.Minute)
+				for ip, e := range rl.limiters {
+					if e.lastCheck.Before(cutoff) {
+						delete(rl.limiters, ip)
+					}
 				}
+				rl.mu.Unlock()
+			case <-stop:
+				return
 			}
-			rl.mu.Unlock()
 		}
 	}()
 	return rl

@@ -20,11 +20,11 @@ import (
 
 // Argon2 parameters — hardened from the original 1 iteration / 64KB.
 const (
-	argon2Iterations  = 3
-	argon2Memory      = 64 * 1024 // 64 MB
-	argon2Threads     = 4
-	argon2KeyLength   = 32
-	argon2SaltLength  = 16
+	argon2Iterations = 3
+	argon2Memory     = 64 * 1024 // 64 MB
+	argon2Threads    = 4
+	argon2KeyLength  = 32
+	argon2SaltLength = 16
 )
 
 type Service struct {
@@ -111,6 +111,9 @@ func ValidatePasswordComplexity(password string) error {
 	if len(password) < 8 {
 		return errors.New("password must be at least 8 characters")
 	}
+	if len(password) > 128 {
+		return errors.New("password must be at most 128 characters")
+	}
 	var hasUpper, hasLower, hasDigit bool
 	for _, r := range password {
 		switch {
@@ -142,8 +145,14 @@ func (s *Service) Register(ctx context.Context, req *models.CreateUserRequest) (
 
 	hash := s.hashPassword(req.Password)
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	var user models.User
-	err := s.db.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		`INSERT INTO users (username, email, password_hash, role, parent_id, credit_limit, commission_rate, status, path)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', '')
 		 RETURNING id, username, email, role, parent_id, balance, exposure, credit_limit, commission_rate, status, created_at, updated_at`,
@@ -159,16 +168,20 @@ func (s *Service) Register(ctx context.Context, req *models.CreateUserRequest) (
 	path := fmt.Sprintf("%d", user.ID)
 	if req.ParentID != nil {
 		var parentPath string
-		err = s.db.QueryRowContext(ctx, "SELECT path FROM users WHERE id = $1", *req.ParentID).Scan(&parentPath)
+		err = tx.QueryRowContext(ctx, "SELECT path FROM users WHERE id = $1", *req.ParentID).Scan(&parentPath)
 		if err != nil {
 			return nil, fmt.Errorf("get parent path: %w", err)
 		}
 		path = parentPath + "." + fmt.Sprintf("%d", user.ID)
 	}
 
-	_, err = s.db.ExecContext(ctx, "UPDATE users SET path = $1 WHERE id = $2", path, user.ID)
+	_, err = tx.ExecContext(ctx, "UPDATE users SET path = $1 WHERE id = $2", path, user.ID)
 	if err != nil {
 		return nil, fmt.Errorf("update path: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 	user.Path = path
 
@@ -194,7 +207,8 @@ func (s *Service) Login(ctx context.Context, req *models.LoginRequest) (*models.
 	}
 
 	if user.Status != "active" {
-		return nil, fmt.Errorf("account is %s", user.Status)
+		s.logger.WarnContext(ctx, "login attempt on non-active account", "user_id", user.ID, "status", user.Status)
+		return nil, fmt.Errorf("invalid credentials")
 	}
 
 	if !s.verifyPassword(req.Password, hash) {
@@ -256,7 +270,9 @@ func (s *Service) Logout(ctx context.Context, token string) error {
 
 // RefreshToken rotates the refresh token and issues a new access token.
 func (s *Service) RefreshToken(ctx context.Context, refreshToken string) (*models.LoginResponse, error) {
-	userIDStr, err := s.redis.Get(ctx, "refresh:"+refreshToken).Result()
+	// Use GetDel for atomic get-and-delete to prevent TOCTOU race conditions
+	// where two concurrent refresh requests could both succeed with the same token.
+	userIDStr, err := s.redis.GetDel(ctx, "refresh:"+refreshToken).Result()
 	if err != nil {
 		return nil, fmt.Errorf("invalid refresh token")
 	}
@@ -280,9 +296,6 @@ func (s *Service) RefreshToken(ctx context.Context, refreshToken string) (*model
 	if err != nil {
 		return nil, fmt.Errorf("user not found")
 	}
-
-	// Rotate: delete old, issue new
-	s.redis.Del(ctx, "refresh:"+refreshToken)
 
 	newAccess, err := s.generateToken(&user, s.accessTTL)
 	if err != nil {

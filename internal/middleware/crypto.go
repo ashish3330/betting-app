@@ -17,13 +17,33 @@ import (
 
 var encryptionKey []byte
 
+// aead is the AES-GCM cipher created once at init and reused for all
+// encrypt/decrypt operations.  cipher.AEAD is safe for concurrent use.
+var aead cipher.AEAD
+
 func init() {
 	secret := os.Getenv("ENCRYPTION_SECRET")
 	if secret == "" {
-		secret = "lotus-exchange-2026-aes-secret-key"
+		fmt.Fprintln(os.Stderr, "FATAL: ENCRYPTION_SECRET environment variable is required")
+		os.Exit(1)
+	}
+	if len(secret) < 16 {
+		fmt.Fprintln(os.Stderr, "FATAL: ENCRYPTION_SECRET must be at least 16 characters")
+		os.Exit(1)
 	}
 	hash := sha256.Sum256([]byte(secret))
 	encryptionKey = hash[:]
+
+	block, err := aes.NewCipher(encryptionKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: failed to create AES cipher: %v\n", err)
+		os.Exit(1)
+	}
+	aead, err = cipher.NewGCM(block)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: failed to create GCM: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func decryptPayload(encrypted string) ([]byte, error) {
@@ -32,23 +52,13 @@ func decryptPayload(encrypted string) ([]byte, error) {
 		return nil, err
 	}
 
-	block, err := aes.NewCipher(encryptionKey)
-	if err != nil {
-		return nil, err
-	}
-
-	aesGCM, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-
-	nonceSize := aesGCM.NonceSize()
+	nonceSize := aead.NonceSize()
 	if len(data) < nonceSize {
 		return nil, fmt.Errorf("ciphertext too short")
 	}
 
 	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
-	return aesGCM.Open(nil, nonce, ciphertext, nil)
+	return aead.Open(nil, nonce, ciphertext, nil)
 }
 
 func encryptPayload(data interface{}) (string, error) {
@@ -57,37 +67,38 @@ func encryptPayload(data interface{}) (string, error) {
 		return "", err
 	}
 
-	block, err := aes.NewCipher(encryptionKey)
-	if err != nil {
-		return "", err
-	}
-
-	aesGCM, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", err
-	}
-
-	nonce := make([]byte, aesGCM.NonceSize())
+	nonce := make([]byte, aead.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", err
 	}
 
-	ciphertext := aesGCM.Seal(nonce, nonce, plaintext, nil)
+	ciphertext := aead.Seal(nonce, nonce, plaintext, nil)
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
 type encryptedResponseWriter struct {
 	http.ResponseWriter
-	body       *bytes.Buffer
-	statusCode int
+	body          *bytes.Buffer
+	statusCode    int
+	headerWritten bool
 }
 
 func (w *encryptedResponseWriter) WriteHeader(code int) {
+	if w.headerWritten {
+		return
+	}
+	w.headerWritten = true
 	w.statusCode = code
 }
 
 func (w *encryptedResponseWriter) Write(b []byte) (int, error) {
 	return w.body.Write(b)
+}
+
+// Unwrap supports http.ResponseController and middleware that check for
+// wrapped writers (e.g. http.Flusher).
+func (w *encryptedResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 // EncryptionMiddleware decrypts incoming encrypted request bodies and encrypts

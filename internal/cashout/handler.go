@@ -3,6 +3,7 @@ package cashout
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
 )
@@ -37,7 +38,13 @@ func (h *Handler) GetOffer(w http.ResponseWriter, r *http.Request) {
 
 	offer, err := h.service.GenerateOffer(r.Context(), req.BetID, userID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "not eligible") ||
+			strings.Contains(errMsg, "no matched") || strings.Contains(errMsg, "not available") {
+			writeError(w, http.StatusBadRequest, errMsg)
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to generate cashout offer")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, offer)
@@ -59,7 +66,13 @@ func (h *Handler) AcceptOffer(w http.ResponseWriter, r *http.Request) {
 
 	offer, err := h.service.AcceptOffer(r.Context(), req.OfferID, userID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "expired") ||
+			strings.Contains(errMsg, "already") || strings.Contains(errMsg, "contact support") {
+			writeError(w, http.StatusBadRequest, errMsg)
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to accept cashout offer")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, offer)
@@ -69,7 +82,7 @@ func (h *Handler) ListOffers(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	offers, err := h.service.GetUserOffers(r.Context(), userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to retrieve cashout offers")
 		return
 	}
 	writeJSON(w, http.StatusOK, offers)

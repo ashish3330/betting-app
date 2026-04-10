@@ -24,8 +24,26 @@ export default function RegisterPage() {
       setError("Passwords do not match");
       return;
     }
-    if (password.length < 6) {
-      setError("Password must be at least 6 characters");
+    // Username validation: 3-30 chars, alphanumeric + ._-
+    const usernameRegex = /^[a-zA-Z0-9._-]{3,30}$/;
+    if (!usernameRegex.test(username)) {
+      setError("Username must be 3-30 characters and can only contain letters, numbers, dots, underscores, and hyphens");
+      return;
+    }
+    if (password.length < 8) {
+      setError("Password must be at least 8 characters");
+      return;
+    }
+    if (!/[A-Z]/.test(password)) {
+      setError("Password must contain at least 1 uppercase letter");
+      return;
+    }
+    if (!/[a-z]/.test(password)) {
+      setError("Password must contain at least 1 lowercase letter");
+      return;
+    }
+    if (!/[0-9]/.test(password)) {
+      setError("Password must contain at least 1 number");
       return;
     }
 
@@ -92,7 +110,7 @@ export default function RegisterPage() {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="Min 6 characters"
+              placeholder="Min 8 chars, upper+lower+number"
               className="w-full h-11 px-4 bg-surface border border-gray-700 rounded-xl text-sm text-white placeholder:text-gray-400 focus:outline-none focus:border-lotus transition"
               autoComplete="new-password"
             />

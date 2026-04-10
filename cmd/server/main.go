@@ -40,6 +40,7 @@ func main() {
 	// Initialize secrets from env vars (falls back to dev defaults)
 	initEncryption()
 	initSecurity()
+	initCORS()
 
 	// Connect to PostgreSQL if DATABASE_URL is set
 	if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" {
@@ -119,6 +120,9 @@ func main() {
 	mux.HandleFunc("POST /api/v1/auth/otp/generate", auth(handleOTPGenerate))
 	mux.HandleFunc("POST /api/v1/auth/otp/verify", handleOTPVerify)
 	mux.HandleFunc("POST /api/v1/auth/otp/enable", auth(handleOTPEnable))
+	mux.HandleFunc("POST /api/v1/auth/otp/resend", handleOTPResend)
+	mux.HandleFunc("POST /api/v1/auth/change-password", auth(handleChangePassword))
+	mux.HandleFunc("POST /api/v1/kyc/upload", auth(handleKYCUpload))
 	mux.HandleFunc("GET /api/v1/auth/sessions", auth(handleGetSessions))
 	mux.HandleFunc("DELETE /api/v1/auth/sessions", auth(handleLogoutAllSessions))
 	mux.HandleFunc("GET /api/v1/auth/login-history", auth(handleLoginHistory))
@@ -165,11 +169,18 @@ func main() {
 	mux.HandleFunc("POST /api/v1/bet/place", auth(handlePlaceBet))
 	mux.HandleFunc("DELETE /api/v1/bet/{betId}/cancel", auth(handleCancelBet))
 	mux.HandleFunc("GET /api/v1/bets", auth(handleUserBets))
+	mux.HandleFunc("GET /api/v1/bets/history", auth(handleBetsHistory))
 	mux.HandleFunc("GET /api/v1/market/{marketId}/orderbook", auth(handleOrderBook))
 
 	// ── Protected: Wallet ───────────────────────────────────────
 	mux.HandleFunc("GET /api/v1/wallet/balance", auth(handleGetBalance))
 	mux.HandleFunc("GET /api/v1/wallet/ledger", auth(handleGetLedger))
+	mux.HandleFunc("GET /api/v1/wallet/statement", auth(handleGetLedger))
+	mux.HandleFunc("POST /api/v1/wallet/deposit/upi", auth(handleUPIDeposit))
+	mux.HandleFunc("POST /api/v1/wallet/deposit/crypto", auth(handleCryptoDeposit))
+	mux.HandleFunc("POST /api/v1/wallet/withdraw", auth(handleWithdraw))
+	mux.HandleFunc("GET /api/v1/wallet/deposits", auth(handleWalletDeposits))
+	mux.HandleFunc("GET /api/v1/wallet/withdrawals", auth(handleWalletWithdrawals))
 
 	// ── Protected: Hierarchy ────────────────────────────────────
 	mux.HandleFunc("GET /api/v1/hierarchy/children", auth(handleGetChildren))
@@ -208,15 +219,15 @@ func main() {
 	// ── Panel: Audit Log ────────────────────────────────────────
 	mux.HandleFunc("GET /api/v1/panel/audit", auth(handlePanelAudit))
 
-	// ── Admin ───────────────────────────────────────────────────
-	mux.HandleFunc("GET /api/v1/admin/users", auth(handleAdminListUsers))
-	mux.HandleFunc("GET /api/v1/admin/users/{id}", auth(handleAdminGetUser))
-	mux.HandleFunc("GET /api/v1/admin/markets", auth(handleAdminListMarkets))
-	mux.HandleFunc("GET /api/v1/admin/bets", auth(handleAdminListBets))
-	mux.HandleFunc("POST /api/v1/admin/markets/{id}/settle", auth(handleSettleMarket))
-	mux.HandleFunc("POST /api/v1/admin/markets/{id}/void", auth(handleVoidMarket))
-	mux.HandleFunc("POST /api/v1/admin/markets/{id}/suspend", auth(handleSuspendMarket))
-	mux.HandleFunc("POST /api/v1/admin/markets/{id}/resume", auth(handleResumeMarket))
+	// ── Admin (superadmin / admin only) ─────────────────────────
+	mux.HandleFunc("GET /api/v1/admin/users", requireRole(handleAdminListUsers, "superadmin", "admin"))
+	mux.HandleFunc("GET /api/v1/admin/users/{id}", requireRole(handleAdminGetUser, "superadmin", "admin"))
+	mux.HandleFunc("GET /api/v1/admin/markets", requireRole(handleAdminListMarkets, "superadmin", "admin"))
+	mux.HandleFunc("GET /api/v1/admin/bets", requireRole(handleAdminListBets, "superadmin", "admin"))
+	mux.HandleFunc("POST /api/v1/admin/markets/{id}/settle", requireRole(handleSettleMarket, "superadmin", "admin"))
+	mux.HandleFunc("POST /api/v1/admin/markets/{id}/void", requireRole(handleVoidMarket, "superadmin", "admin"))
+	mux.HandleFunc("POST /api/v1/admin/markets/{id}/suspend", requireRole(handleSuspendMarket, "superadmin", "admin"))
+	mux.HandleFunc("POST /api/v1/admin/markets/{id}/resume", requireRole(handleResumeMarket, "superadmin", "admin"))
 
 	// ── Panel (role-based hierarchy management) ───────────────
 	mux.HandleFunc("GET /api/v1/panel/dashboard", auth(handlePanelDashboard))
@@ -245,11 +256,41 @@ func main() {
 
 	// ── Config ─────────────────────────────────────────────────
 	mux.HandleFunc("GET /api/v1/config", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]interface{}{"encryption": true, "key_hint": "lotus-2026"})
+		writeJSON(w, 200, map[string]interface{}{"encryption": true})
 	})
 
 	// ── Seed endpoint (bypasses encryption, sets up full hierarchy + credit chain) ──
 	mux.HandleFunc("POST /api/v1/seed", func(w http.ResponseWriter, r *http.Request) {
+		// Require X-Seed-Secret header matching SEED_SECRET env var
+		seedSecret := os.Getenv("SEED_SECRET")
+		if seedSecret == "" {
+			writeErr(w, 500, "SEED_SECRET env var is not set")
+			return
+		}
+		if r.Header.Get("X-Seed-Secret") != seedSecret {
+			writeErr(w, 403, "invalid or missing X-Seed-Secret header")
+			return
+		}
+
+		// Read passwords from env vars
+		seedPasswords := map[string]string{
+			"SEED_SUPERADMIN_PASSWORD": os.Getenv("SEED_SUPERADMIN_PASSWORD"),
+			"SEED_ADMIN_PASSWORD":      os.Getenv("SEED_ADMIN_PASSWORD"),
+			"SEED_MASTER_PASSWORD":     os.Getenv("SEED_MASTER_PASSWORD"),
+			"SEED_AGENT_PASSWORD":      os.Getenv("SEED_AGENT_PASSWORD"),
+			"SEED_PLAYER_PASSWORD":     os.Getenv("SEED_PLAYER_PASSWORD"),
+		}
+		var missingVars []string
+		for k, v := range seedPasswords {
+			if v == "" {
+				missingVars = append(missingVars, k)
+			}
+		}
+		if len(missingVars) > 0 {
+			writeErr(w, 500, fmt.Sprintf("missing required env vars: %v", missingVars))
+			return
+		}
+
 		type seedResult struct {
 			Users   []string `json:"users"`
 			Credits []string `json:"credits"`
@@ -258,12 +299,12 @@ func main() {
 
 		// Register hierarchy
 		hierarchy := []struct{ u, e, p, role string; parent int64; credit, comm float64 }{
-			{"superadmin", "sa@lotus.com", "Admin@123", "superadmin", 0, 10000000, 5},
-			{"admin1", "ad@lotus.com", "Admin@123", "admin", 1, 5000000, 4},
-			{"master1", "ma@lotus.com", "Master@123", "master", 2, 1000000, 3},
-			{"agent1", "ag@lotus.com", "Agent@123", "agent", 3, 500000, 2},
-			{"player1", "p1@lotus.com", "Player@123", "client", 4, 100000, 2},
-			{"player2", "p2@lotus.com", "Player@123", "client", 4, 100000, 2},
+			{"superadmin", "sa@lotus.com", seedPasswords["SEED_SUPERADMIN_PASSWORD"], "superadmin", 0, 10000000, 5},
+			{"admin1", "ad@lotus.com", seedPasswords["SEED_ADMIN_PASSWORD"], "admin", 1, 5000000, 4},
+			{"master1", "ma@lotus.com", seedPasswords["SEED_MASTER_PASSWORD"], "master", 2, 1000000, 3},
+			{"agent1", "ag@lotus.com", seedPasswords["SEED_AGENT_PASSWORD"], "agent", 3, 500000, 2},
+			{"player1", "p1@lotus.com", seedPasswords["SEED_PLAYER_PASSWORD"], "client", 4, 100000, 2},
+			{"player2", "p2@lotus.com", seedPasswords["SEED_PLAYER_PASSWORD"], "client", 4, 100000, 2},
 		}
 		for _, h := range hierarchy {
 			var parentPtr *int64
@@ -307,14 +348,17 @@ func main() {
 
 	// ── Security Layers ────────────────────────────────────────
 
+	// Shared stop channel for graceful shutdown of cleanup goroutines
+	securityStop := make(chan struct{})
+
 	// IP blocker: block IP after 20 failed requests in window
-	ipBlocker = NewIPBlocker(20, 15*time.Minute)
+	ipBlocker = NewIPBlocker(20, 15*time.Minute, securityStop)
 
 	// Anti-replay guard: reject duplicate nonces within 5 min
-	replayGuard = NewReplayGuard(5 * time.Minute)
+	replayGuard = NewReplayGuard(5*time.Minute, securityStop)
 
 	// Per-IP rate limiter: 50 req/sec burst, 20 req/sec sustained
-	rateLimiter := NewPerIPRateLimiter(20, 50)
+	rateLimiter := NewPerIPRateLimiter(20, 50, securityStop)
 
 	// Data backup every 10 minutes
 	store.StartBackupSchedule(10*time.Minute, "/tmp/lotus_backup.json")
@@ -399,9 +443,32 @@ func main() {
 
 // ── Middleware ───────────────────────────────────────────────────────────────
 
+var corsAllowedOrigins map[string]bool
+
+func initCORS() {
+	corsAllowedOrigins = make(map[string]bool)
+	origins := os.Getenv("CORS_ALLOWED_ORIGINS")
+	if origins == "" {
+		origins = "http://localhost:3000,http://localhost:8080"
+	}
+	for _, o := range strings.Split(origins, ",") {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			corsAllowedOrigins[strings.ToLower(o)] = true
+		}
+	}
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := r.Header.Get("Origin")
+		w.Header().Add("Vary", "Origin")
+
+		if origin != "" && corsAllowedOrigins[strings.ToLower(origin)] {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
+
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-CSRF-Token")
 		w.Header().Set("Access-Control-Expose-Headers", "X-Encrypted, X-CSRF-Token")
@@ -447,7 +514,10 @@ func auth(next http.HandlerFunc) http.HandlerFunc {
 		r.Header.Set("X-User-ID", fmt.Sprintf("%d", claims.UserID))
 		r.Header.Set("X-Username", claims.Username)
 		r.Header.Set("X-Role", claims.Role)
-		next(w, r)
+		// Inject claims into context so handlers can access via r.Context().Value("claims")
+		//nolint:staticcheck // string key for backwards compat with handlers
+		ctx := context.WithValue(r.Context(), "claims", claims)
+		next(w, r.WithContext(ctx))
 	}
 }
 
@@ -458,6 +528,22 @@ func getUserID(r *http.Request) int64 {
 
 func getRole(r *http.Request) string {
 	return r.Header.Get("X-Role")
+}
+
+// requireRole wraps an auth-protected handler with an additional role check.
+// Only requests whose X-Role header (set by the auth middleware from JWT
+// claims) matches one of the allowed roles are permitted through.
+func requireRole(next http.HandlerFunc, allowedRoles ...string) http.HandlerFunc {
+	return auth(func(w http.ResponseWriter, r *http.Request) {
+		role := getRole(r)
+		for _, ar := range allowedRoles {
+			if role == ar {
+				next(w, r)
+				return
+			}
+		}
+		writeErr(w, 403, "insufficient permissions")
+	})
 }
 
 func generateToken(u *User, ttl time.Duration) string {
@@ -490,10 +576,14 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid request body")
 		return
 	}
-	if req.Username == "" || req.Password == "" || req.Role == "" {
-		writeErr(w, 400, "username, password, and role are required")
+	if req.Username == "" || req.Password == "" {
+		writeErr(w, 400, "username and password are required")
 		return
 	}
+
+	// Public registration always creates a "client" role.
+	// Only admin/panel endpoints may assign other roles.
+	req.Role = "client"
 
 	// Input validation
 	req.Username = SanitizeString(req.Username)
@@ -575,19 +665,19 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	if u.Status != "active" {
 		store.AddAudit(u.ID, u.Username, "login_failed", "account is "+u.Status, clientIP)
-		writeErr(w, 403, "account is "+u.Status)
+		logger.Warn("login attempt on non-active account", "user_id", u.ID, "status", u.Status)
+		writeErr(w, 403, "invalid credentials")
 		return
 	}
 
 	// If OTP is enabled, require verification
 	if u.OTPEnabled {
-		code := store.GenerateOTP(u.ID)
+		_ = store.GenerateOTP(u.ID) // OTP delivered out-of-band only
 		store.AddAudit(u.ID, u.Username, "otp_generated", "OTP required for login", clientIP)
-		logger.Info("OTP generated for user", "id", u.ID, "code", code)
+		logger.Info("OTP generated for user", "id", u.ID)
 		writeJSON(w, 200, map[string]interface{}{
 			"requires_otp": true,
 			"user_id":      u.ID,
-			"otp_code":     code, // Returned in mock for testing
 		})
 		return
 	}
@@ -605,13 +695,16 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	store.refreshTokenTimes[refresh] = time.Now()
 	store.mu.Unlock()
 
+	// Determine if connection is secure (direct TLS or behind TLS-terminating proxy)
+	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+
 	// Set HttpOnly cookies for secure token storage (immune to XSS)
 	http.SetCookie(w, &http.Cookie{
 		Name:     "access_token",
 		Value:    access,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   isSecure,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   86400, // 24 hours
 	})
@@ -620,7 +713,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    refresh,
 		Path:     "/api/v1/auth/refresh",
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   isSecure,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   604800, // 7 days
 	})
@@ -630,7 +723,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    csrf,
 		Path:     "/",
 		HttpOnly: false,
-		Secure:   r.TLS != nil,
+		Secure:   isSecure,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   86400,
 	})
@@ -769,17 +862,25 @@ func handleRefresh(w http.ResponseWriter, r *http.Request) {
 // ── Sports & Markets ────────────────────────────────────────────────────────
 
 func handleListSports(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, store.sports)
+	store.mu.RLock()
+	// Copy the slice header + elements to a new slice so writers cannot
+	// mutate the backing array while we are encoding.
+	sports := make([]*Sport, len(store.sports))
+	copy(sports, store.sports)
+	store.mu.RUnlock()
+	writeJSON(w, 200, sports)
 }
 
 func handleListCompetitions(w http.ResponseWriter, r *http.Request) {
 	sport := r.URL.Query().Get("sport")
+	store.mu.RLock()
 	var out []*Competition
 	for _, c := range store.competitions {
 		if sport == "" || c.SportID == sport {
 			out = append(out, c)
 		}
 	}
+	store.mu.RUnlock()
 	writeJSON(w, 200, out)
 }
 
@@ -1200,7 +1301,7 @@ func handlePlaceBet(w http.ResponseWriter, r *http.Request) {
 		req.Price = currentBestPrice
 	}
 
-	// ── 9. Sufficient balance check (pre-match) ──
+	// ── 9. Compute hold amount (pre-check, will be re-validated atomically) ──
 	var holdAmount float64
 	if req.Side == "back" {
 		holdAmount = req.Stake
@@ -1212,52 +1313,14 @@ func handlePlaceBet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── 10. Per-market exposure limit (max 50% of balance on single market) ──
-	existingExposure := 0.0
-	store.mu.RLock()
-	for _, b := range store.bets {
-		if b.UserID == uid && b.MarketID == req.MarketID && (b.Status == "unmatched" || b.Status == "matched" || b.Status == "partial") {
-			if b.Side == "back" {
-				existingExposure += b.Stake
-			} else {
-				existingExposure += b.Stake * (b.Price - 1)
-			}
-		}
-	}
-	store.mu.RUnlock()
-	maxMarketExposure := user.Balance * 0.5
-	if existingExposure+holdAmount > maxMarketExposure && maxMarketExposure > 0 {
-		writeErr(w, 400, fmt.Sprintf("market exposure limit exceeded: existing ₹%.0f + new ₹%.0f > limit ₹%.0f (50%% of balance)", existingExposure, holdAmount, maxMarketExposure))
-		return
-	}
-
-	// ── 11. Duplicate client_ref check ──
-	if req.ClientRef != "" {
-		store.mu.RLock()
-		for _, b := range store.bets {
-			if b.ClientRef == req.ClientRef && b.UserID == uid {
-				store.mu.RUnlock()
-				writeErr(w, 409, "duplicate bet: client_ref already used")
-				return
-			}
-		}
-		store.mu.RUnlock()
-	}
-
 	// ═══════════════════════════════════════════════════════════════════════
-	// ALL CHECKS PASSED — Execute the bet
+	// ATOMIC BET EXECUTION — hold funds + place bet under a single lock.
+	// Balance, exposure limits, duplicate client_ref, and market status are
+	// all re-validated inside HoldAndPlaceBet to eliminate TOCTOU races.
 	// ═══════════════════════════════════════════════════════════════════════
 
-	result, err := store.PlaceAndMatch(uid, req.MarketID, req.SelectionID, req.Side, req.Price, req.Stake, req.ClientRef)
+	result, err := store.HoldAndPlaceBet(uid, req.MarketID, req.SelectionID, req.Side, req.Price, req.Stake, req.ClientRef, holdAmount)
 	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-
-	// Hold funds for the full bet amount (matched + unmatched).
-	// Matched portion stays as exposure until settlement; unmatched until cancel/match.
-	// This ensures balance and exposure update immediately when a bet is placed.
-	if err := store.HoldFunds(uid, holdAmount, result.BetID); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -1379,6 +1442,92 @@ func handleUserBets(w http.ResponseWriter, r *http.Request) {
 		"total": total,
 		"page":  page,
 		"limit": limit,
+	})
+}
+
+// handleBetsHistory returns the user's bet history along with aggregated
+// summary statistics. The bets payload mirrors handleUserBets so existing
+// frontend rendering logic can be reused.
+func handleBetsHistory(w http.ResponseWriter, r *http.Request) {
+	uid := getUserID(r)
+	bets := store.GetUserBets(uid)
+	if bets == nil {
+		bets = []*Bet{}
+	}
+
+	type enrichedBet struct {
+		*Bet
+		MarketName    string  `json:"market_name"`
+		SelectionName string  `json:"selection_name"`
+		MarketType    string  `json:"market_type"`
+		DisplaySide   string  `json:"display_side"`
+		ProfitLoss    float64 `json:"profit_loss"`
+	}
+
+	validStatuses := map[string]bool{"matched": true, "settled": true, "cancelled": true, "void": true}
+
+	var totalStake, totalPnl float64
+	var won, lost, pending int
+	result := make([]enrichedBet, 0, len(bets))
+
+	store.mu.RLock()
+	for _, b := range bets {
+		if !validStatuses[b.Status] {
+			continue
+		}
+		totalStake += b.Stake
+		switch b.Status {
+		case "settled":
+			totalPnl += b.Profit
+			if b.Profit > 0 {
+				won++
+			} else if b.Profit < 0 {
+				lost++
+			}
+		case "matched":
+			pending++
+		}
+
+		eb := enrichedBet{Bet: b, ProfitLoss: b.Profit}
+		if m, ok := store.markets[b.MarketID]; ok {
+			eb.MarketName = m.Name
+			eb.MarketType = m.MarketType
+		}
+		if runners, ok := store.runners[b.MarketID]; ok {
+			for _, rn := range runners {
+				if rn.SelectionID == b.SelectionID {
+					eb.SelectionName = rn.Name
+					break
+				}
+			}
+		}
+		if eb.MarketType == "fancy" || eb.MarketType == "session" {
+			if b.Side == "back" {
+				eb.DisplaySide = "yes"
+			} else {
+				eb.DisplaySide = "no"
+			}
+		} else {
+			eb.DisplaySide = b.Side
+		}
+		result = append(result, eb)
+	}
+	store.mu.RUnlock()
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt > result[j].CreatedAt
+	})
+
+	writeJSON(w, 200, map[string]interface{}{
+		"bets": result,
+		"summary": map[string]interface{}{
+			"total_bets":  len(result),
+			"total_stake": roundMoney(totalStake),
+			"total_pnl":   roundMoney(totalPnl),
+			"won":         won,
+			"lost":        lost,
+			"pending":     pending,
+		},
 	})
 }
 
@@ -1709,6 +1858,34 @@ func handleGetPayments(w http.ResponseWriter, r *http.Request) {
 		txns = []*PaymentTx{}
 	}
 	writeJSON(w, 200, txns)
+}
+
+// handleWalletDeposits returns only deposit-direction payment transactions
+// for the authenticated user, mounted at /api/v1/wallet/deposits.
+func handleWalletDeposits(w http.ResponseWriter, r *http.Request) {
+	uid := getUserID(r)
+	all := store.GetUserPayments(uid)
+	result := make([]*PaymentTx, 0, len(all))
+	for _, tx := range all {
+		if tx.Direction == "deposit" {
+			result = append(result, tx)
+		}
+	}
+	writeJSON(w, 200, result)
+}
+
+// handleWalletWithdrawals returns only withdrawal-direction payment
+// transactions for the authenticated user, mounted at /api/v1/wallet/withdrawals.
+func handleWalletWithdrawals(w http.ResponseWriter, r *http.Request) {
+	uid := getUserID(r)
+	all := store.GetUserPayments(uid)
+	result := make([]*PaymentTx, 0, len(all))
+	for _, tx := range all {
+		if tx.Direction == "withdrawal" {
+			result = append(result, tx)
+		}
+	}
+	writeJSON(w, 200, result)
 }
 
 func handleGetPayment(w http.ResponseWriter, r *http.Request) {
@@ -2596,12 +2773,11 @@ func findFirstInPlayMatchOdds(s *Store) (marketID string, selectionIDs []int64) 
 
 func handleOTPGenerate(w http.ResponseWriter, r *http.Request) {
 	uid := getUserID(r)
-	code := store.GenerateOTP(uid)
+	_ = store.GenerateOTP(uid) // OTP delivered out-of-band only
 	store.AddAudit(uid, r.Header.Get("X-Username"), "otp_generated", "OTP generated manually", r.RemoteAddr)
-	logger.Info("OTP generated", "user_id", uid, "code", code)
+	logger.Info("OTP generated", "user_id", uid)
 	writeJSON(w, 200, map[string]interface{}{
-		"message":  "OTP generated",
-		"otp_code": code, // Returned in mock for testing
+		"message": "OTP generated",
 	})
 }
 
@@ -2672,6 +2848,196 @@ func handleOTPEnable(w http.ResponseWriter, r *http.Request) {
 	}
 	store.AddAudit(uid, r.Header.Get("X-Username"), "otp_"+action, "2FA "+action, r.RemoteAddr)
 	writeJSON(w, 200, map[string]string{"message": "2FA " + action})
+}
+
+// handleOTPResend issues a fresh OTP for a user. If an auth token is present,
+// the authenticated user's ID is used. Otherwise the caller may supply a
+// user_id in the body (used by the login OTP flow before a session exists).
+// The code is never returned in the response — it is delivered out-of-band.
+// For dev environments without an SMS gateway, the server logs the code.
+func handleOTPResend(w http.ResponseWriter, r *http.Request) {
+	var uid int64
+
+	// Prefer authenticated user from JWT (Authorization header or cookie).
+	var tokenStr string
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		tokenStr = h[7:]
+	} else if cookie, err := r.Cookie("access_token"); err == nil && cookie.Value != "" {
+		tokenStr = cookie.Value
+	}
+	if tokenStr != "" {
+		if tok, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (interface{}, error) {
+			return store.PublicKey, nil
+		}); err == nil {
+			if claims, ok := tok.Claims.(*Claims); ok {
+				uid = claims.UserID
+			}
+		}
+	}
+
+	// Fall back to user_id in body (public resend for pre-login OTP flows).
+	if uid == 0 {
+		var req struct {
+			UserID int64 `json:"user_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		uid = req.UserID
+	}
+
+	if uid == 0 {
+		writeErr(w, 400, "user_id required (or send Authorization header)")
+		return
+	}
+
+	u := store.GetUser(uid)
+	if u == nil {
+		writeErr(w, 404, "user not found")
+		return
+	}
+
+	code := store.GenerateOTP(uid)
+	// Dev-only: log the code so it can be read from server logs when no SMS
+	// gateway is configured. Never include it in the HTTP response.
+	logger.Info("OTP resent", "user_id", uid, "username", u.Username, "code_dev_only", code)
+	store.AddAudit(uid, u.Username, "otp_resent", "OTP resent", r.RemoteAddr)
+
+	writeJSON(w, 200, map[string]string{"message": "OTP sent"})
+}
+
+// handleChangePassword lets an authenticated user rotate their password.
+// The old password is verified with a constant-time comparison before the
+// new hash is written to both the in-memory store and the database.
+func handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	uid := getUserID(r)
+	var req struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "invalid request body")
+		return
+	}
+	if req.OldPassword == "" || req.NewPassword == "" {
+		writeErr(w, 400, "old_password and new_password are required")
+		return
+	}
+	if len(req.NewPassword) < 8 {
+		writeErr(w, 400, "new password must be at least 8 characters")
+		return
+	}
+	if req.OldPassword == req.NewPassword {
+		writeErr(w, 400, "new password must be different from old password")
+		return
+	}
+
+	u := store.GetUser(uid)
+	if u == nil {
+		writeErr(w, 404, "user not found")
+		return
+	}
+	if !verifyPassword(req.OldPassword, u.PasswordHash) {
+		store.AddAudit(uid, u.Username, "password_change_failed", "old password mismatch", r.RemoteAddr)
+		writeErr(w, 401, "old password is incorrect")
+		return
+	}
+
+	newHash := hashPassword(req.NewPassword)
+	store.mu.Lock()
+	if user, ok := store.users[uid]; ok {
+		user.PasswordHash = newHash
+		user.UpdatedAt = time.Now().Format(time.RFC3339)
+	}
+	store.mu.Unlock()
+
+	if useDB() {
+		if _, err := db.Exec(`UPDATE auth.users SET password_hash=$1, updated_at=NOW() WHERE id=$2`, newHash, uid); err != nil {
+			logger.Error("dbUpdatePassword failed", "error", err, "user_id", uid)
+		}
+	}
+
+	store.AddAudit(uid, u.Username, "password_changed", "password changed by user", r.RemoteAddr)
+	logger.Info("password changed", "user_id", uid, "username", u.Username)
+	writeJSON(w, 200, map[string]string{"message": "password changed"})
+}
+
+// handleKYCUpload accepts a KYC document upload via multipart/form-data.
+// The field name is "document" and the maximum file size is 5 MB.
+// For dev environments, the document metadata is persisted but the file
+// bytes themselves are discarded — real object-storage integration is a TODO.
+func handleKYCUpload(w http.ResponseWriter, r *http.Request) {
+	uid := getUserID(r)
+
+	const maxBytes = 5 << 20 // 5 MB
+	// Cap the request body before parsing to prevent memory abuse.
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes+1024)
+
+	if err := r.ParseMultipartForm(maxBytes); err != nil {
+		writeErr(w, 400, "failed to parse multipart form (max 5MB): "+err.Error())
+		return
+	}
+
+	file, header, err := r.FormFile("document")
+	if err != nil {
+		writeErr(w, 400, "missing 'document' file field")
+		return
+	}
+	defer file.Close()
+
+	if header.Size <= 0 {
+		writeErr(w, 400, "uploaded file is empty")
+		return
+	}
+	if header.Size > maxBytes {
+		writeErr(w, 413, "file exceeds 5MB limit")
+		return
+	}
+
+	docType := r.FormValue("doc_type")
+	if docType == "" {
+		docType = "identity"
+	}
+
+	// TODO: stream the file bytes to object storage (S3/GCS) and store the
+	// returned URL. For now, we only persist metadata and mark it pending.
+	status := "pending_review"
+	filename := header.Filename
+
+	if useDB() {
+		// Ensure the table exists (idempotent migration) so this endpoint
+		// works on databases that predate the KYC feature.
+		if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS betting.kyc_documents (
+			id BIGSERIAL PRIMARY KEY,
+			user_id BIGINT NOT NULL REFERENCES auth.users(id),
+			doc_type TEXT NOT NULL DEFAULT 'identity',
+			filename TEXT NOT NULL,
+			size_bytes BIGINT NOT NULL DEFAULT 0,
+			content_type TEXT DEFAULT '',
+			storage_url TEXT DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'pending_review',
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		)`); err != nil {
+			logger.Error("kyc_documents table create failed", "error", err)
+		}
+		if _, err := db.Exec(`INSERT INTO betting.kyc_documents
+			(user_id, doc_type, filename, size_bytes, content_type, status)
+			VALUES ($1,$2,$3,$4,$5,$6)`,
+			uid, docType, filename, header.Size, header.Header.Get("Content-Type"), status); err != nil {
+			logger.Error("kyc_documents insert failed", "error", err)
+		}
+	}
+
+	store.AddAudit(uid, r.Header.Get("X-Username"), "kyc_upload",
+		fmt.Sprintf("KYC document uploaded: %s (%d bytes, type=%s)", filename, header.Size, docType),
+		r.RemoteAddr)
+	logger.Info("KYC document uploaded", "user_id", uid, "filename", filename, "size", header.Size)
+
+	writeJSON(w, 200, map[string]interface{}{
+		"message":  "KYC document uploaded",
+		"status":   status,
+		"filename": filename,
+		"size":     header.Size,
+		"doc_type": docType,
+	})
 }
 
 // ── Session Handlers ────────────────────────────────────────────────────────

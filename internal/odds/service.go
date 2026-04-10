@@ -11,11 +11,18 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// NATSPublisher is the interface for publishing messages to NATS.
+// Implemented by pkg/nats.Client.
+type NATSPublisher interface {
+	Publish(ctx context.Context, subject string, data []byte) error
+}
+
 // Service manages odds providers and caches updates in Redis.
 type Service struct {
 	provider OddsProvider
 	redis    *redis.Client
 	logger   *slog.Logger
+	nats     NATSPublisher // optional; when set, publishes each update to NATS once
 }
 
 func NewService(provider OddsProvider, rdb *redis.Client, logger *slog.Logger) *Service {
@@ -24,6 +31,12 @@ func NewService(provider OddsProvider, rdb *redis.Client, logger *slog.Logger) *
 		redis:    rdb,
 		logger:   logger,
 	}
+}
+
+// SetNATS configures the NATS publisher so the service publishes each odds
+// update exactly once, rather than per-client.
+func (s *Service) SetNATS(n NATSPublisher) {
+	s.nats = n
 }
 
 func (s *Service) Provider() OddsProvider { return s.provider }
@@ -149,7 +162,7 @@ func (s *Service) StartSubscription(ctx context.Context, marketIDs []string) (<-
 		}
 	}()
 
-	// Cache updates as they come in
+	// Cache updates as they come in; warn and drop if consumer is too slow.
 	cached := make(chan *models.OddsUpdate, 1000)
 	go func() {
 		defer close(cached)
@@ -158,10 +171,21 @@ func (s *Service) StartSubscription(ctx context.Context, marketIDs []string) (<-
 			data, _ := json.Marshal(update)
 			s.redis.Set(ctx, fmt.Sprintf("odds:market:%s", update.MarketID), data, 30*time.Second)
 
+			// Publish to NATS once (not per-client).
+			if s.nats != nil {
+				if pubErr := s.nats.Publish(ctx, "odds.update."+update.MarketID, data); pubErr != nil {
+					s.logger.ErrorContext(ctx, "failed to publish odds update to NATS",
+						"market_id", update.MarketID, "error", pubErr)
+				}
+			}
+
 			select {
 			case cached <- update:
 			case <-ctx.Done():
 				return
+			default:
+				s.logger.WarnContext(ctx, "subscription channel full, dropping update for slow consumer",
+					"market_id", update.MarketID)
 			}
 		}
 	}()

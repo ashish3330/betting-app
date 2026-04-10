@@ -27,7 +27,7 @@ func (h *Handler) GetLimits(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	limits, err := h.service.GetLimits(r.Context(), userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to retrieve gambling limits")
 		return
 	}
 	writeJSON(w, http.StatusOK, limits)
@@ -43,7 +43,7 @@ func (h *Handler) UpdateLimits(w http.ResponseWriter, r *http.Request) {
 
 	limits, err := h.service.UpdateLimits(r.Context(), userID, &req)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, http.StatusBadRequest, "failed to update gambling limits")
 		return
 	}
 	writeJSON(w, http.StatusOK, limits)
@@ -58,7 +58,7 @@ func (h *Handler) SelfExclude(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.service.SelfExclude(r.Context(), userID, &req); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to activate self-exclusion")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "self-exclusion activated"})
@@ -79,7 +79,7 @@ func (h *Handler) CoolingOff(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.service.SetCoolingOff(r.Context(), userID, req.Hours); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to set cooling-off period")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "cooling-off period activated"})
@@ -89,7 +89,7 @@ func (h *Handler) SessionInfo(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	duration, limit, err := h.service.GetSessionDuration(r.Context(), userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to retrieve session info")
 		return
 	}
 

@@ -3,6 +3,7 @@ package wallet
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -10,6 +11,11 @@ import (
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
 	"github.com/redis/go-redis/v9"
 )
+
+// ErrDuplicateOperation is returned when an idempotency key (reference) has
+// already been consumed. Callers should treat this as a no-op rather than a
+// transient failure.
+var ErrDuplicateOperation = errors.New("duplicate operation")
 
 type Service struct {
 	db     *sql.DB
@@ -90,7 +96,7 @@ func (s *Service) HoldFunds(ctx context.Context, userID int64, amount float64, b
 
 	// Ledger entry with idempotency
 	ref := fmt.Sprintf("hold:%s", betID)
-	_, err = tx.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO ledger (user_id, amount, type, reference, bet_id, created_at)
 		 VALUES ($1, $2, 'hold', $3, $4, NOW())
 		 ON CONFLICT (reference) DO NOTHING`,
@@ -99,23 +105,23 @@ func (s *Service) HoldFunds(ctx context.Context, userID int64, amount float64, b
 	if err != nil {
 		return fmt.Errorf("hold funds: insert ledger: %w", err)
 	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("hold funds: rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrDuplicateOperation
+	}
 
-	// Best-effort Redis update BEFORE commit so the cache is warm even if
-	// the commit succeeds and we crash right after. The DB remains the
-	// source of truth -- callers must verify against it.
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("hold funds: commit: %w", err)
+	}
+
+	// Best-effort Redis update AFTER successful commit.
 	exposureKey := fmt.Sprintf("exposure:user:%d", userID)
 	if redisErr := s.redis.HIncrByFloat(ctx, exposureKey, "total", amount).Err(); redisErr != nil {
 		s.logger.WarnContext(ctx, "hold funds: redis exposure update failed (best-effort)",
 			"user_id", userID, "error", redisErr)
-	}
-
-	if err := tx.Commit(); err != nil {
-		// Attempt to roll back the Redis increment on commit failure.
-		if rollbackErr := s.redis.HIncrByFloat(ctx, exposureKey, "total", -amount).Err(); rollbackErr != nil {
-			s.logger.WarnContext(ctx, "hold funds: redis rollback failed",
-				"user_id", userID, "error", rollbackErr)
-		}
-		return fmt.Errorf("hold funds: commit: %w", err)
 	}
 
 	s.logger.InfoContext(ctx, "funds held", "user_id", userID, "amount", amount, "bet_id", betID)
@@ -164,7 +170,7 @@ func (s *Service) ReleaseFunds(ctx context.Context, userID int64, amount float64
 	}
 
 	ref := fmt.Sprintf("release:%s", betID)
-	_, err = tx.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO ledger (user_id, amount, type, reference, bet_id, created_at)
 		 VALUES ($1, $2, 'release', $3, $4, NOW())
 		 ON CONFLICT (reference) DO NOTHING`,
@@ -173,21 +179,23 @@ func (s *Service) ReleaseFunds(ctx context.Context, userID int64, amount float64
 	if err != nil {
 		return fmt.Errorf("release funds: insert ledger: %w", err)
 	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("release funds: rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrDuplicateOperation
+	}
 
-	// Best-effort Redis update before commit.
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("release funds: commit: %w", err)
+	}
+
+	// Best-effort Redis update AFTER successful commit.
 	exposureKey := fmt.Sprintf("exposure:user:%d", userID)
 	if redisErr := s.redis.HIncrByFloat(ctx, exposureKey, "total", -amount).Err(); redisErr != nil {
 		s.logger.WarnContext(ctx, "release funds: redis exposure update failed (best-effort)",
 			"user_id", userID, "error", redisErr)
-	}
-
-	if err := tx.Commit(); err != nil {
-		// Attempt to roll back the Redis decrement on commit failure.
-		if rollbackErr := s.redis.HIncrByFloat(ctx, exposureKey, "total", amount).Err(); rollbackErr != nil {
-			s.logger.WarnContext(ctx, "release funds: redis rollback failed",
-				"user_id", userID, "error", rollbackErr)
-		}
-		return fmt.Errorf("release funds: commit: %w", err)
 	}
 
 	s.logger.InfoContext(ctx, "funds released", "user_id", userID, "amount", amount, "bet_id", betID)
@@ -205,6 +213,15 @@ func (s *Service) SettleBet(ctx context.Context, userID int64, betID string, pnl
 	}
 	defer tx.Rollback()
 
+	// Lock the row before updating to prevent serialization failures.
+	var balance float64
+	err = tx.QueryRowContext(ctx,
+		"SELECT balance FROM users WHERE id = $1 FOR UPDATE", userID,
+	).Scan(&balance)
+	if err != nil {
+		return fmt.Errorf("settle bet: lock user row: %w", err)
+	}
+
 	// Update balance with P&L
 	_, err = tx.ExecContext(ctx,
 		"UPDATE users SET balance = balance + $1, updated_at = NOW() WHERE id = $2",
@@ -216,7 +233,7 @@ func (s *Service) SettleBet(ctx context.Context, userID int64, betID string, pnl
 
 	// Settlement ledger entry
 	ref := fmt.Sprintf("settlement:%s", betID)
-	_, err = tx.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO ledger (user_id, amount, type, reference, bet_id, created_at)
 		 VALUES ($1, $2, 'settlement', $3, $4, NOW())
 		 ON CONFLICT (reference) DO NOTHING`,
@@ -225,11 +242,18 @@ func (s *Service) SettleBet(ctx context.Context, userID int64, betID string, pnl
 	if err != nil {
 		return fmt.Errorf("settle bet: insert settlement ledger: %w", err)
 	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("settle bet: rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrDuplicateOperation
+	}
 
 	// Commission entry if applicable
 	if commission > 0 {
 		commRef := fmt.Sprintf("commission:%s", betID)
-		_, err = tx.ExecContext(ctx,
+		commRes, err := tx.ExecContext(ctx,
 			`INSERT INTO ledger (user_id, amount, type, reference, bet_id, created_at)
 			 VALUES ($1, $2, 'commission', $3, $4, NOW())
 			 ON CONFLICT (reference) DO NOTHING`,
@@ -237,6 +261,13 @@ func (s *Service) SettleBet(ctx context.Context, userID int64, betID string, pnl
 		)
 		if err != nil {
 			return fmt.Errorf("settle bet: insert commission ledger: %w", err)
+		}
+		commRows, err := commRes.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("settle bet: commission rows affected: %w", err)
+		}
+		if commRows == 0 {
+			return ErrDuplicateOperation
 		}
 
 		_, err = tx.ExecContext(ctx,
@@ -268,6 +299,15 @@ func (s *Service) Deposit(ctx context.Context, userID int64, amount float64, ref
 	}
 	defer tx.Rollback()
 
+	// Lock the row before updating to prevent serialization failures.
+	var balance float64
+	err = tx.QueryRowContext(ctx,
+		"SELECT balance FROM users WHERE id = $1 FOR UPDATE", userID,
+	).Scan(&balance)
+	if err != nil {
+		return fmt.Errorf("deposit: lock user row: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx,
 		"UPDATE users SET balance = balance + $1, updated_at = NOW() WHERE id = $2",
 		amount, userID,
@@ -276,7 +316,7 @@ func (s *Service) Deposit(ctx context.Context, userID int64, amount float64, ref
 		return fmt.Errorf("deposit: update balance: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO ledger (user_id, amount, type, reference, created_at)
 		 VALUES ($1, $2, 'deposit', $3, NOW())
 		 ON CONFLICT (reference) DO NOTHING`,
@@ -285,9 +325,175 @@ func (s *Service) Deposit(ctx context.Context, userID int64, amount float64, ref
 	if err != nil {
 		return fmt.Errorf("deposit: insert ledger: %w", err)
 	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("deposit: rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrDuplicateOperation
+	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("deposit: commit: %w", err)
+	}
+	return nil
+}
+
+// SettleBetTx performs a bet settlement within an existing database transaction.
+// This allows callers to atomically combine a casino bet insert with the wallet
+// settlement.
+func (s *Service) SettleBetTx(ctx context.Context, tx *sql.Tx, userID int64, betID string, pnl float64, commission float64) error {
+	// Lock the row before updating to prevent serialization failures.
+	var balance float64
+	err := tx.QueryRowContext(ctx,
+		"SELECT balance FROM users WHERE id = $1 FOR UPDATE", userID,
+	).Scan(&balance)
+	if err != nil {
+		return fmt.Errorf("settle bet tx: lock user row: %w", err)
+	}
+
+	// Update balance with P&L
+	_, err = tx.ExecContext(ctx,
+		"UPDATE users SET balance = balance + $1, updated_at = NOW() WHERE id = $2",
+		pnl, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("settle bet tx: update balance: %w", err)
+	}
+
+	// Settlement ledger entry
+	ref := fmt.Sprintf("settlement:%s", betID)
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO ledger (user_id, amount, type, reference, bet_id, created_at)
+		 VALUES ($1, $2, 'settlement', $3, $4, NOW())
+		 ON CONFLICT (reference) DO NOTHING`,
+		userID, pnl, ref, betID,
+	)
+	if err != nil {
+		return fmt.Errorf("settle bet tx: insert settlement ledger: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("settle bet tx: rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrDuplicateOperation
+	}
+
+	// Commission entry if applicable
+	if commission > 0 {
+		commRef := fmt.Sprintf("commission:%s", betID)
+		commRes, err := tx.ExecContext(ctx,
+			`INSERT INTO ledger (user_id, amount, type, reference, bet_id, created_at)
+			 VALUES ($1, $2, 'commission', $3, $4, NOW())
+			 ON CONFLICT (reference) DO NOTHING`,
+			userID, -commission, commRef, betID,
+		)
+		if err != nil {
+			return fmt.Errorf("settle bet tx: insert commission ledger: %w", err)
+		}
+		commRows, err := commRes.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("settle bet tx: commission rows affected: %w", err)
+		}
+		if commRows == 0 {
+			return ErrDuplicateOperation
+		}
+
+		_, err = tx.ExecContext(ctx,
+			"UPDATE users SET balance = balance - $1 WHERE id = $2",
+			commission, userID,
+		)
+		if err != nil {
+			return fmt.Errorf("settle bet tx: deduct commission: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// DepositTx performs a deposit within an existing database transaction. This
+// allows callers to atomically combine a payment status update with the wallet
+// credit.
+func (s *Service) DepositTx(ctx context.Context, tx *sql.Tx, userID int64, amount float64, reference string) error {
+	// Lock the row before updating to prevent serialization failures.
+	var balance float64
+	err := tx.QueryRowContext(ctx,
+		"SELECT balance FROM users WHERE id = $1 FOR UPDATE", userID,
+	).Scan(&balance)
+	if err != nil {
+		return fmt.Errorf("deposit tx: lock user row: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx,
+		"UPDATE users SET balance = balance + $1, updated_at = NOW() WHERE id = $2",
+		amount, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("deposit tx: update balance: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO ledger (user_id, amount, type, reference, created_at)
+		 VALUES ($1, $2, 'deposit', $3, NOW())
+		 ON CONFLICT (reference) DO NOTHING`,
+		userID, amount, reference,
+	)
+	if err != nil {
+		return fmt.Errorf("deposit tx: insert ledger: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("deposit tx: rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrDuplicateOperation
+	}
+	return nil
+}
+
+// HoldFundsTx performs a hold within an existing database transaction. This
+// allows callers to atomically combine payment record creation with the funds
+// hold.
+func (s *Service) HoldFundsTx(ctx context.Context, tx *sql.Tx, userID int64, amount float64, betID string) error {
+	var balance, exposure float64
+	err := tx.QueryRowContext(ctx,
+		"SELECT balance, exposure FROM users WHERE id = $1 FOR UPDATE",
+		userID,
+	).Scan(&balance, &exposure)
+	if err != nil {
+		return fmt.Errorf("hold funds tx: get balance: %w", err)
+	}
+
+	available := balance - exposure
+	if available < amount {
+		return fmt.Errorf("hold funds tx: insufficient balance: available %.2f, required %.2f", available, amount)
+	}
+
+	_, err = tx.ExecContext(ctx,
+		"UPDATE users SET exposure = exposure + $1, updated_at = NOW() WHERE id = $2",
+		amount, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("hold funds tx: update exposure: %w", err)
+	}
+
+	ref := fmt.Sprintf("hold:%s", betID)
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO ledger (user_id, amount, type, reference, bet_id, created_at)
+		 VALUES ($1, $2, 'hold', $3, $4, NOW())
+		 ON CONFLICT (reference) DO NOTHING`,
+		userID, -amount, ref, betID,
+	)
+	if err != nil {
+		return fmt.Errorf("hold funds tx: insert ledger: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("hold funds tx: rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrDuplicateOperation
 	}
 	return nil
 }
@@ -329,7 +535,7 @@ func (s *Service) Withdraw(ctx context.Context, userID int64, amount float64, re
 		return fmt.Errorf("withdraw: update balance: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx,
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO ledger (user_id, amount, type, reference, created_at)
 		 VALUES ($1, $2, 'withdrawal', $3, NOW())
 		 ON CONFLICT (reference) DO NOTHING`,
@@ -337,6 +543,13 @@ func (s *Service) Withdraw(ctx context.Context, userID int64, amount float64, re
 	)
 	if err != nil {
 		return fmt.Errorf("withdraw: insert ledger: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("withdraw: rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrDuplicateOperation
 	}
 
 	if err := tx.Commit(); err != nil {

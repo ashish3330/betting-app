@@ -6,6 +6,13 @@ set -e
 
 cd "$(dirname "$0")/.."
 
+# Load .env file if present
+if [ -f .env ]; then
+  set -a
+  source .env
+  set +a
+fi
+
 # Build if needed
 if [ ! -f bin/server ] || [ cmd/server/main.go -nt bin/server ]; then
   echo "Building server..."
@@ -13,10 +20,28 @@ if [ ! -f bin/server ] || [ cmd/server/main.go -nt bin/server ]; then
 fi
 
 # Persistent signing key — tokens survive restarts
-export ED25519_PRIVATE_KEY="${ED25519_PRIVATE_KEY:-5511076a4e1e815c37c7d7063f273e55d7306d314a7ceefe0c671fd3e681a9e03941b7cd1687c0e42e53469c78620ba2c086b609f64ad1293f8c0ce6b52a8186}"
+if [ -z "$ED25519_PRIVATE_KEY" ]; then
+  echo "ERROR: ED25519_PRIVATE_KEY is not set."
+  echo ""
+  echo "Generate one with:"
+  echo "  openssl genpkey -algorithm ed25519 2>/dev/null | openssl pkey -outform DER 2>/dev/null | xxd -p -c 256"
+  echo ""
+  echo "Then set it:"
+  echo "  export ED25519_PRIVATE_KEY=\"<hex-encoded-key>\""
+  echo "  # or add it to your .env file"
+  exit 1
+fi
+export ED25519_PRIVATE_KEY
 
 # Database
-export DATABASE_URL="${DATABASE_URL:-postgres://lotus:L0tus!Xchg2026@localhost:5432/bettingdb?sslmode=disable&search_path=betting,auth,public}"
+if [ -z "$DATABASE_URL" ]; then
+  echo "ERROR: DATABASE_URL is not set."
+  echo ""
+  echo "Set it via environment or .env file:"
+  echo "  export DATABASE_URL=\"postgres://user:pass@localhost:5432/bettingdb?sslmode=disable&search_path=betting,auth,public\""
+  exit 1
+fi
+export DATABASE_URL
 
 # Server
 export PORT="${PORT:-8080}"

@@ -3,14 +3,11 @@
 import { useState, useEffect, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
-import { encryptLocalStorage } from "@/lib/crypto";
 
 export default function OTPVerificationPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const userId = Number(searchParams.get("user_id") || "0");
-  const mockCode = searchParams.get("code") || "";
-
   const [digits, setDigits] = useState(["", "", "", "", "", ""]);
   const [status, setStatus] = useState<"idle" | "loading" | "error">("idle");
   const [error, setError] = useState("");
@@ -116,11 +113,16 @@ export default function OTPVerificationPage() {
   async function handleResend() {
     setResending(true);
     try {
-      // For mock, we re-trigger login flow; in production this would be a resend endpoint
+      await api.request("/api/v1/auth/otp/resend", {
+        method: "POST",
+        body: JSON.stringify({ user_id: userId }),
+      });
       setTimeLeft(300);
       setDigits(["", "", "", "", "", ""]);
       setError("");
       inputRefs.current[0]?.focus();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to resend code");
     } finally {
       setResending(false);
     }
@@ -159,11 +161,6 @@ export default function OTPVerificationPage() {
             <p className="text-sm text-gray-500 mt-2">
               Enter the 6-digit code to verify your identity
             </p>
-            {mockCode && (
-              <p className="text-xs text-lotus mt-2 font-mono bg-lotus/10 rounded px-3 py-1 inline-block">
-                Mock code: {mockCode}
-              </p>
-            )}
           </div>
 
           {/* OTP Input */}

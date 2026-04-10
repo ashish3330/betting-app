@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+
+	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
 )
 
 type Handler struct {
@@ -36,7 +38,7 @@ func (h *Handler) GetAlerts(w http.ResponseWriter, r *http.Request) {
 
 	alerts, err := h.service.GetAlerts(r.Context(), resolved, limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to retrieve fraud alerts")
 		return
 	}
 	writeJSON(w, http.StatusOK, alerts)
@@ -44,8 +46,16 @@ func (h *Handler) GetAlerts(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ResolveAlert(w http.ResponseWriter, r *http.Request) {
 	alertID := r.PathValue("id")
-	if err := h.service.ResolveAlert(r.Context(), alertID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	adminID := middleware.UserIDFromContext(r.Context())
+
+	var req struct {
+		Resolution string `json:"resolution"`
+	}
+	// Decode optional resolution note; ignore decode errors (body may be empty)
+	json.NewDecoder(r.Body).Decode(&req)
+
+	if err := h.service.ResolveAlert(r.Context(), alertID, adminID, req.Resolution); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve alert")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"message": "alert resolved"})
@@ -61,7 +71,7 @@ func (h *Handler) GetUserRisk(w http.ResponseWriter, r *http.Request) {
 
 	score, level, err := h.service.GetUserRiskScore(r.Context(), userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to retrieve risk score")
 		return
 	}
 

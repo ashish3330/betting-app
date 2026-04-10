@@ -15,7 +15,6 @@ interface ResponsibleLimits {
 
 interface KYCDocument {
   name: string;
-  data: string; // base64
   status: "pending" | "verified" | "rejected";
   uploadedAt: string;
 }
@@ -50,14 +49,14 @@ export default function AccountPage() {
       {/* Quick Links */}
       <div className="grid grid-cols-3 gap-2">
         <Link
-          href="/account/deposit"
+          href="/wallet"
           className="bg-surface rounded-xl border border-gray-800 p-4 text-center hover:border-gray-700 transition group"
         >
           <div className="text-xl font-bold text-profit group-hover:scale-110 transition">+</div>
           <div className="text-xs text-gray-400 mt-1">Deposit</div>
         </Link>
         <Link
-          href="/account/withdraw"
+          href="/wallet"
           className="bg-surface rounded-xl border border-gray-800 p-4 text-center hover:border-gray-700 transition group"
         >
           <div className="text-xl font-bold text-loss group-hover:scale-110 transition">-</div>
@@ -196,38 +195,69 @@ const KYC_DOC_TYPES = [
   { key: "bank_statement", label: "Bank Statement" },
 ] as const;
 
+const ALLOWED_FILE_TYPES = ["image/jpeg", "image/png", "application/pdf"];
+const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+
 function KYCUploadSection() {
   const [docs, setDocs] = useState<Record<string, KYCDocument>>({});
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState<string | null>(null);
 
   useEffect(() => {
-    // Load from localStorage
-    const stored = localStorage.getItem("kyc_documents");
-    if (stored) {
-      try {
-        setDocs(JSON.parse(stored));
-      } catch {
-        // ignore
-      }
-    }
+    // Fetch KYC status from server (clean up any legacy localStorage data)
+    localStorage.removeItem("kyc_documents");
   }, []);
 
-  function handleFileUpload(docKey: string, docLabel: string, file: File) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const base64 = reader.result as string;
-      const newDocs = {
-        ...docs,
+  async function handleFileUpload(docKey: string, docLabel: string, file: File) {
+    setUploadError(null);
+
+    // Validate file type
+    if (!ALLOWED_FILE_TYPES.includes(file.type)) {
+      setUploadError("Only JPEG, PNG, and PDF files are allowed.");
+      return;
+    }
+
+    // Validate file size
+    if (file.size > MAX_FILE_SIZE) {
+      setUploadError("File size must not exceed 5MB.");
+      return;
+    }
+
+    setUploading(docKey);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("document_type", docKey);
+
+      const { decryptLocalStorage } = await import("@/lib/crypto");
+      const accessToken = decryptLocalStorage("access_token");
+
+      const res = await fetch("/api/v1/kyc/upload", {
+        method: "POST",
+        headers: {
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `Upload failed (${res.status})`);
+      }
+
+      setDocs((prev) => ({
+        ...prev,
         [docKey]: {
           name: file.name,
-          data: base64,
-          status: "pending" as const,
+          status: "pending",
           uploadedAt: new Date().toISOString(),
         },
-      };
-      setDocs(newDocs);
-      localStorage.setItem("kyc_documents", JSON.stringify(newDocs));
-    };
-    reader.readAsDataURL(file);
+      }));
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Upload failed. Please try again.");
+    } finally {
+      setUploading(null);
+    }
   }
 
   function getStatusBadge(status: string) {
@@ -279,6 +309,13 @@ function KYCUploadSection() {
         </div>
       </div>
 
+      {/* Upload Error */}
+      {uploadError && (
+        <div className="bg-loss/10 border border-loss/30 rounded-lg p-3 mb-3">
+          <p className="text-xs text-loss">{uploadError}</p>
+        </div>
+      )}
+
       {/* Document Upload Cards */}
       <div className="space-y-3">
         {KYC_DOC_TYPES.map((docType) => {
@@ -291,10 +328,13 @@ function KYCUploadSection() {
               doc={doc}
               onUpload={handleFileUpload}
               getStatusBadge={getStatusBadge}
+              isUploading={uploading === docType.key}
             />
           );
         })}
       </div>
+
+      <p className="text-[10px] text-gray-500 mt-2">Accepted: JPEG, PNG, PDF. Max 5MB per file.</p>
     </section>
   );
 }
@@ -305,12 +345,14 @@ function KYCDocCard({
   doc,
   onUpload,
   getStatusBadge,
+  isUploading,
 }: {
   docKey: string;
   label: string;
   doc?: KYCDocument;
   onUpload: (key: string, label: string, file: File) => void;
   getStatusBadge: (status: string) => React.ReactNode;
+  isUploading?: boolean;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -338,7 +380,7 @@ function KYCDocCard({
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/*,.pdf"
+          accept=".jpeg,.jpg,.png,.pdf"
           className="hidden"
           onChange={(e) => {
             const file = e.target.files?.[0];
@@ -347,13 +389,16 @@ function KYCDocCard({
         />
         <button
           onClick={() => fileInputRef.current?.click()}
+          disabled={isUploading}
           className={`text-xs px-3 py-1.5 rounded-lg transition ${
-            doc
+            isUploading
+              ? "bg-surface text-gray-500 cursor-not-allowed"
+              : doc
               ? "bg-surface hover:bg-surface-lighter text-gray-400 border border-gray-700"
               : "bg-lotus hover:bg-lotus-light text-white"
           }`}
         >
-          {doc ? "Re-upload" : "Upload"}
+          {isUploading ? "Uploading..." : doc ? "Re-upload" : "Upload"}
         </button>
       </div>
     </div>

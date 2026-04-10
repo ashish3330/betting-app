@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
+	"github.com/lotus-exchange/lotus-exchange/internal/models"
 )
 
 type Handler struct {
@@ -25,13 +26,19 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/reports/hierarchy/pnl", h.GetHierarchyPnL)
 }
 
+// requireAdmin checks that the caller has an admin or superadmin role.
+func requireAdmin(r *http.Request) bool {
+	role := middleware.RoleFromContext(r.Context())
+	return role == models.Role("superadmin") || role == models.Role("admin")
+}
+
 func (h *Handler) GetPnL(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	from, to := parseDateRange(r)
 
 	report, err := h.service.GetUserPnL(r.Context(), userID, from, to)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to generate PnL report")
 		return
 	}
 
@@ -39,25 +46,40 @@ func (h *Handler) GetPnL(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetMarketReport(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeError(w, http.StatusForbidden, "insufficient permissions")
+		return
+	}
+
 	marketID := r.PathValue("id")
 	report, err := h.service.GetMarketReport(r.Context(), marketID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, "market report not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, report)
 }
 
 func (h *Handler) GetDashboard(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeError(w, http.StatusForbidden, "insufficient permissions")
+		return
+	}
+
 	stats, err := h.service.GetDashboardStats(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to load dashboard stats")
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
 }
 
 func (h *Handler) GetBetVolume(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeError(w, http.StatusForbidden, "insufficient permissions")
+		return
+	}
+
 	from, to := parseDateRange(r)
 
 	interval := 15
@@ -69,7 +91,7 @@ func (h *Handler) GetBetVolume(w http.ResponseWriter, r *http.Request) {
 
 	points, err := h.service.GetBetVolumeTrend(r.Context(), from, to, interval)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to load bet volume data")
 		return
 	}
 	writeJSON(w, http.StatusOK, points)
@@ -81,7 +103,7 @@ func (h *Handler) GetHierarchyPnL(w http.ResponseWriter, r *http.Request) {
 
 	reports, err := h.service.GetHierarchyPnL(r.Context(), userID, from, to)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to generate hierarchy PnL report")
 		return
 	}
 	writeJSON(w, http.StatusOK, reports)

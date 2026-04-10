@@ -2,7 +2,19 @@
 bin/
 server
 mockserver
+gateway
 cmd/server/mockserver
+auth-service
+casino-service
+fraud-service
+hierarchy-service
+matching-engine
+notification-service
+odds-service
+payment-service
+reporting-service
+risk-service
+wallet-service
 *.exe
 *.out
 

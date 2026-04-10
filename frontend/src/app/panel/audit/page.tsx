@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useAuth } from "@/lib/auth";
 import Select from "@/components/Select";
 import { api } from "@/lib/api";
 import Pagination from "@/components/Pagination";
@@ -31,18 +33,35 @@ const actionColors: Record<string, string> = {
 };
 
 export default function AuditLogPage() {
+  const { user, isLoggedIn, isLoading: authLoading } = useAuth();
+  const router = useRouter();
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterAction, setFilterAction] = useState("");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
 
+  // Auth guard: redirect if not logged in or not admin/superadmin
   useEffect(() => {
+    if (authLoading) return;
+    if (!isLoggedIn) {
+      router.push("/login");
+      return;
+    }
+    const role = user?.role;
+    if (role !== "admin" && role !== "superadmin") {
+      router.push("/");
+      return;
+    }
+  }, [authLoading, isLoggedIn, user, router]);
+
+  useEffect(() => {
+    if (authLoading || !isLoggedIn) return;
     api.request<AuditEntry[]>("/api/v1/panel/audit", { auth: true })
       .then((data) => setEntries(Array.isArray(data) ? data : []))
       .catch(() => setEntries([]))
       .finally(() => setLoading(false));
-  }, []);
+  }, [authLoading, isLoggedIn]);
 
   const filtered = entries.filter((e) => {
     if (filterAction && e.action !== filterAction) return false;

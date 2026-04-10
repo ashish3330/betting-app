@@ -6,8 +6,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strings"
 	"time"
 )
+
+// stripHTMLTags removes HTML tags from a string.
+var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
+
+// stripControlChars removes ASCII control characters (except space).
+var controlCharRe = regexp.MustCompile(`[\x00-\x1f\x7f]`)
+
+// sanitizeText strips HTML tags and control characters from user-facing text.
+func sanitizeText(s string) string {
+	s = htmlTagRe.ReplaceAllString(s, "")
+	s = controlCharRe.ReplaceAllString(s, "")
+	return strings.TrimSpace(s)
+}
 
 type NotificationType string
 
@@ -43,7 +58,14 @@ func NewService(db *sql.DB, logger *slog.Logger) *Service {
 	return &Service{db: db, logger: logger}
 }
 
-func (s *Service) Send(ctx context.Context, userID int64, notifType NotificationType, title, message string, data interface{}) error {
+// Send delivers a notification. If idempotencyKey is non-empty, duplicate sends
+// with the same key are silently ignored (requires a unique index on
+// notifications.idempotency_key).
+func (s *Service) Send(ctx context.Context, userID int64, notifType NotificationType, title, message string, data interface{}, idempotencyKey string) error {
+	// Sanitize user-facing text to prevent content injection.
+	title = sanitizeText(title)
+	message = sanitizeText(message)
+
 	var dataJSON []byte
 	if data != nil {
 		var err error
@@ -53,13 +75,25 @@ func (s *Service) Send(ctx context.Context, userID int64, notifType Notification
 		}
 	}
 
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO notifications (user_id, type, title, message, data, created_at)
-		 VALUES ($1, $2, $3, $4, $5, NOW())`,
-		userID, notifType, title, message, dataJSON,
-	)
-	if err != nil {
-		return fmt.Errorf("send notification: %w", err)
+	if idempotencyKey != "" {
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO notifications (user_id, type, title, message, data, idempotency_key, created_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, NOW())
+			 ON CONFLICT (idempotency_key) DO NOTHING`,
+			userID, notifType, title, message, dataJSON, idempotencyKey,
+		)
+		if err != nil {
+			return fmt.Errorf("send notification: %w", err)
+		}
+	} else {
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO notifications (user_id, type, title, message, data, created_at)
+			 VALUES ($1, $2, $3, $4, $5, NOW())`,
+			userID, notifType, title, message, dataJSON,
+		)
+		if err != nil {
+			return fmt.Errorf("send notification: %w", err)
+		}
 	}
 
 	s.logger.DebugContext(ctx, "notification sent",
@@ -125,7 +159,8 @@ func (s *Service) GetUnreadCount(ctx context.Context, userID int64) (int, error)
 func (s *Service) NotifyBetMatched(ctx context.Context, userID int64, betID string, stake, price float64) {
 	s.Send(ctx, userID, NotifBetMatched, "Bet Matched",
 		fmt.Sprintf("Your bet has been matched - Stake: %.2f @ %.2f", stake, price),
-		map[string]interface{}{"bet_id": betID, "stake": stake, "price": price})
+		map[string]interface{}{"bet_id": betID, "stake": stake, "price": price},
+		fmt.Sprintf("bet_matched:%s", betID))
 }
 
 func (s *Service) NotifyBetSettled(ctx context.Context, userID int64, betID string, pnl float64) {
@@ -135,17 +170,20 @@ func (s *Service) NotifyBetSettled(ctx context.Context, userID int64, betID stri
 	}
 	s.Send(ctx, userID, NotifBetSettled, title,
 		fmt.Sprintf("P&L: %.2f", pnl),
-		map[string]interface{}{"bet_id": betID, "pnl": pnl})
+		map[string]interface{}{"bet_id": betID, "pnl": pnl},
+		fmt.Sprintf("bet_settled:%s", betID))
 }
 
 func (s *Service) NotifyDeposit(ctx context.Context, userID int64, amount float64, txID string) {
 	s.Send(ctx, userID, NotifDepositComplete, "Deposit Successful",
 		fmt.Sprintf("%.2f has been credited to your wallet", amount),
-		map[string]interface{}{"amount": amount, "tx_id": txID})
+		map[string]interface{}{"amount": amount, "tx_id": txID},
+		fmt.Sprintf("deposit:%s", txID))
 }
 
 func (s *Service) NotifyWithdrawal(ctx context.Context, userID int64, amount float64, txID string) {
 	s.Send(ctx, userID, NotifWithdrawalComplete, "Withdrawal Processed",
 		fmt.Sprintf("%.2f withdrawal has been processed", amount),
-		map[string]interface{}{"amount": amount, "tx_id": txID})
+		map[string]interface{}{"amount": amount, "tx_id": txID},
+		fmt.Sprintf("withdrawal:%s", txID))
 }

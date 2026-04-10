@@ -26,18 +26,44 @@ func TestMarket_CanAcceptBets(t *testing.T) {
 func TestMarket_StatusTransitions(t *testing.T) {
 	m := &Market{Status: MarketOpen}
 
-	m.Suspend()
+	if err := m.Suspend(); err != nil {
+		t.Fatalf("Suspend() from open: unexpected error: %v", err)
+	}
 	if m.Status != MarketSuspended {
 		t.Errorf("after Suspend(), status = %v, want suspended", m.Status)
 	}
 
-	m.Resume()
+	if err := m.Resume(); err != nil {
+		t.Fatalf("Resume() from suspended: unexpected error: %v", err)
+	}
 	if m.Status != MarketOpen {
 		t.Errorf("after Resume(), status = %v, want open", m.Status)
 	}
 
-	m.Close()
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close() from open: unexpected error: %v", err)
+	}
 	if m.Status != MarketClosed {
 		t.Errorf("after Close(), status = %v, want closed", m.Status)
+	}
+}
+
+func TestMarket_InvalidTransitions(t *testing.T) {
+	// Cannot suspend from closed
+	m := &Market{Status: MarketClosed}
+	if err := m.Suspend(); err == nil {
+		t.Error("Suspend() from closed: expected error, got nil")
+	}
+
+	// Cannot resume from open
+	m = &Market{Status: MarketOpen}
+	if err := m.Resume(); err == nil {
+		t.Error("Resume() from open: expected error, got nil")
+	}
+
+	// Cannot close from settled
+	m = &Market{Status: MarketSettled}
+	if err := m.Close(); err == nil {
+		t.Error("Close() from settled: expected error, got nil")
 	}
 }
