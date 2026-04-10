@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
+	"github.com/lotus-exchange/lotus-exchange/internal/models"
 )
 
 var (
@@ -50,6 +52,12 @@ func main() {
 	}
 
 	store = NewStore()
+
+	// Wire up bundled internal/* services that share the same DB as the
+	// in-memory store. These back a growing subset of HTTP handlers — the
+	// rest still delegate to `store`. See services.go and the migration
+	// status block at the bottom of this file for details.
+	initBundledServices(logger)
 
 	// Start live odds fluctuation (makes mock odds blink in the UI)
 	stopFluctuation := make(chan struct{})
@@ -517,6 +525,12 @@ func auth(next http.HandlerFunc) http.HandlerFunc {
 		// Inject claims into context so handlers can access via r.Context().Value("claims")
 		//nolint:staticcheck // string key for backwards compat with handlers
 		ctx := context.WithValue(r.Context(), "claims", claims)
+		// Also inject the context keys that internal/middleware handlers expect,
+		// so bundled services can share code with cmd/*-service binaries.
+		ctx = context.WithValue(ctx, middleware.UserIDKey, claims.UserID)
+		ctx = context.WithValue(ctx, middleware.UsernameKey, claims.Username)
+		ctx = context.WithValue(ctx, middleware.RoleKey, models.Role(claims.Role))
+		ctx = context.WithValue(ctx, middleware.PathKey, claims.Path)
 		next(w, r.WithContext(ctx))
 	}
 }
@@ -3288,7 +3302,19 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 
 // ── Notification Handlers ────────────────────────────────────────────────────
 
+// Notification handlers — migrated to internal/notification.
+//
+// When the bundled DB-backed service is wired up (see services.go) these
+// delegate straight to internal/notification.Handler so the monolith and the
+// cmd/notification-service binary share identical behaviour. When the DB is
+// unavailable we fall back to the legacy in-memory Store so local-dev-without-
+// a-database still works.
+
 func handleGetNotifications(w http.ResponseWriter, r *http.Request) {
+	if bundled != nil && bundled.notifHandler != nil {
+		bundled.notifHandler.List(w, r)
+		return
+	}
 	uid := getUserID(r)
 	unreadOnly := r.URL.Query().Get("unread") == "true"
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -3301,12 +3327,25 @@ func handleGetNotifications(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleUnreadCount(w http.ResponseWriter, r *http.Request) {
+	if bundled != nil && bundled.notifHandler != nil {
+		bundled.notifHandler.UnreadCount(w, r)
+		return
+	}
 	uid := getUserID(r)
 	count := store.GetUnreadCount(uid)
 	writeJSON(w, 200, map[string]int{"unread_count": count})
 }
 
 func handleMarkRead(w http.ResponseWriter, r *http.Request) {
+	// The internal handler expects a numeric ID; the legacy in-memory store
+	// uses opaque string IDs. When the bundled service is active and the
+	// path value parses as int64, delegate; otherwise use the legacy path.
+	if bundled != nil && bundled.notifHandler != nil {
+		if _, err := strconv.ParseInt(r.PathValue("id"), 10, 64); err == nil {
+			bundled.notifHandler.MarkRead(w, r)
+			return
+		}
+	}
 	uid := getUserID(r)
 	notifID := r.PathValue("id")
 	if store.MarkNotificationRead(uid, notifID) {
@@ -3317,7 +3356,50 @@ func handleMarkRead(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleMarkAllRead(w http.ResponseWriter, r *http.Request) {
+	if bundled != nil && bundled.notifHandler != nil {
+		bundled.notifHandler.MarkAllRead(w, r)
+		return
+	}
 	uid := getUserID(r)
 	count := store.MarkAllNotificationsRead(uid)
 	writeJSON(w, 200, map[string]interface{}{"message": "all marked as read", "count": count})
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// cmd/server migration status (Phase 15 — migrate monolith to internal/*)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Goal: turn cmd/server into a "bundled mode" binary that reuses the same
+// internal/* services as cmd/*-service binaries for local-dev ergonomics.
+//
+// MIGRATED to internal/*:
+//   • notification (GET /api/v1/notifications, /unread-count, POST /{id}/read,
+//     /read-all)  ← delegates to internal/notification.Handler when DB is up.
+//
+// STILL USING in-memory Store:
+//   • auth (register/login/logout/otp/refresh)          — tightly coupled to
+//     store.PublicKey, store.blacklist, store.brute-force tracking.
+//   • wallet (balance, ledger, deposit, withdraw)       — in-memory ledger +
+//     deposit.go payment flow.
+//   • bet placement, cancellation, history, positions   — in-memory matching
+//     engine in store.go.
+//   • market / sport / event / odds / SSE stream        — seeded in memory,
+//     odds fluctuation goroutine.
+//   • casino sessions + game catalog                    — in-memory.
+//   • hierarchy GET/POST                                — store.GetChildren,
+//     store.TransferCredit (these also update local exposure tracking).
+//   • risk / exposure                                    — computed from the
+//     in-memory bet book.
+//   • reports (PnL, dashboard, panel CSV)               — aggregates in-memory
+//     bets + ledger.
+//   • KYC upload (POST /api/v1/kyc/upload)              — multipart upload,
+//     not in the internal/kyc handler which exposes /kyc/submit (JSON).
+//   • referral, responsible-gambling, admin, panel      — all use store.
+//
+// Next steps for future work:
+//   1. Wire a *redis.Client into bundledServices so risk/fraud/hierarchy can
+//      share the same Redis the microservices already use.
+//   2. Migrate hierarchy (read-only) first — its DB schema is stable.
+//   3. Migrate reporting once clickhouse wiring is optional in that package.
+//   4. Tackle wallet/bet/matching last — they require a full port off the
+//      in-memory Store to the internal services.

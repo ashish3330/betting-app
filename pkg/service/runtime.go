@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/lotus-exchange/lotus-exchange/pkg/telemetry"
 )
 
 // Config describes the runtime parameters for an HTTP service managed by Run.
@@ -40,6 +42,24 @@ func Run(ctx context.Context, cfg Config, handler http.Handler) error {
 	if !strings.HasPrefix(addr, ":") {
 		addr = ":" + addr
 	}
+
+	// Initialize distributed tracing. When OTEL_EXPORTER_OTLP_ENDPOINT is
+	// unset, SetupTracer returns a no-op shutdown and leaves the global
+	// tracer provider as the default noop provider.
+	shutdownTracer, err := telemetry.SetupTracer(ctx, cfg.ServiceName, "v1.0.0", cfg.Logger)
+	if err != nil {
+		cfg.Logger.Warn("failed to setup tracer", "error", err)
+	}
+	defer func() {
+		if shutdownTracer == nil {
+			return
+		}
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracer(sctx); err != nil {
+			cfg.Logger.Warn("tracer shutdown error", "error", err)
+		}
+	}()
 
 	srv := &http.Server{
 		Addr:              addr,

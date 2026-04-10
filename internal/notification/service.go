@@ -118,12 +118,17 @@ func (s *Service) GetUserNotifications(ctx context.Context, userID int64, unread
 	}
 	defer rows.Close()
 
-	var notifs []*Notification
+	notifs := []*Notification{}
 	for rows.Next() {
 		n := &Notification{}
+		// Use []byte for the JSONB data column so NULL rows scan cleanly.
+		var dataBytes []byte
 		if err := rows.Scan(&n.ID, &n.UserID, &n.Type, &n.Title, &n.Message,
-			&n.Data, &n.Read, &n.CreatedAt); err != nil {
+			&dataBytes, &n.Read, &n.CreatedAt); err != nil {
 			return nil, err
+		}
+		if len(dataBytes) > 0 {
+			n.Data = json.RawMessage(dataBytes)
 		}
 		notifs = append(notifs, n)
 	}

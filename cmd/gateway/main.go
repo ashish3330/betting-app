@@ -108,6 +108,7 @@ func main() {
 	riskURL := getEnv("RISK_SERVICE_URL", "http://localhost:8089")
 	hierarchyURL := getEnv("HIERARCHY_SERVICE_URL", "http://localhost:8090")
 	notificationURL := getEnv("NOTIFICATION_SERVICE_URL", "http://localhost:8091")
+	adminURL := getEnv("ADMIN_SERVICE_URL", "http://localhost:8092")
 
 	// Map of service name → URL for health checking
 	serviceMap := map[string]string{
@@ -122,6 +123,7 @@ func main() {
 		"risk":         riskURL,
 		"hierarchy":    hierarchyURL,
 		"notification": notificationURL,
+		"admin":        adminURL,
 	}
 
 	// ── Custom transport for reverse proxies ───────────────────
@@ -178,24 +180,37 @@ func main() {
 		// Casino webhooks — no auth (provider-authenticated)
 		{prefix: "/api/v1/casino/webhook/", proxyName: "casino", requireAuth: false},
 
+		// Public casino catalog (match monolith behaviour)
+		{prefix: "/api/v1/casino/providers", proxyName: "casino", requireAuth: false},
+		{prefix: "/api/v1/casino/games", proxyName: "casino", requireAuth: false},
+		{prefix: "/api/v1/casino/categories", proxyName: "casino", requireAuth: false},
+
 		// Admin routes — require auth + admin role
+		// /api/v1/admin/kyc/ is served by kyc handlers on the hierarchy service;
+		// all other /api/v1/admin/* goes to the dedicated admin service.
 		{prefix: "/api/v1/admin/kyc/", proxyName: "hierarchy", requireAuth: true, requireAdmin: true},
-		{prefix: "/api/v1/admin/", proxyName: "hierarchy", requireAuth: true, requireAdmin: true},
+		{prefix: "/api/v1/admin/", proxyName: "admin", requireAuth: true, requireAdmin: true},
 		{prefix: "/api/v1/fraud/", proxyName: "fraud", requireAuth: true, requireAdmin: true},
 
 		// Protected routes — require auth
 		{prefix: "/api/v1/wallet/", proxyName: "wallet", requireAuth: true},
 		{prefix: "/api/v1/bet/", proxyName: "matching", requireAuth: true},
+		{prefix: "/api/v1/bets", proxyName: "matching", requireAuth: true},
+		{prefix: "/api/v1/positions/", proxyName: "matching", requireAuth: true},
 		{prefix: "/api/v1/cashout/", proxyName: "matching", requireAuth: true},
 		{prefix: "/api/v1/market/", proxyName: "matching", requireAuth: true},
 		{prefix: "/api/v1/payment/", proxyName: "payment", requireAuth: true},
 		{prefix: "/api/v1/casino/", proxyName: "casino", requireAuth: true},
 		{prefix: "/api/v1/risk/", proxyName: "risk", requireAuth: true},
 		{prefix: "/api/v1/reports/", proxyName: "reporting", requireAuth: true},
+		{prefix: "/api/v1/panel/", proxyName: "admin", requireAuth: true},
 		{prefix: "/api/v1/hierarchy/", proxyName: "hierarchy", requireAuth: true},
 		{prefix: "/api/v1/responsible-gambling/", proxyName: "hierarchy", requireAuth: true},
+		// Alias — the monolith/tests/frontend also use /responsible/; route to same service.
+		{prefix: "/api/v1/responsible/", proxyName: "hierarchy", requireAuth: true},
+		{prefix: "/api/v1/referral/", proxyName: "hierarchy", requireAuth: true},
 		{prefix: "/api/v1/kyc/", proxyName: "hierarchy", requireAuth: true},
-		{prefix: "/api/v1/notifications/", proxyName: "notification", requireAuth: true},
+		{prefix: "/api/v1/notifications", proxyName: "notification", requireAuth: true},
 
 		// Public odds/market routes (no trailing slash = exact or prefix match)
 		{prefix: "/api/v1/sports", proxyName: "odds", requireAuth: false},
@@ -203,6 +218,13 @@ func main() {
 		{prefix: "/api/v1/events/", proxyName: "odds", requireAuth: false},
 		{prefix: "/api/v1/events", proxyName: "odds", requireAuth: false},
 		{prefix: "/api/v1/markets", proxyName: "odds", requireAuth: false},
+		{prefix: "/api/v1/scores/", proxyName: "odds", requireAuth: false},
+		{prefix: "/api/v1/stream/", proxyName: "odds", requireAuth: false},
+		{prefix: "/api/v1/odds/", proxyName: "odds", requireAuth: false},
+		{prefix: "/api/v1/config", proxyName: "odds", requireAuth: false},
+
+		// Seed endpoint — dev-only bootstrap served by admin-service
+		{prefix: "/api/v1/seed", proxyName: "admin", requireAuth: false},
 	}
 
 	// ── Health-check HTTP client (created once at startup) ─────
@@ -358,16 +380,19 @@ func main() {
 	defer stop()
 
 	// ── Global Middleware (chained) ────────────────────────────
+	// Note: SecurityHeaders and EncryptionMiddleware are intentionally NOT
+	// applied here. Every downstream microservice already runs them via
+	// service.DefaultMiddleware + its own EncryptionMiddleware layer. Running
+	// them again at the gateway would emit duplicate security headers and
+	// double-encrypt response bodies, breaking clients.
 	chain := middleware.ChainMiddleware(
 		middleware.RecoverPanic(log),
 		middleware.CORSWithWhitelist(cfg.CORSOrigins),
-		middleware.SecurityHeaders,
 		middleware.RequestID,
 		middleware.MetricsMiddleware("gateway"),
 		middleware.MaxBodySize(int64(cfg.MaxBodySizeMB)*1024*1024),
 		middleware.RequestLogger(log),
 		middleware.PerIPRateLimiterWithContext(ctx, cfg.RateLimitRPS, cfg.RateLimitBurst),
-		middleware.EncryptionMiddleware,
 	)
 	handler := chain(mux)
 

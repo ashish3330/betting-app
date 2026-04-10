@@ -156,13 +156,16 @@ func (s *Service) ListSports(_ context.Context) ([]models.Sport, error) {
 }
 
 // ListCompetitions fetches competitions for a sport from the database.
+//
+// The betting.competitions table uses sport_id as the FK to betting.sports, so
+// we filter on sport_id and alias it as "sport" in the SELECT for the model.
 func (s *Service) ListCompetitions(ctx context.Context, sport string) ([]*models.Competition, error) {
-	query := "SELECT id, sport, name, region, start_date, end_date, status, match_count FROM competitions WHERE 1=1"
+	query := "SELECT id, sport_id, name, region, start_date, end_date, status, match_count FROM competitions WHERE 1=1"
 	var args []interface{}
 	argIdx := 1
 
 	if sport != "" {
-		query += fmt.Sprintf(" AND sport = $%d", argIdx)
+		query += fmt.Sprintf(" AND sport_id = $%d", argIdx)
 		args = append(args, sport)
 		argIdx++
 	}
@@ -186,12 +189,30 @@ func (s *Service) ListCompetitions(ctx context.Context, sport string) ([]*models
 	return comps, rows.Err()
 }
 
-// ListEvents fetches events for a competition from the database.
-func (s *Service) ListEvents(ctx context.Context, competitionID string) ([]*models.Event, error) {
-	query := `SELECT id, competition_id, sport, name, home_team, away_team, start_time, status, in_play, score
-			  FROM events WHERE competition_id = $1 ORDER BY start_time ASC LIMIT 100`
+// ListEvents fetches events optionally filtered by competition and/or sport.
+//
+// betting.events uses sport_id as the FK to betting.sports, so we filter on
+// sport_id. An empty competitionID skips the competition filter, matching the
+// monolith's /api/v1/events?sport= behaviour.
+func (s *Service) ListEvents(ctx context.Context, competitionID, sport string) ([]*models.Event, error) {
+	query := `SELECT id, competition_id, sport_id, name, home_team, away_team, start_time, status, in_play, score
+			  FROM events WHERE 1=1`
+	var args []interface{}
+	argIdx := 1
+	if competitionID != "" {
+		query += fmt.Sprintf(" AND competition_id = $%d", argIdx)
+		args = append(args, competitionID)
+		argIdx++
+	}
+	if sport != "" {
+		query += fmt.Sprintf(" AND sport_id = $%d", argIdx)
+		args = append(args, sport)
+		argIdx++
+	}
+	_ = argIdx
+	query += " ORDER BY start_time ASC LIMIT 100"
 
-	rows, err := s.db.QueryContext(ctx, query, competitionID)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list events: %w", err)
 	}

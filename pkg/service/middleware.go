@@ -20,6 +20,7 @@ func DefaultMiddleware(serviceName string, log *slog.Logger) func(http.Handler) 
 	return middleware.ChainMiddleware(
 		middleware.RecoverPanic(log),
 		middleware.RequestID,
+		middleware.TracingMiddleware(serviceName),
 		middleware.MetricsMiddleware(serviceName),
 		middleware.RequestLogger(log),
 		middleware.SecurityHeaders,

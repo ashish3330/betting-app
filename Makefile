@@ -8,7 +8,8 @@
 BINARY       := bin/gateway
 SERVICES     := gateway auth-service wallet-service matching-engine \
                 payment-service casino-service odds-service fraud-service \
-                reporting-service risk-service hierarchy-service notification-service
+                reporting-service risk-service hierarchy-service notification-service \
+                admin-service
 COMPOSE      := docker compose -f deployments/docker-compose.yml
 DATABASE_URL ?= $(shell grep DATABASE_URL .env 2>/dev/null | cut -d= -f2-)
 

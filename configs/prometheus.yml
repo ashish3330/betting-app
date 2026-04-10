@@ -1,0 +1,63 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: lotus-exchange
+    environment: production
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'lotus-services'
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - 'gateway:8080'
+        labels:
+          service: gateway
+      - targets:
+          - 'auth-service:8081'
+        labels:
+          service: auth-service
+      - targets:
+          - 'wallet-service:8082'
+        labels:
+          service: wallet-service
+      - targets:
+          - 'matching-engine:8083'
+        labels:
+          service: matching-engine
+      - targets:
+          - 'payment-service:8084'
+        labels:
+          service: payment-service
+      - targets:
+          - 'casino-service:8085'
+        labels:
+          service: casino-service
+      - targets:
+          - 'odds-service:8086'
+        labels:
+          service: odds-service
+      - targets:
+          - 'fraud-service:8087'
+        labels:
+          service: fraud-service
+      - targets:
+          - 'reporting-service:8088'
+        labels:
+          service: reporting-service
+      - targets:
+          - 'risk-service:8089'
+        labels:
+          service: risk-service
+      - targets:
+          - 'hierarchy-service:8090'
+        labels:
+          service: hierarchy-service
+      - targets:
+          - 'notification-service:8091'
+        labels:
+          service: notification-service

@@ -158,7 +158,8 @@ func main() {
 
 	mux.HandleFunc("GET /api/v1/events", func(w http.ResponseWriter, r *http.Request) {
 		competitionID := r.URL.Query().Get("competition_id")
-		events, err := marketService.ListEvents(r.Context(), competitionID)
+		sport := r.URL.Query().Get("sport")
+		events, err := marketService.ListEvents(r.Context(), competitionID, sport)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

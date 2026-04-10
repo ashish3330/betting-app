@@ -146,6 +146,7 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8080"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,auth,public"
       REDIS_URL: "redis:6379"
       REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
@@ -163,6 +164,7 @@ services:
       RISK_SERVICE_URL: "http://risk-service:8089"
       HIERARCHY_SERVICE_URL: "http://hierarchy-service:8090"
       NOTIFICATION_SERVICE_URL: "http://notification-service:8091"
+      ADMIN_SERVICE_URL: "http://admin-service:8092"
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
       interval: 10s
@@ -207,6 +209,8 @@ services:
         condition: service_started
       notification-service:
         condition: service_started
+      admin-service:
+        condition: service_started
     networks:
       - backend
       - frontend
@@ -226,6 +230,7 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8081"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=auth,public"
       REDIS_URL: "redis:6379"
       REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
@@ -255,6 +260,7 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8082"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
       REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
@@ -284,6 +290,7 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8083"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
       REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
@@ -313,6 +320,7 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8084"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
       REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
@@ -342,6 +350,7 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8085"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
       REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
@@ -371,6 +380,7 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8086"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
       REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
@@ -400,6 +410,7 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8087"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
       REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
@@ -429,6 +440,7 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8088"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
       REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
@@ -456,6 +468,7 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8089"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
       REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
@@ -482,6 +495,7 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8090"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
       REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
@@ -508,12 +522,43 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8091"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       NATS_URL: "nats://nats:4222"
     depends_on:
       postgres:
         condition: service_healthy
       nats:
+        condition: service_healthy
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------
+  # Admin Service
+  # ---------------------------------------------------------------
+  admin-service:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    command: ["/app/admin-service"]
+    restart: unless-stopped
+    ports:
+      - "8092:8092"
+    env_file:
+      - ../.env
+    environment:
+      ADMIN_SERVICE_PORT: "8092"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,auth,public"
+      REDIS_URL: "redis:6379"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"
+      CLICKHOUSE_URL: "tcp://clickhouse:9000"
+      NATS_URL: "nats://nats:4222"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
         condition: service_healthy
     networks:
       - backend
@@ -595,8 +640,12 @@ services:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-Gr4fana!Lotus2026}
       GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
       interval: 15s
@@ -613,6 +662,34 @@ services:
     depends_on:
       prometheus:
         condition: service_healthy
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------
+  # Jaeger -- distributed tracing (OTLP receiver + UI)
+  # ---------------------------------------------------------------
+  jaeger:
+    image: jaegertracing/all-in-one:1.55
+    restart: unless-stopped
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"  # Jaeger UI
+      - "${JAEGER_OTLP_HTTP_PORT:-4318}:4318"  # OTLP HTTP receiver
+      - "${JAEGER_OTLP_GRPC_PORT:-4317}:4317"  # OTLP gRPC receiver
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:16686/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
     networks:
       - backend
 
