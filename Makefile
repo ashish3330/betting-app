@@ -1,6 +1,6 @@
 .PHONY: all build build-all run start-all dev test test-cover e2e lint mocks deps clean \
-       docker-up docker-down docker-build migrate reset-db seed \
-       docs security loadtest prometheus
+       docker-up docker-down docker-build migrate reset-db \
+       security prometheus
 
 # ---------------------------------------------------------------
 # Variables
@@ -56,9 +56,9 @@ test-cover:
 	go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report: coverage.html"
 
-# End-to-end tests (requires running services)
+# End-to-end tests (requires running gateway on :8080)
 e2e:
-	go test ./tests/e2e/... -v -tags=e2e -count=1 -timeout 300s
+	go run ./scripts/api-test
 
 # ---------------------------------------------------------------
 # Code Quality
@@ -102,7 +102,13 @@ docker-logs:
 # ---------------------------------------------------------------
 migrate:
 	@echo "Running migrations against $(DATABASE_URL)"
-	psql "$(DATABASE_URL)" -f migrations/001_initial.sql
+	@for migration in migrations/*.sql; do \
+		if [ -f "$$migration" ]; then \
+			echo "  → $$(basename $$migration)"; \
+			psql "$(DATABASE_URL)" -f "$$migration" || exit 1; \
+		fi; \
+	done
+	@echo "Migrations complete."
 
 reset-db:
 	@echo "Dropping and recreating the database..."
@@ -110,19 +116,6 @@ reset-db:
 	$(COMPOSE) exec postgres psql -U lotus -c "CREATE DATABASE bettingdb;"
 	@$(MAKE) migrate
 	@echo "Database reset complete."
-
-seed:
-	@echo "Seeding demo data..."
-	psql "$(DATABASE_URL)" -f scripts/seed.sql
-	@echo "Seed complete."
-
-# ---------------------------------------------------------------
-# Documentation
-# ---------------------------------------------------------------
-docs:
-	@command -v swag >/dev/null 2>&1 || { echo "Installing swag..."; go install github.com/swaggo/swag/cmd/swag@latest; }
-	swag init -g cmd/gateway/main.go -o docs/swagger --parseInternal
-	@echo "API docs generated in docs/swagger/"
 
 # ---------------------------------------------------------------
 # Monitoring
@@ -133,13 +126,7 @@ prometheus:
 	@echo "Grafana:    http://localhost:$${GRAFANA_PORT:-3001}"
 
 # ---------------------------------------------------------------
-# Load Test
-# ---------------------------------------------------------------
-loadtest:
-	k6 run scripts/loadtest.js
-
-# ---------------------------------------------------------------
 # Clean
 # ---------------------------------------------------------------
 clean:
-	rm -rf bin/ coverage.out coverage.html docs/swagger/
+	rm -rf bin/ coverage.out coverage.html

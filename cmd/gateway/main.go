@@ -21,6 +21,7 @@ import (
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
 	"github.com/lotus-exchange/lotus-exchange/pkg/config"
 	"github.com/lotus-exchange/lotus-exchange/pkg/logger"
+	"github.com/lotus-exchange/lotus-exchange/pkg/service"
 	"github.com/redis/go-redis/v9"
 	"nhooyr.io/websocket"
 )
@@ -289,6 +290,9 @@ func main() {
 		json.NewEncoder(w).Encode(result)
 	})
 
+	// Prometheus scrape endpoint
+	mux.Handle("GET /metrics", service.MetricsHandler())
+
 	// WebSocket proxy to odds service
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		proxyWebSocket(w, r, oddsURL, authService, cfg.CORSOrigins, log)
@@ -359,6 +363,7 @@ func main() {
 		middleware.CORSWithWhitelist(cfg.CORSOrigins),
 		middleware.SecurityHeaders,
 		middleware.RequestID,
+		middleware.MetricsMiddleware("gateway"),
 		middleware.MaxBodySize(int64(cfg.MaxBodySizeMB)*1024*1024),
 		middleware.RequestLogger(log),
 		middleware.PerIPRateLimiterWithContext(ctx, cfg.RateLimitRPS, cfg.RateLimitBurst),

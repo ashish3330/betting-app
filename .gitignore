@@ -1,20 +1,22 @@
-# Binaries
+# Binaries (anchor patterns to repo root with leading slash so we don't match
+# cmd/<service>-service/ directories)
 bin/
-server
-mockserver
-gateway
+/server
+/mockserver
+/gateway
 cmd/server/mockserver
-auth-service
-casino-service
-fraud-service
-hierarchy-service
-matching-engine
-notification-service
-odds-service
-payment-service
-reporting-service
-risk-service
-wallet-service
+/auth-service
+/casino-service
+/fraud-service
+/hierarchy-service
+/matching-engine
+/notification-service
+/odds-service
+/payment-service
+/reporting-service
+/risk-service
+/wallet-service
+/admin-service
 *.exe
 *.out
 

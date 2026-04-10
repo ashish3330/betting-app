@@ -9,6 +9,8 @@ import LiveScore from "@/components/LiveScore";
 import RunLadder from "@/components/RunLadder";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/components/Toast";
+import { useBetSlip } from "@/lib/betslip";
+import { SkeletonCardRow } from "@/components/Skeleton";
 
 // ---------- Inline Bet Slip Types ----------
 interface ActiveInlineBet {
@@ -45,6 +47,7 @@ interface MarketInfo {
 export default function MarketDetailPage() {
   const params = useParams();
   const marketId = params.id as string;
+  const { addSelection: pushToGlobalSlip } = useBetSlip();
 
   const [odds, setOdds] = useState<MarketOdds | null>(null);
   const [orderBook, setOrderBook] = useState<OrderBookType>({ back: [], lay: [] });
@@ -291,6 +294,18 @@ export default function MarketDetailPage() {
     });
     // Clear any previous placed bet result
     setPlacedBetResult(null);
+
+    // Also push into the global persistent bet slip drawer
+    pushToGlobalSlip({
+      marketId: activeMarketId,
+      marketName: eventMarkets.find((m) => m.id === activeMarketId)?.name,
+      eventName: odds?.event_name,
+      selectionId: runner.selection_id || 0,
+      runnerName: runner.name,
+      side,
+      price,
+      isSession: isSessionBet,
+    });
   };
 
   const handleDeselectInline = () => {
@@ -342,10 +357,7 @@ export default function MarketDetailPage() {
     return (
       <div className="flex min-h-[calc(100vh-56px)]">
         <div className="flex-1 max-w-[960px] mx-auto px-3 py-3 space-y-3">
-          <div className="bg-surface rounded-lg h-16 animate-pulse" />
-          <div className="bg-surface rounded-lg h-10 animate-pulse" />
-          <div className="bg-surface rounded-lg h-64 animate-pulse" />
-          <div className="bg-surface rounded-lg h-48 animate-pulse" />
+          <SkeletonCardRow count={3} />
         </div>
       </div>
     );
@@ -362,11 +374,20 @@ export default function MarketDetailPage() {
           <div className="bg-surface rounded-lg border border-gray-800/60 px-3 py-2.5">
             <div className="flex items-center gap-2 flex-wrap">
               {odds?.in_play && (
-                <span className="flex items-center gap-1.5 bg-profit/20 text-profit px-2.5 py-0.5 rounded text-[11px] font-semibold tracking-wide">
-                  <span className="w-2 h-2 bg-profit rounded-full animate-live-pulse" />
+                <span className="flex items-center gap-1.5 bg-red-500/20 text-red-400 px-2.5 py-0.5 rounded text-[11px] font-bold tracking-wide animate-pulse">
+                  <span className="w-2 h-2 bg-red-500 rounded-full" />
                   LIVE
                 </span>
               )}
+              {odds?.in_play && (liveScore || odds?.score) && (() => {
+                const s = liveScore || odds!.score!;
+                return (
+                  <span className="text-[11px] text-gray-300 font-mono tracking-tight">
+                    {s.home_score}
+                    {s.overs ? ` (${s.overs} ov)` : ""}
+                  </span>
+                );
+              })()}
               <span
                 className={`text-[11px] px-2 py-0.5 rounded font-medium ${
                   odds?.status === "open" || odds?.status === "active"

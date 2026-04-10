@@ -1,10 +1,13 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import Link from "next/link";
 import Select from "@/components/Select";
+import { SkeletonList } from "@/components/Skeleton";
+
+type DatePreset = "" | "today" | "yesterday" | "7d" | "30d" | "custom";
 
 export default function BettingHistoryPage() {
   const { isLoggedIn } = useAuth();
@@ -12,6 +15,50 @@ export default function BettingHistoryPage() {
   const [loading, setLoading] = useState(true);
   const [sport, setSport] = useState("");
   const [status, setStatus] = useState("");
+
+  // Date range filter state (same UX as wallet page)
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [activePreset, setActivePreset] = useState<DatePreset>("");
+
+  function applyPreset(preset: Exclude<DatePreset, "custom">) {
+    setActivePreset(preset);
+    const today = new Date();
+    const toISO = (d: Date) => d.toISOString().slice(0, 10);
+    if (preset === "") {
+      setDateFrom("");
+      setDateTo("");
+      return;
+    }
+    if (preset === "today") {
+      const iso = toISO(today);
+      setDateFrom(iso);
+      setDateTo(iso);
+      return;
+    }
+    if (preset === "yesterday") {
+      const y = new Date(today);
+      y.setDate(today.getDate() - 1);
+      const iso = toISO(y);
+      setDateFrom(iso);
+      setDateTo(iso);
+      return;
+    }
+    if (preset === "7d") {
+      const from = new Date(today);
+      from.setDate(today.getDate() - 6);
+      setDateFrom(toISO(from));
+      setDateTo(toISO(today));
+      return;
+    }
+    if (preset === "30d") {
+      const from = new Date(today);
+      from.setDate(today.getDate() - 29);
+      setDateFrom(toISO(from));
+      setDateTo(toISO(today));
+      return;
+    }
+  }
 
   useEffect(() => {
     if (isLoggedIn) loadHistory();
@@ -44,10 +91,25 @@ export default function BettingHistoryPage() {
     );
   }
 
-  const filtered = bets.filter((b) => {
-    if (status && b.status !== status) return false;
-    return true;
-  });
+  const filtered = useMemo(() => {
+    return bets.filter((b) => {
+      if (status && b.status !== status) return false;
+      if (dateFrom || dateTo) {
+        const betDate = new Date(b.created_at);
+        if (dateFrom) {
+          const from = new Date(dateFrom);
+          from.setHours(0, 0, 0, 0);
+          if (betDate < from) return false;
+        }
+        if (dateTo) {
+          const to = new Date(dateTo);
+          to.setHours(23, 59, 59, 999);
+          if (betDate > to) return false;
+        }
+      }
+      return true;
+    });
+  }, [bets, status, dateFrom, dateTo]);
 
   return (
     <div className="max-w-5xl mx-auto px-3 py-4 space-y-4">
@@ -60,21 +122,72 @@ export default function BettingHistoryPage() {
       <h1 className="text-lg font-bold text-white">Betting History</h1>
 
       {/* Filters */}
-      <div className="flex gap-2 flex-wrap">
-        <Select value={sport} onChange={setSport} placeholder="All Sports" className="w-36"
-          options={[{ value: "", label: "All Sports" }, { value: "cricket", label: "Cricket" }, { value: "football", label: "Football" }, { value: "tennis", label: "Tennis" }]}
-        />
-        <Select value={status} onChange={setStatus} placeholder="All Status" className="w-36"
-          options={[{ value: "", label: "All Status" }, { value: "matched", label: "Matched" }, { value: "unmatched", label: "Unmatched" }, { value: "settled", label: "Settled" }, { value: "cancelled", label: "Cancelled" }]}
-        />
+      <div className="space-y-2">
+        <div className="flex gap-2 flex-wrap">
+          <Select value={sport} onChange={setSport} placeholder="All Sports" className="w-36"
+            options={[{ value: "", label: "All Sports" }, { value: "cricket", label: "Cricket" }, { value: "football", label: "Football" }, { value: "tennis", label: "Tennis" }]}
+          />
+          <Select value={status} onChange={setStatus} placeholder="All Status" className="w-36"
+            options={[{ value: "", label: "All Status" }, { value: "matched", label: "Matched" }, { value: "unmatched", label: "Unmatched" }, { value: "settled", label: "Settled" }, { value: "cancelled", label: "Cancelled" }]}
+          />
+        </div>
+
+        {/* Date range presets */}
+        <div className="flex items-center gap-1 flex-wrap">
+          {([
+            { key: "", label: "All" },
+            { key: "today", label: "Today" },
+            { key: "yesterday", label: "Yesterday" },
+            { key: "7d", label: "Last 7 Days" },
+            { key: "30d", label: "Last 30 Days" },
+          ] as const).map((p) => (
+            <button
+              key={p.key || "all"}
+              onClick={() => applyPreset(p.key)}
+              className={`text-[10px] font-medium px-2.5 py-1 rounded-md transition ${
+                activePreset === p.key
+                  ? "bg-lotus text-white"
+                  : "bg-surface text-gray-400 hover:text-white border border-gray-700"
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Custom date range */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-1.5">
+            <label className="text-[10px] text-gray-500">From</label>
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => { setDateFrom(e.target.value); setActivePreset("custom"); }}
+              className="bg-surface border border-gray-700 rounded-md px-2 py-1 text-xs text-white focus:outline-none focus:border-gray-500 [color-scheme:dark]"
+            />
+          </div>
+          <div className="flex items-center gap-1.5">
+            <label className="text-[10px] text-gray-500">To</label>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => { setDateTo(e.target.value); setActivePreset("custom"); }}
+              className="bg-surface border border-gray-700 rounded-md px-2 py-1 text-xs text-white focus:outline-none focus:border-gray-500 [color-scheme:dark]"
+            />
+          </div>
+          {(dateFrom || dateTo) && (
+            <button
+              onClick={() => { setDateFrom(""); setDateTo(""); setActivePreset(""); }}
+              className="text-[10px] text-gray-500 hover:text-white transition px-1.5 py-1 rounded"
+            >
+              Clear
+            </button>
+          )}
+        </div>
       </div>
 
       {loading ? (
-        <div className="space-y-2">
-          {Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} className="h-14 bg-surface rounded-lg border border-gray-800/60 animate-pulse" />
-          ))}
-        </div>
+        <SkeletonList count={5} />
       ) : filtered.length === 0 ? (
         <div className="text-center py-16 text-gray-500">
           <p className="text-sm">No betting history yet</p>

@@ -6,6 +6,7 @@ import (
 
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
+	"github.com/lotus-exchange/lotus-exchange/pkg/httputil"
 )
 
 type Handler struct {
@@ -33,47 +34,37 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 	markets, err := h.service.List(r.Context(), sport, status, inPlay)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list markets")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to list markets")
 		return
 	}
-	writeJSON(w, http.StatusOK, markets)
+	httputil.WriteJSON(w, http.StatusOK, markets)
 }
 
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	marketID := r.PathValue("id")
 	m, err := h.service.Get(r.Context(), marketID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "market not found")
+		httputil.WriteError(w, http.StatusNotFound, "market not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, m)
+	httputil.WriteJSON(w, http.StatusOK, m)
 }
 
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	role := middleware.RoleFromContext(r.Context())
 	if role != models.Role("superadmin") && role != models.Role("admin") {
-		writeError(w, http.StatusForbidden, "insufficient permissions")
+		httputil.WriteError(w, http.StatusForbidden, "insufficient permissions")
 		return
 	}
 
 	var m models.Market
 	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if err := h.service.Create(r.Context(), &m); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create market")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to create market")
 		return
 	}
-	writeJSON(w, http.StatusCreated, m)
-}
-
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
-}
-
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	httputil.WriteJSON(w, http.StatusCreated, m)
 }

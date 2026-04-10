@@ -5,6 +5,7 @@ import { api, WalletBalance, LedgerEntry } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useRouter } from "next/navigation";
 import Pagination from "@/components/Pagination";
+import { SkeletonPanel } from "@/components/Skeleton";
 
 const LEDGER_PER_PAGE = 20;
 
@@ -33,6 +34,47 @@ export default function WalletPage() {
   // Date range filter state
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [activePreset, setActivePreset] = useState<string>("");
+
+  // Apply a quick-select preset (today / yesterday / 7d / 30d / all)
+  function applyPreset(preset: "today" | "yesterday" | "7d" | "30d" | "all") {
+    setActivePreset(preset);
+    const today = new Date();
+    const toISO = (d: Date) => d.toISOString().slice(0, 10);
+    if (preset === "all") {
+      setDateFrom("");
+      setDateTo("");
+      return;
+    }
+    if (preset === "today") {
+      const iso = toISO(today);
+      setDateFrom(iso);
+      setDateTo(iso);
+      return;
+    }
+    if (preset === "yesterday") {
+      const y = new Date(today);
+      y.setDate(today.getDate() - 1);
+      const iso = toISO(y);
+      setDateFrom(iso);
+      setDateTo(iso);
+      return;
+    }
+    if (preset === "7d") {
+      const from = new Date(today);
+      from.setDate(today.getDate() - 6);
+      setDateFrom(toISO(from));
+      setDateTo(toISO(today));
+      return;
+    }
+    if (preset === "30d") {
+      const from = new Date(today);
+      from.setDate(today.getDate() - 29);
+      setDateFrom(toISO(from));
+      setDateTo(toISO(today));
+      return;
+    }
+  }
 
   useEffect(() => {
     if (!authLoading && !isLoggedIn) {
@@ -85,9 +127,8 @@ export default function WalletPage() {
 
   if (authLoading || loading) {
     return (
-      <div className="max-w-2xl mx-auto px-3 py-4 space-y-4">
-        <div className="bg-surface rounded-xl border border-gray-800 h-40 animate-pulse" />
-        <div className="bg-surface rounded-xl border border-gray-800 h-60 animate-pulse" />
+      <div className="max-w-2xl mx-auto px-3 py-4">
+        <SkeletonPanel />
       </div>
     );
   }
@@ -174,37 +215,67 @@ export default function WalletPage() {
           <h2 className="text-xs font-medium text-gray-400 uppercase tracking-wide">
             Transaction History
           </h2>
-          {/* Date Range Filter */}
-          <div className="flex items-center gap-2 flex-wrap">
-            <div className="flex items-center gap-1.5">
-              <label className="text-[10px] text-gray-500">From</label>
-              <input
-                type="date"
-                value={dateFrom}
-                onChange={(e) => setDateFrom(e.target.value)}
-                className="bg-surface-lighter border border-gray-700 rounded-md px-2 py-1 text-xs text-white focus:outline-none focus:border-gray-500 [color-scheme:dark]"
-              />
+          {/* Date Range Filter — preset buttons + custom range */}
+          <div className="space-y-2">
+            <div className="flex items-center gap-1 flex-wrap">
+              {([
+                { key: "today", label: "Today" },
+                { key: "yesterday", label: "Yesterday" },
+                { key: "7d", label: "Last 7 Days" },
+                { key: "30d", label: "Last 30 Days" },
+                { key: "all", label: "All" },
+              ] as const).map((p) => (
+                <button
+                  key={p.key}
+                  onClick={() => applyPreset(p.key)}
+                  className={`text-[10px] font-medium px-2.5 py-1 rounded-md transition ${
+                    activePreset === p.key
+                      ? "bg-lotus text-white"
+                      : "bg-surface-lighter text-gray-400 hover:text-white border border-gray-700"
+                  }`}
+                >
+                  {p.label}
+                </button>
+              ))}
             </div>
-            <div className="flex items-center gap-1.5">
-              <label className="text-[10px] text-gray-500">To</label>
-              <input
-                type="date"
-                value={dateTo}
-                onChange={(e) => setDateTo(e.target.value)}
-                className="bg-surface-lighter border border-gray-700 rounded-md px-2 py-1 text-xs text-white focus:outline-none focus:border-gray-500 [color-scheme:dark]"
-              />
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex items-center gap-1.5">
+                <label className="text-[10px] text-gray-500">From</label>
+                <input
+                  type="date"
+                  value={dateFrom}
+                  onChange={(e) => {
+                    setDateFrom(e.target.value);
+                    setActivePreset("");
+                  }}
+                  className="bg-surface-lighter border border-gray-700 rounded-md px-2 py-1 text-xs text-white focus:outline-none focus:border-gray-500 [color-scheme:dark]"
+                />
+              </div>
+              <div className="flex items-center gap-1.5">
+                <label className="text-[10px] text-gray-500">To</label>
+                <input
+                  type="date"
+                  value={dateTo}
+                  onChange={(e) => {
+                    setDateTo(e.target.value);
+                    setActivePreset("");
+                  }}
+                  className="bg-surface-lighter border border-gray-700 rounded-md px-2 py-1 text-xs text-white focus:outline-none focus:border-gray-500 [color-scheme:dark]"
+                />
+              </div>
+              {(dateFrom || dateTo) && (
+                <button
+                  onClick={() => {
+                    setDateFrom("");
+                    setDateTo("");
+                    setActivePreset("");
+                  }}
+                  className="text-[10px] text-gray-500 hover:text-white transition px-1.5 py-1 rounded"
+                >
+                  Clear
+                </button>
+              )}
             </div>
-            {(dateFrom || dateTo) && (
-              <button
-                onClick={() => {
-                  setDateFrom("");
-                  setDateTo("");
-                }}
-                className="text-[10px] text-gray-500 hover:text-white transition px-1.5 py-1 rounded"
-              >
-                Clear
-              </button>
-            )}
           </div>
         </div>
 

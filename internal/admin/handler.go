@@ -15,6 +15,7 @@ import (
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
 	"github.com/lotus-exchange/lotus-exchange/internal/reporting"
 	"github.com/lotus-exchange/lotus-exchange/internal/settlement"
+	"github.com/lotus-exchange/lotus-exchange/pkg/httputil"
 )
 
 type Handler struct {
@@ -77,10 +78,10 @@ func (h *Handler) Dashboard(w http.ResponseWriter, r *http.Request) {
 	stats, err := h.reporting.GetDashboardStats(r.Context())
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "dashboard stats failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to load dashboard stats")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to load dashboard stats")
 		return
 	}
-	writeJSON(w, http.StatusOK, stats)
+	httputil.WriteJSON(w, http.StatusOK, stats)
 }
 
 func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +113,7 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "list users query failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to list users")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to list users")
 		return
 	}
 	defer rows.Close()
@@ -124,20 +125,20 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 			&u.ParentID, &u.Balance, &u.Exposure, &u.CreditLimit,
 			&u.CommissionRate, &u.Status, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			h.logger.ErrorContext(r.Context(), "scan user failed", "error", err)
-			writeError(w, http.StatusInternalServerError, "failed to list users")
+			httputil.WriteError(w, http.StatusInternalServerError, "failed to list users")
 			return
 		}
 		users = append(users, u)
 	}
 
-	writeJSON(w, http.StatusOK, users)
+	httputil.WriteJSON(w, http.StatusOK, users)
 }
 
 func (h *Handler) GetUser(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid user ID")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid user ID")
 		return
 	}
 
@@ -150,17 +151,17 @@ func (h *Handler) GetUser(w http.ResponseWriter, r *http.Request) {
 		&u.ParentID, &u.Balance, &u.Exposure, &u.CreditLimit,
 		&u.CommissionRate, &u.Status, &u.CreatedAt, &u.UpdatedAt)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "user not found")
+		httputil.WriteError(w, http.StatusNotFound, "user not found")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, u)
+	httputil.WriteJSON(w, http.StatusOK, u)
 }
 
 func (h *Handler) UpdateUserStatus(w http.ResponseWriter, r *http.Request) {
 	id, err := parsePathInt64(r, "id")
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid user ID")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid user ID")
 		return
 	}
 	var req struct {
@@ -168,13 +169,13 @@ func (h *Handler) UpdateUserStatus(w http.ResponseWriter, r *http.Request) {
 		CurrentStatus string `json:"current_status"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	allowedStatuses := map[string]bool{"active": true, "suspended": true, "locked": true, "closed": true}
 	if !allowedStatuses[req.Status] {
-		writeError(w, http.StatusBadRequest, "invalid status: must be one of active, suspended, locked, closed")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid status: must be one of active, suspended, locked, closed")
 		return
 	}
 
@@ -182,7 +183,7 @@ func (h *Handler) UpdateUserStatus(w http.ResponseWriter, r *http.Request) {
 	var result sql.Result
 	if req.CurrentStatus != "" {
 		if !allowedStatuses[req.CurrentStatus] {
-			writeError(w, http.StatusBadRequest, "invalid current_status: must be one of active, suspended, locked, closed")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid current_status: must be one of active, suspended, locked, closed")
 			return
 		}
 		result, err = h.db.ExecContext(r.Context(),
@@ -194,46 +195,46 @@ func (h *Handler) UpdateUserStatus(w http.ResponseWriter, r *http.Request) {
 			req.Status, id)
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update user status")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to update user status")
 		return
 	}
 
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update user status")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to update user status")
 		return
 	}
 	if rowsAffected == 0 {
-		writeError(w, http.StatusConflict, "user status was modified by another operation; please retry")
+		httputil.WriteError(w, http.StatusConflict, "user status was modified by another operation; please retry")
 		return
 	}
 
 	h.logger.InfoContext(r.Context(), "admin updated user status",
 		"admin", middleware.UserIDFromContext(r.Context()), "user", id, "status", req.Status)
 
-	writeJSON(w, http.StatusOK, map[string]string{"message": "status updated"})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "status updated"})
 }
 
 func (h *Handler) UpdateCreditLimit(w http.ResponseWriter, r *http.Request) {
 	id, err := parsePathInt64(r, "id")
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid user ID")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid user ID")
 		return
 	}
 	var req struct {
 		CreditLimit float64 `json:"credit_limit"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	if req.CreditLimit < 0 {
-		writeError(w, http.StatusBadRequest, "credit limit must not be negative")
+		httputil.WriteError(w, http.StatusBadRequest, "credit limit must not be negative")
 		return
 	}
 	if req.CreditLimit > 100_000_000 {
-		writeError(w, http.StatusBadRequest, "credit limit exceeds maximum allowed value of 100,000,000")
+		httputil.WriteError(w, http.StatusBadRequest, "credit limit exceeds maximum allowed value of 100,000,000")
 		return
 	}
 
@@ -241,28 +242,28 @@ func (h *Handler) UpdateCreditLimit(w http.ResponseWriter, r *http.Request) {
 		"UPDATE users SET credit_limit = $1, updated_at = NOW() WHERE id = $2",
 		req.CreditLimit, id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update credit limit")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to update credit limit")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": "credit limit updated"})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "credit limit updated"})
 }
 
 func (h *Handler) UpdateCommission(w http.ResponseWriter, r *http.Request) {
 	id, err := parsePathInt64(r, "id")
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid user ID")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid user ID")
 		return
 	}
 	var req struct {
 		CommissionRate float64 `json:"commission_rate"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	if req.CommissionRate < 0 || req.CommissionRate > 100 {
-		writeError(w, http.StatusBadRequest, "commission rate must be between 0 and 100")
+		httputil.WriteError(w, http.StatusBadRequest, "commission rate must be between 0 and 100")
 		return
 	}
 
@@ -270,10 +271,10 @@ func (h *Handler) UpdateCommission(w http.ResponseWriter, r *http.Request) {
 		"UPDATE users SET commission_rate = $1, updated_at = NOW() WHERE id = $2",
 		req.CommissionRate, id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update commission rate")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to update commission rate")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": "commission rate updated"})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "commission rate updated"})
 }
 
 func (h *Handler) ListMarkets(w http.ResponseWriter, r *http.Request) {
@@ -288,34 +289,34 @@ func (h *Handler) ListMarkets(w http.ResponseWriter, r *http.Request) {
 	markets, err := h.market.List(r.Context(), sport, status, inPlay)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "list markets failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to list markets")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to list markets")
 		return
 	}
-	writeJSON(w, http.StatusOK, markets)
+	httputil.WriteJSON(w, http.StatusOK, markets)
 }
 
 func (h *Handler) SuspendMarket(w http.ResponseWriter, r *http.Request) {
 	marketID := r.PathValue("id")
 	if err := h.market.UpdateStatus(r.Context(), marketID, models.MarketSuspended); err != nil {
 		h.logger.ErrorContext(r.Context(), "suspend market failed", "market", marketID, "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to suspend market")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to suspend market")
 		return
 	}
 
 	h.logger.InfoContext(r.Context(), "market suspended",
 		"admin", middleware.UserIDFromContext(r.Context()), "market", marketID)
 
-	writeJSON(w, http.StatusOK, map[string]string{"message": "market suspended"})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "market suspended"})
 }
 
 func (h *Handler) ResumeMarket(w http.ResponseWriter, r *http.Request) {
 	marketID := r.PathValue("id")
 	if err := h.market.UpdateStatus(r.Context(), marketID, models.MarketOpen); err != nil {
 		h.logger.ErrorContext(r.Context(), "resume market failed", "market", marketID, "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to resume market")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to resume market")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": "market resumed"})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "market resumed"})
 }
 
 func (h *Handler) SettleMarket(w http.ResponseWriter, r *http.Request) {
@@ -324,31 +325,31 @@ func (h *Handler) SettleMarket(w http.ResponseWriter, r *http.Request) {
 		WinnerSelectionID int64 `json:"winner_selection_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	result, err := h.settlement.SettleMarket(r.Context(), marketID, req.WinnerSelectionID)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "settle market failed", "market", marketID, "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to settle market")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to settle market")
 		return
 	}
 
 	h.logger.InfoContext(r.Context(), "market settled by admin",
 		"admin", middleware.UserIDFromContext(r.Context()), "market", marketID, "winner", req.WinnerSelectionID)
 
-	writeJSON(w, http.StatusOK, result)
+	httputil.WriteJSON(w, http.StatusOK, result)
 }
 
 func (h *Handler) VoidMarket(w http.ResponseWriter, r *http.Request) {
 	marketID := r.PathValue("id")
 	if err := h.settlement.VoidMarket(r.Context(), marketID); err != nil {
 		h.logger.ErrorContext(r.Context(), "void market failed", "market", marketID, "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to void market")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to void market")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": "market voided"})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "market voided"})
 }
 
 func (h *Handler) ListBets(w http.ResponseWriter, r *http.Request) {
@@ -384,7 +385,7 @@ func (h *Handler) ListBets(w http.ResponseWriter, r *http.Request) {
 	rows, err := h.db.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "list bets query failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to list bets")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to list bets")
 		return
 	}
 	defer rows.Close()
@@ -396,13 +397,13 @@ func (h *Handler) ListBets(w http.ResponseWriter, r *http.Request) {
 			&b.Price, &b.Stake, &b.MatchedStake, &b.UnmatchedStake, &b.Profit,
 			&b.Status, &b.ClientRef, &b.CreatedAt); err != nil {
 			h.logger.ErrorContext(r.Context(), "scan bet failed", "error", err)
-			writeError(w, http.StatusInternalServerError, "failed to list bets")
+			httputil.WriteError(w, http.StatusInternalServerError, "failed to list bets")
 			return
 		}
 		bets = append(bets, b)
 	}
 
-	writeJSON(w, http.StatusOK, bets)
+	httputil.WriteJSON(w, http.StatusOK, bets)
 }
 
 func (h *Handler) PnLReport(w http.ResponseWriter, r *http.Request) {
@@ -414,10 +415,10 @@ func (h *Handler) PnLReport(w http.ResponseWriter, r *http.Request) {
 		report, err := h.reporting.GetUserPnL(r.Context(), userID, from, to)
 		if err != nil {
 			h.logger.ErrorContext(r.Context(), "user pnl report failed", "user", userID, "error", err)
-			writeError(w, http.StatusInternalServerError, "failed to generate PnL report")
+			httputil.WriteError(w, http.StatusInternalServerError, "failed to generate PnL report")
 			return
 		}
-		writeJSON(w, http.StatusOK, report)
+		httputil.WriteJSON(w, http.StatusOK, report)
 		return
 	}
 
@@ -426,10 +427,10 @@ func (h *Handler) PnLReport(w http.ResponseWriter, r *http.Request) {
 	reports, err := h.reporting.GetHierarchyPnL(r.Context(), adminID, from, to)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "hierarchy pnl report failed", "admin", adminID, "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to generate PnL report")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to generate PnL report")
 		return
 	}
-	writeJSON(w, http.StatusOK, reports)
+	httputil.WriteJSON(w, http.StatusOK, reports)
 }
 
 func (h *Handler) VolumeReport(w http.ResponseWriter, r *http.Request) {
@@ -439,10 +440,10 @@ func (h *Handler) VolumeReport(w http.ResponseWriter, r *http.Request) {
 	points, err := h.reporting.GetBetVolumeTrend(r.Context(), from, to, interval)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "volume report failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to generate volume report")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to generate volume report")
 		return
 	}
-	writeJSON(w, http.StatusOK, points)
+	httputil.WriteJSON(w, http.StatusOK, points)
 }
 
 func (h *Handler) FraudAlerts(w http.ResponseWriter, r *http.Request) {
@@ -456,10 +457,10 @@ func (h *Handler) FraudAlerts(w http.ResponseWriter, r *http.Request) {
 	alerts, err := h.fraud.GetAlerts(r.Context(), resolved, limit)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "fraud alerts query failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to load fraud alerts")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to load fraud alerts")
 		return
 	}
-	writeJSON(w, http.StatusOK, alerts)
+	httputil.WriteJSON(w, http.StatusOK, alerts)
 }
 
 // Helpers
@@ -498,14 +499,4 @@ func parsePathInt64(r *http.Request, key string) (int64, error) {
 		return 0, fmt.Errorf("invalid path parameter %s", key)
 	}
 	return v, nil
-}
-
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
-}
-
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
 }

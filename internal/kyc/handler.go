@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
+	"github.com/lotus-exchange/lotus-exchange/pkg/httputil"
 )
 
 type Handler struct {
@@ -34,17 +35,17 @@ func (h *Handler) GetStatus(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	profile, err := h.service.GetKYCStatus(r.Context(), userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to retrieve KYC status")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to retrieve KYC status")
 		return
 	}
-	writeJSON(w, http.StatusOK, profile)
+	httputil.WriteJSON(w, http.StatusOK, profile)
 }
 
 func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	var req SubmitKYCRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -53,13 +54,13 @@ func (h *Handler) Submit(w http.ResponseWriter, r *http.Request) {
 		// Validation errors are safe to return; internal errors are not
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "KYC already") {
-			writeError(w, http.StatusBadRequest, errMsg)
+			httputil.WriteError(w, http.StatusBadRequest, errMsg)
 		} else {
-			writeError(w, http.StatusBadRequest, "failed to submit KYC")
+			httputil.WriteError(w, http.StatusBadRequest, "failed to submit KYC")
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, profile)
+	httputil.WriteJSON(w, http.StatusOK, profile)
 }
 
 func (h *Handler) PendingList(w http.ResponseWriter, r *http.Request) {
@@ -72,33 +73,33 @@ func (h *Handler) PendingList(w http.ResponseWriter, r *http.Request) {
 
 	profiles, err := h.service.GetPendingKYC(r.Context(), limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to retrieve pending KYC list")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to retrieve pending KYC list")
 		return
 	}
-	writeJSON(w, http.StatusOK, profiles)
+	httputil.WriteJSON(w, http.StatusOK, profiles)
 }
 
 func (h *Handler) Approve(w http.ResponseWriter, r *http.Request) {
 	userIDStr := r.PathValue("id")
 	userID, err := strconv.ParseInt(userIDStr, 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid user ID")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid user ID")
 		return
 	}
 
 	adminID := middleware.UserIDFromContext(r.Context())
 	if err := h.service.ApproveKYC(r.Context(), userID, adminID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to approve KYC")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to approve KYC")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": "KYC approved"})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "KYC approved"})
 }
 
 func (h *Handler) Reject(w http.ResponseWriter, r *http.Request) {
 	userIDStr := r.PathValue("id")
 	userID, err := strconv.ParseInt(userIDStr, 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid user ID")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid user ID")
 		return
 	}
 
@@ -106,24 +107,14 @@ func (h *Handler) Reject(w http.ResponseWriter, r *http.Request) {
 		Reason string `json:"reason" validate:"required"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	adminID := middleware.UserIDFromContext(r.Context())
 	if err := h.service.RejectKYC(r.Context(), userID, adminID, req.Reason); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to reject KYC")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to reject KYC")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": "KYC rejected"})
-}
-
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
-}
-
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "KYC rejected"})
 }

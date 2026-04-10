@@ -1,6 +1,7 @@
 "use client";
 
 import { AuthProvider } from "@/lib/auth";
+import { BetSlipProvider } from "@/lib/betslip";
 import Navbar from "@/components/Navbar";
 import WhatsAppWidget from "@/components/WhatsAppWidget";
 import AgeGate from "@/components/AgeGate";
@@ -9,9 +10,11 @@ import Footer from "@/components/Footer";
 import { ToastProvider } from "@/components/Toast";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import OfflineBanner from "@/components/OfflineBanner";
+import GlobalBetSlip from "@/components/GlobalBetSlip";
+import MobileNav from "@/components/MobileNav";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { api, Competition } from "@/lib/api";
 
 export default function ClientLayout({
@@ -62,6 +65,7 @@ export default function ClientLayout({
   return (
     <AuthProvider>
       <ToastProvider>
+      <BetSlipProvider>
       <ErrorBoundary>
       <AgeGate>
       <DisclaimerBanner />
@@ -186,18 +190,14 @@ export default function ClientLayout({
 
       <WhatsAppWidget />
 
+      {/* ===== Global Bet Slip Drawer (all pages) ===== */}
+      <GlobalBetSlip />
+
       {/* ===== Mobile Bottom Navigation ===== */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-[var(--nav-bg)] border-t border-gray-800 z-50">
-        <div className="grid grid-cols-5 h-14">
-          <BottomNavItem href="/" icon="home" label="Home" active={pathname === "/"} />
-          <BottomNavItem href="/sports/cricket" icon="cricket" label="Cricket" active={pathname?.startsWith("/sports") || false} />
-          <BottomNavItem href="/casino" icon="casino" label="Casino" active={pathname?.startsWith("/casino") || false} />
-          <BottomNavItem href="/bets" icon="bets" label="My Bets" active={pathname === "/bets"} />
-          <BottomNavItem href="/wallet" icon="wallet" label="Wallet" active={pathname === "/wallet"} />
-        </div>
-      </nav>
+      <MobileNav />
       </AgeGate>
       </ErrorBoundary>
+      </BetSlipProvider>
       </ToastProvider>
     </AuthProvider>
   );
@@ -343,40 +343,4 @@ function SportTree({
   );
 }
 
-// ========== Bottom Navigation ==========
-
-function BottomNavItem({
-  href,
-  icon,
-  label,
-  active,
-}: {
-  href: string;
-  icon: string;
-  label: string;
-  active: boolean;
-}) {
-  const icons: Record<string, React.ReactNode> = {
-    home: (
-      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
-      </svg>
-    ),
-    cricket: <span className="text-lg">🏏</span>,
-    casino: <span className="text-lg">🎰</span>,
-    bets: <span className="text-lg">📋</span>,
-    wallet: <span className="text-lg">💰</span>,
-  };
-
-  return (
-    <Link
-      href={href}
-      className={`flex flex-col items-center justify-center gap-0.5 transition ${
-        active ? "text-lotus" : "text-gray-500 active:text-lotus"
-      }`}
-    >
-      {icons[icon]}
-      <span className="text-[10px]">{label}</span>
-    </Link>
-  );
-}
+// Bottom navigation is provided by <MobileNav/> — see components/MobileNav.tsx

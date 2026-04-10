@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
+	"github.com/lotus-exchange/lotus-exchange/pkg/httputil"
 )
 
 type Handler struct {
@@ -31,7 +32,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 func (h *Handler) UPIDeposit(w http.ResponseWriter, r *http.Request) {
 	var req UPIDepositRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -39,17 +40,17 @@ func (h *Handler) UPIDeposit(w http.ResponseWriter, r *http.Request) {
 	tx, err := h.service.InitiateUPIDeposit(r.Context(), userID, &req)
 	if err != nil {
 		h.service.logger.Error("UPI deposit initiation failed", "error", err, "user_id", userID)
-		writeError(w, http.StatusBadRequest, "failed to initiate UPI deposit")
+		httputil.WriteError(w, http.StatusBadRequest, "failed to initiate UPI deposit")
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, tx)
+	httputil.WriteJSON(w, http.StatusCreated, tx)
 }
 
 func (h *Handler) CryptoDeposit(w http.ResponseWriter, r *http.Request) {
 	var req CryptoDepositRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -57,17 +58,17 @@ func (h *Handler) CryptoDeposit(w http.ResponseWriter, r *http.Request) {
 	tx, err := h.service.InitiateCryptoDeposit(r.Context(), userID, &req)
 	if err != nil {
 		h.service.logger.Error("crypto deposit initiation failed", "error", err, "user_id", userID)
-		writeError(w, http.StatusBadRequest, "failed to initiate crypto deposit")
+		httputil.WriteError(w, http.StatusBadRequest, "failed to initiate crypto deposit")
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, tx)
+	httputil.WriteJSON(w, http.StatusCreated, tx)
 }
 
 func (h *Handler) Withdraw(w http.ResponseWriter, r *http.Request) {
 	var req WithdrawalRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -75,11 +76,11 @@ func (h *Handler) Withdraw(w http.ResponseWriter, r *http.Request) {
 	tx, err := h.service.InitiateWithdrawal(r.Context(), userID, &req)
 	if err != nil {
 		h.service.logger.Error("withdrawal initiation failed", "error", err, "user_id", userID)
-		writeError(w, http.StatusBadRequest, "failed to initiate withdrawal")
+		httputil.WriteError(w, http.StatusBadRequest, "failed to initiate withdrawal")
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, tx)
+	httputil.WriteJSON(w, http.StatusCreated, tx)
 }
 
 func (h *Handler) GetTransactions(w http.ResponseWriter, r *http.Request) {
@@ -101,11 +102,11 @@ func (h *Handler) GetTransactions(w http.ResponseWriter, r *http.Request) {
 	txns, err := h.service.GetUserTransactions(r.Context(), userID, limit, offset)
 	if err != nil {
 		h.service.logger.Error("get transactions failed", "error", err, "user_id", userID)
-		writeError(w, http.StatusInternalServerError, "failed to retrieve transactions")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to retrieve transactions")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, txns)
+	httputil.WriteJSON(w, http.StatusOK, txns)
 }
 
 func (h *Handler) GetTransaction(w http.ResponseWriter, r *http.Request) {
@@ -113,31 +114,31 @@ func (h *Handler) GetTransaction(w http.ResponseWriter, r *http.Request) {
 	tx, err := h.service.GetTransaction(r.Context(), txID)
 	if err != nil {
 		h.service.logger.Error("get transaction failed", "error", err, "tx_id", txID)
-		writeError(w, http.StatusNotFound, "transaction not found")
+		httputil.WriteError(w, http.StatusNotFound, "transaction not found")
 		return
 	}
 
 	// Verify ownership
 	userID := middleware.UserIDFromContext(r.Context())
 	if tx.UserID != userID {
-		writeError(w, http.StatusForbidden, "not authorized")
+		httputil.WriteError(w, http.StatusForbidden, "not authorized")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, tx)
+	httputil.WriteJSON(w, http.StatusOK, tx)
 }
 
 func (h *Handler) RazorpayWebhook(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "failed to read body")
+		httputil.WriteError(w, http.StatusBadRequest, "failed to read body")
 		return
 	}
 
 	signature := r.Header.Get("X-Razorpay-Signature")
 	if !h.service.verifyRazorpaySignature(body, signature) {
 		h.service.logger.Warn("razorpay webhook: invalid signature")
-		writeError(w, http.StatusUnauthorized, "invalid signature")
+		httputil.WriteError(w, http.StatusUnauthorized, "invalid signature")
 		return
 	}
 
@@ -147,13 +148,13 @@ func (h *Handler) RazorpayWebhook(w http.ResponseWriter, r *http.Request) {
 		h.service.logger.Error("razorpay webhook processing failed", "error", err)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *Handler) CryptoWebhook(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "failed to read body")
+		httputil.WriteError(w, http.StatusBadRequest, "failed to read body")
 		return
 	}
 
@@ -161,7 +162,7 @@ func (h *Handler) CryptoWebhook(w http.ResponseWriter, r *http.Request) {
 	signature := r.Header.Get("X-Webhook-Signature")
 	if !h.service.VerifyCryptoSignature(body, signature) {
 		h.service.logger.Warn("crypto webhook: invalid signature")
-		writeError(w, http.StatusUnauthorized, "invalid signature")
+		httputil.WriteError(w, http.StatusUnauthorized, "invalid signature")
 		return
 	}
 
@@ -169,7 +170,7 @@ func (h *Handler) CryptoWebhook(w http.ResponseWriter, r *http.Request) {
 	if err := json.Unmarshal(body, &webhook); err != nil {
 		// Signature was valid but body is malformed -- return 200 to avoid retries.
 		h.service.logger.Error("crypto webhook: invalid JSON body", "error", err)
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		httputil.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
 
@@ -179,15 +180,5 @@ func (h *Handler) CryptoWebhook(w http.ResponseWriter, r *http.Request) {
 		h.service.logger.Error("crypto webhook processing failed", "error", err)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
-}
-
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

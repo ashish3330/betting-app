@@ -1,11 +1,11 @@
 package notification
 
 import (
-	"encoding/json"
 	"net/http"
 	"strconv"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
+	"github.com/lotus-exchange/lotus-exchange/pkg/httputil"
 )
 
 type Handler struct {
@@ -41,20 +41,20 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 	notifs, err := h.service.GetUserNotifications(r.Context(), userID, unreadOnly, limit, offset)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, notifs)
+	httputil.WriteJSON(w, http.StatusOK, notifs)
 }
 
 func (h *Handler) UnreadCount(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	count, err := h.service.GetUnreadCount(r.Context(), userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]int{"unread_count": count})
+	httputil.WriteJSON(w, http.StatusOK, map[string]int{"unread_count": count})
 }
 
 func (h *Handler) MarkRead(w http.ResponseWriter, r *http.Request) {
@@ -62,31 +62,21 @@ func (h *Handler) MarkRead(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid notification ID")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid notification ID")
 		return
 	}
 	if err := h.service.MarkAsRead(r.Context(), userID, id); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": "marked as read"})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "marked as read"})
 }
 
 func (h *Handler) MarkAllRead(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	if err := h.service.MarkAllRead(r.Context(), userID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": "all marked as read"})
-}
-
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
-}
-
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "all marked as read"})
 }

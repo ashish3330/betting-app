@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
+	"github.com/lotus-exchange/lotus-exchange/pkg/httputil"
 )
 
 type Handler struct {
@@ -26,7 +27,7 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	var req models.CreateUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -36,42 +37,42 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.service.Register(r.Context(), &req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, user)
+	httputil.WriteJSON(w, http.StatusCreated, user)
 }
 
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	var req models.LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	resp, err := h.service.Login(r.Context(), &req)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, err.Error())
+		httputil.WriteError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	httputil.WriteJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	token := extractToken(r)
 	if token == "" {
-		writeError(w, http.StatusUnauthorized, "missing token")
+		httputil.WriteError(w, http.StatusUnauthorized, "missing token")
 		return
 	}
 
 	if err := h.service.Logout(r.Context(), token); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"message": "logged out"})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "logged out"})
 }
 
 func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
@@ -79,17 +80,17 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 		RefreshToken string `json:"refresh_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	resp, err := h.service.RefreshToken(r.Context(), req.RefreshToken)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, err.Error())
+		httputil.WriteError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	httputil.WriteJSON(w, http.StatusOK, resp)
 }
 
 func extractToken(r *http.Request) string {
@@ -102,30 +103,20 @@ func extractToken(r *http.Request) string {
 
 func (h *Handler) OTPVerify(w http.ResponseWriter, r *http.Request) {
 	// TODO: implement OTP verification
-	writeJSON(w, http.StatusOK, map[string]string{"message": "otp verified"})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "otp verified"})
 }
 
 func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	// TODO: implement password change
-	writeJSON(w, http.StatusOK, map[string]string{"message": "password changed"})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "password changed"})
 }
 
 func (h *Handler) OTPGenerate(w http.ResponseWriter, r *http.Request) {
 	// TODO: implement OTP generation
-	writeJSON(w, http.StatusOK, map[string]string{"message": "otp generated"})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "otp generated"})
 }
 
 func (h *Handler) OTPEnable(w http.ResponseWriter, r *http.Request) {
 	// TODO: implement OTP enable
-	writeJSON(w, http.StatusOK, map[string]string{"message": "otp enabled"})
-}
-
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
-}
-
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "otp enabled"})
 }

@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
+	"github.com/lotus-exchange/lotus-exchange/pkg/httputil"
 )
 
 type Handler struct {
@@ -38,10 +39,10 @@ func (h *Handler) GetAlerts(w http.ResponseWriter, r *http.Request) {
 
 	alerts, err := h.service.GetAlerts(r.Context(), resolved, limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to retrieve fraud alerts")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to retrieve fraud alerts")
 		return
 	}
-	writeJSON(w, http.StatusOK, alerts)
+	httputil.WriteJSON(w, http.StatusOK, alerts)
 }
 
 func (h *Handler) ResolveAlert(w http.ResponseWriter, r *http.Request) {
@@ -55,39 +56,29 @@ func (h *Handler) ResolveAlert(w http.ResponseWriter, r *http.Request) {
 	json.NewDecoder(r.Body).Decode(&req)
 
 	if err := h.service.ResolveAlert(r.Context(), alertID, adminID, req.Resolution); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to resolve alert")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to resolve alert")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": "alert resolved"})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "alert resolved"})
 }
 
 func (h *Handler) GetUserRisk(w http.ResponseWriter, r *http.Request) {
 	userIDStr := r.PathValue("id")
 	userID, err := strconv.ParseInt(userIDStr, 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid user ID")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid user ID")
 		return
 	}
 
 	score, level, err := h.service.GetUserRiskScore(r.Context(), userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to retrieve risk score")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to retrieve risk score")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{
 		"user_id":    userID,
 		"risk_score": score,
 		"risk_level": level,
 	})
-}
-
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
-}
-
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
 }

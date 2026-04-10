@@ -9,6 +9,7 @@ import (
 
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
+	"github.com/lotus-exchange/lotus-exchange/pkg/httputil"
 )
 
 type Handler struct {
@@ -30,10 +31,10 @@ func (h *Handler) GetBalance(w http.ResponseWriter, r *http.Request) {
 	summary, err := h.service.GetBalance(r.Context(), userID)
 	if err != nil {
 		slog.Error("get balance failed", "error", err, "user_id", userID)
-		writeError(w, http.StatusInternalServerError, "failed to retrieve balance")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to retrieve balance")
 		return
 	}
-	writeJSON(w, http.StatusOK, summary)
+	httputil.WriteJSON(w, http.StatusOK, summary)
 }
 
 func (h *Handler) GetStatement(w http.ResponseWriter, r *http.Request) {
@@ -68,10 +69,10 @@ func (h *Handler) GetStatement(w http.ResponseWriter, r *http.Request) {
 	entries, err := h.service.GetStatements(r.Context(), userID, from, to, limit, offset)
 	if err != nil {
 		slog.Error("get statement failed", "error", err, "user_id", userID)
-		writeError(w, http.StatusInternalServerError, "failed to retrieve statement")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to retrieve statement")
 		return
 	}
-	writeJSON(w, http.StatusOK, entries)
+	httputil.WriteJSON(w, http.StatusOK, entries)
 }
 
 func (h *Handler) GetLedger(w http.ResponseWriter, r *http.Request) {
@@ -93,17 +94,17 @@ func (h *Handler) GetLedger(w http.ResponseWriter, r *http.Request) {
 	entries, err := h.service.GetLedger(r.Context(), userID, limit, offset)
 	if err != nil {
 		slog.Error("get ledger failed", "error", err, "user_id", userID)
-		writeError(w, http.StatusInternalServerError, "failed to retrieve ledger")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to retrieve ledger")
 		return
 	}
-	writeJSON(w, http.StatusOK, entries)
+	httputil.WriteJSON(w, http.StatusOK, entries)
 }
 
 func (h *Handler) Deposit(w http.ResponseWriter, r *http.Request) {
 	// Only admin or superadmin may call the direct deposit endpoint.
 	role := middleware.RoleFromContext(r.Context())
 	if role != models.RoleSuperAdmin && role != models.RoleAdmin {
-		writeError(w, http.StatusForbidden, "not authorized")
+		httputil.WriteError(w, http.StatusForbidden, "not authorized")
 		return
 	}
 
@@ -113,33 +114,23 @@ func (h *Handler) Deposit(w http.ResponseWriter, r *http.Request) {
 		Reference string  `json:"reference"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	if req.Amount <= 0 {
-		writeError(w, http.StatusBadRequest, "amount must be positive")
+		httputil.WriteError(w, http.StatusBadRequest, "amount must be positive")
 		return
 	}
 	if req.UserID <= 0 {
-		writeError(w, http.StatusBadRequest, "user_id is required")
+		httputil.WriteError(w, http.StatusBadRequest, "user_id is required")
 		return
 	}
 
 	if err := h.service.Deposit(r.Context(), req.UserID, req.Amount, req.Reference); err != nil {
 		slog.Error("deposit failed", "error", err, "user_id", req.UserID)
-		writeError(w, http.StatusInternalServerError, "deposit failed")
+		httputil.WriteError(w, http.StatusInternalServerError, "deposit failed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": "deposit successful"})
-}
-
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
-}
-
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "deposit successful"})
 }

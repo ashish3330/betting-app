@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
+	"github.com/lotus-exchange/lotus-exchange/pkg/httputil"
 )
 
 type Handler struct {
@@ -28,11 +29,11 @@ func (h *Handler) GetOffer(w http.ResponseWriter, r *http.Request) {
 		BetID string `json:"bet_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if req.BetID == "" {
-		writeError(w, http.StatusBadRequest, "bet_id is required")
+		httputil.WriteError(w, http.StatusBadRequest, "bet_id is required")
 		return
 	}
 
@@ -41,13 +42,13 @@ func (h *Handler) GetOffer(w http.ResponseWriter, r *http.Request) {
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "not eligible") ||
 			strings.Contains(errMsg, "no matched") || strings.Contains(errMsg, "not available") {
-			writeError(w, http.StatusBadRequest, errMsg)
+			httputil.WriteError(w, http.StatusBadRequest, errMsg)
 		} else {
-			writeError(w, http.StatusInternalServerError, "failed to generate cashout offer")
+			httputil.WriteError(w, http.StatusInternalServerError, "failed to generate cashout offer")
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, offer)
+	httputil.WriteJSON(w, http.StatusOK, offer)
 }
 
 func (h *Handler) AcceptOffer(w http.ResponseWriter, r *http.Request) {
@@ -56,11 +57,11 @@ func (h *Handler) AcceptOffer(w http.ResponseWriter, r *http.Request) {
 		OfferID string `json:"offer_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if req.OfferID == "" {
-		writeError(w, http.StatusBadRequest, "offer_id is required")
+		httputil.WriteError(w, http.StatusBadRequest, "offer_id is required")
 		return
 	}
 
@@ -69,31 +70,21 @@ func (h *Handler) AcceptOffer(w http.ResponseWriter, r *http.Request) {
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "expired") ||
 			strings.Contains(errMsg, "already") || strings.Contains(errMsg, "contact support") {
-			writeError(w, http.StatusBadRequest, errMsg)
+			httputil.WriteError(w, http.StatusBadRequest, errMsg)
 		} else {
-			writeError(w, http.StatusInternalServerError, "failed to accept cashout offer")
+			httputil.WriteError(w, http.StatusInternalServerError, "failed to accept cashout offer")
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, offer)
+	httputil.WriteJSON(w, http.StatusOK, offer)
 }
 
 func (h *Handler) ListOffers(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	offers, err := h.service.GetUserOffers(r.Context(), userID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to retrieve cashout offers")
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to retrieve cashout offers")
 		return
 	}
-	writeJSON(w, http.StatusOK, offers)
-}
-
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
-}
-
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	httputil.WriteJSON(w, http.StatusOK, offers)
 }

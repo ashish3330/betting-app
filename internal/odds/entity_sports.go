@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
+	"github.com/lotus-exchange/lotus-exchange/pkg/circuit"
+	"github.com/sony/gobreaker/v2"
 )
 
 // EntitySportsProvider implements OddsProvider for Entity Sports Cricket API.
@@ -18,6 +20,7 @@ type EntitySportsProvider struct {
 	apiKey     string
 	baseURL    string
 	httpClient *http.Client
+	breaker    *gobreaker.CircuitBreaker[[]byte]
 	logger     *slog.Logger
 }
 
@@ -28,8 +31,43 @@ func NewEntitySportsProvider(apiKey, baseURL string, logger *slog.Logger) *Entit
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		breaker: circuit.NewBytes(circuit.Settings{
+			Name:                      "entity_sports",
+			MaxRequests:               3,
+			Interval:                  60 * time.Second,
+			Timeout:                   30 * time.Second,
+			ConsecutiveFailuresToTrip: 5,
+		}, logger),
 		logger: logger,
 	}
+}
+
+// doRequest executes an HTTP GET through the circuit breaker and returns the
+// response body. When the breaker is open, calls fail fast without touching
+// the network, which keeps us from hammering a degraded upstream.
+func (e *EntitySportsProvider) doRequest(ctx context.Context, url string) ([]byte, error) {
+	return e.breaker.Execute(func() ([]byte, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create request: %w", err)
+		}
+		resp, err := e.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("http do: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 500 {
+			return nil, fmt.Errorf("upstream status %d", resp.StatusCode)
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10 MB limit
+		if err != nil {
+			return nil, fmt.Errorf("read response: %w", err)
+		}
+		if resp.StatusCode >= 400 {
+			return nil, fmt.Errorf("upstream status %d: %s", resp.StatusCode, string(body))
+		}
+		return body, nil
+	})
 }
 
 func (e *EntitySportsProvider) Name() string { return "entity_sports" }
@@ -64,20 +102,9 @@ func (e *EntitySportsProvider) FetchMarkets(ctx context.Context, sport string) (
 	}
 
 	url := fmt.Sprintf("%s/matches?status=3&token=%s&per_page=50", e.baseURL, e.apiKey)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	resp, err := e.httpClient.Do(req)
+	body, err := e.doRequest(ctx, url)
 	if err != nil {
 		return nil, fmt.Errorf("fetch matches: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10 MB limit
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
 	}
 
 	var esResp esMatchResponse
@@ -166,16 +193,9 @@ func (e *EntitySportsProvider) fetchLiveOdds(ctx context.Context, marketID strin
 	fmt.Sscanf(marketID, "es-%d-mo", &matchID)
 
 	url := fmt.Sprintf("%s/matches/%d/scorecard?token=%s", e.baseURL, matchID, e.apiKey)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
+	if _, err := e.doRequest(ctx, url); err != nil {
 		return nil, err
 	}
-
-	resp, err := e.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
 
 	// Parse and normalize to internal OddsUpdate format
 	// In production this would parse Entity Sports specific response format
@@ -193,15 +213,9 @@ func (e *EntitySportsProvider) FetchCompetitions(ctx context.Context, sport stri
 	}
 	// Entity Sports competition endpoint
 	url := fmt.Sprintf("%s/competitions?status=1&token=%s", e.baseURL, e.apiKey)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	resp, err := e.httpClient.Do(req)
-	if err != nil {
+	if _, err := e.doRequest(ctx, url); err != nil {
 		return nil, fmt.Errorf("fetch competitions: %w", err)
 	}
-	defer resp.Body.Close()
 
 	// Placeholder: in production, parse Entity Sports response into models.Competition
 	e.logger.InfoContext(ctx, "fetched Entity Sports competitions", "sport", sport)
@@ -211,15 +225,9 @@ func (e *EntitySportsProvider) FetchCompetitions(ctx context.Context, sport stri
 // FetchEvents returns events for a competition from Entity Sports.
 func (e *EntitySportsProvider) FetchEvents(ctx context.Context, competitionID string) ([]*models.Event, error) {
 	url := fmt.Sprintf("%s/competitions/%s/matches?token=%s&per_page=50", e.baseURL, competitionID, e.apiKey)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	resp, err := e.httpClient.Do(req)
-	if err != nil {
+	if _, err := e.doRequest(ctx, url); err != nil {
 		return nil, fmt.Errorf("fetch events: %w", err)
 	}
-	defer resp.Body.Close()
 
 	// Placeholder: in production, parse Entity Sports response into models.Event
 	e.logger.InfoContext(ctx, "fetched Entity Sports events", "competition", competitionID)
@@ -232,15 +240,9 @@ func (e *EntitySportsProvider) FetchMarketsByEvent(ctx context.Context, eventID 
 	fmt.Sscanf(eventID, "es-%d", &matchID)
 
 	url := fmt.Sprintf("%s/matches/%d/odds?token=%s", e.baseURL, matchID, e.apiKey)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	resp, err := e.httpClient.Do(req)
-	if err != nil {
+	if _, err := e.doRequest(ctx, url); err != nil {
 		return nil, fmt.Errorf("fetch event markets: %w", err)
 	}
-	defer resp.Body.Close()
 
 	// Placeholder: in production, parse Entity Sports response into models.Market
 	e.logger.InfoContext(ctx, "fetched Entity Sports event markets", "event", eventID)

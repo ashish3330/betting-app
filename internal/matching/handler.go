@@ -11,6 +11,7 @@ import (
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
 	"github.com/lotus-exchange/lotus-exchange/internal/wallet"
+	"github.com/lotus-exchange/lotus-exchange/pkg/httputil"
 )
 
 type Handler struct {
@@ -36,12 +37,12 @@ func (h *Handler) PlaceBet(w http.ResponseWriter, r *http.Request) {
 
 	var req models.PlaceBetRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	if err := req.Validate(); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		httputil.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -58,7 +59,7 @@ func (h *Handler) PlaceBet(w http.ResponseWriter, r *http.Request) {
 	// Hold the full amount before placing the order
 	// Use a temporary bet ID for the hold; we'll get the real one from PlaceAndMatch
 	if err := h.wallet.HoldFunds(r.Context(), userID, holdAmount, fmt.Sprintf("pre:%s:%s", req.MarketID, req.ClientRef)); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		httputil.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -70,7 +71,7 @@ func (h *Handler) PlaceBet(w http.ResponseWriter, r *http.Request) {
 			h.logger.ErrorContext(r.Context(), "failed to release funds after PlaceAndMatch failure",
 				"user_id", userID, "amount", holdAmount, "error", releaseErr)
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -93,7 +94,7 @@ func (h *Handler) PlaceBet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	httputil.WriteJSON(w, http.StatusOK, result)
 }
 
 func (h *Handler) CancelBet(w http.ResponseWriter, r *http.Request) {
@@ -102,7 +103,7 @@ func (h *Handler) CancelBet(w http.ResponseWriter, r *http.Request) {
 	side := models.BetSide(r.URL.Query().Get("side"))
 
 	if marketID == "" || (side != models.BetSideBack && side != models.BetSideLay) {
-		writeError(w, http.StatusBadRequest, "market_id and valid side required")
+		httputil.WriteError(w, http.StatusBadRequest, "market_id and valid side required")
 		return
 	}
 
@@ -113,10 +114,10 @@ func (h *Handler) CancelBet(w http.ResponseWriter, r *http.Request) {
 	cancelled, err := h.engine.CancelOrder(r.Context(), marketID, betID, side, userID)
 	if err != nil {
 		if strings.Contains(err.Error(), "belongs to another user") {
-			writeError(w, http.StatusForbidden, "you do not own this order")
+			httputil.WriteError(w, http.StatusForbidden, "you do not own this order")
 			return
 		}
-		writeError(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 
@@ -134,7 +135,7 @@ func (h *Handler) CancelBet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"message": "order cancelled", "bet_id": betID})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "order cancelled", "bet_id": betID})
 }
 
 func (h *Handler) GetOrderBook(w http.ResponseWriter, r *http.Request) {
@@ -142,23 +143,13 @@ func (h *Handler) GetOrderBook(w http.ResponseWriter, r *http.Request) {
 
 	backs, lays, err := h.engine.GetOrderBook(r.Context(), marketID, 5)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{
 		"market_id": marketID,
 		"back":      backs,
 		"lay":       lays,
 	})
-}
-
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
-}
-
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
 }
