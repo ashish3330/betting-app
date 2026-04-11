@@ -188,6 +188,11 @@ func runMigrations(log *slog.Logger) error {
 		`ALTER TABLE betting.audit_log ADD COLUMN IF NOT EXISTS username TEXT DEFAULT ''`,
 		`ALTER TABLE betting.audit_log ADD COLUMN IF NOT EXISTS details TEXT DEFAULT ''`,
 		`ALTER TABLE betting.audit_log ADD COLUMN IF NOT EXISTS ip TEXT DEFAULT ''`,
+		// dbAddAudit also writes entity_type/entity_id (legacy schema columns).
+		// Without these every audit insert silently fails with 42703 and the
+		// audit trail vanishes — same class as the display_side bug.
+		`ALTER TABLE betting.audit_log ADD COLUMN IF NOT EXISTS entity_type TEXT DEFAULT ''`,
+		`ALTER TABLE betting.audit_log ADD COLUMN IF NOT EXISTS entity_id TEXT DEFAULT ''`,
 		// Age verification — required for any regulated market.
 		`ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS date_of_birth DATE`,
 		// KYC status — gates withdrawals.

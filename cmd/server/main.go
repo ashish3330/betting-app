@@ -686,7 +686,15 @@ func generateToken(u *User, ttl time.Duration) string {
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
-	s, _ := token.SignedString(store.PrivateKey)
+	s, err := token.SignedString(store.PrivateKey)
+	if err != nil {
+		// Hard failure: previously this dropped a silent empty string into
+		// the response and the client got "Bearer " back. Log loudly so the
+		// outage is visible; the empty string still triggers the caller's
+		// nil/empty checks (writeErr / refusal at the use site).
+		logger.Error("token signing failed", "user_id", u.ID, "error", err)
+		return ""
+	}
 	return s
 }
 
@@ -1064,7 +1072,10 @@ func handleRefresh(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RefreshToken string `json:"refresh_token"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "invalid request body")
+		return
+	}
 
 	store.refreshMu.Lock()
 	userID, ok := store.refreshTokens[req.RefreshToken]
@@ -1867,7 +1878,10 @@ func handleTransferCredit(w http.ResponseWriter, r *http.Request) {
 		ToUserID   int64   `json:"to_user_id"`
 		Amount     float64 `json:"amount"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "invalid request body")
+		return
+	}
 	if req.Amount <= 0 {
 		writeErr(w, 400, "amount must be positive")
 		return
@@ -1963,7 +1977,14 @@ func handleCreateCasinoSession(w http.ResponseWriter, r *http.Request) {
 		GameType   string `json:"game_type"`
 		ProviderID string `json:"provider_id"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "invalid request body")
+		return
+	}
+	if req.GameType == "" || req.ProviderID == "" {
+		writeErr(w, 400, "game_type and provider_id are required")
+		return
+	}
 	sess := store.CreateCasinoSession(uid, req.GameType, req.ProviderID)
 	logger.Info("casino session created", "id", sess.ID, "user", uid, "game", req.GameType)
 	writeJSON(w, 200, sess)
@@ -2015,7 +2036,10 @@ func handleUPIDeposit(w http.ResponseWriter, r *http.Request) {
 		Amount float64 `json:"amount"`
 		UPIID  string  `json:"upi_id"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "invalid request body")
+		return
+	}
 	if req.Amount < 100 || req.Amount > 1000000 {
 		writeErr(w, 400, "amount must be between 100 and 1,000,000")
 		return
@@ -2047,7 +2071,21 @@ func handleCryptoDeposit(w http.ResponseWriter, r *http.Request) {
 		Currency string  `json:"currency"`
 		Wallet   string  `json:"wallet_address"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "invalid request body")
+		return
+	}
+	// Same bounds as UPI deposit. Previously this handler accepted any
+	// amount including zero, negative, NaN, and 1e9 — money created from
+	// nothing once an agent confirmed it.
+	if req.Amount < 100 || req.Amount > 1000000 {
+		writeErr(w, 400, "amount must be between 100 and 1,000,000")
+		return
+	}
+	if req.Currency == "" || req.Wallet == "" {
+		writeErr(w, 400, "currency and wallet_address are required")
+		return
+	}
 	tx := store.CreatePaymentTx(uid, "deposit", "crypto", req.Amount, req.Currency, "", req.Wallet)
 	if useDB() {
 		dbSavePaymentTx(tx)
@@ -2097,7 +2135,13 @@ func isKYCVerified(userID int64) bool {
 // the same method. If they have no completed deposits at all, blocks.
 func isWithdrawalMethodAllowed(userID int64, method string) bool {
 	if !useDB() {
-		return true // dev mode only
+		// AML must fail closed in every mode. Allowing all methods in
+		// dev mode is acceptable only when DATABASE_URL is unset on a
+		// developer workstation; in production we never want this branch
+		// to silently green-light cross-method withdrawals. The check
+		// remains present so prod still hits the real query path below.
+		logger.Warn("withdrawal method check skipped — db not available", "user_id", userID)
+		return false
 	}
 	if method == "" {
 		return false
@@ -2123,7 +2167,18 @@ func handleWithdraw(w http.ResponseWriter, r *http.Request) {
 		UPIID  string  `json:"upi_id"`
 		Wallet string  `json:"wallet_address"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "invalid request body")
+		return
+	}
+	if req.Amount <= 0 {
+		writeErr(w, 400, "amount must be positive")
+		return
+	}
+	if req.Method == "" {
+		writeErr(w, 400, "method is required")
+		return
+	}
 	u := store.GetUser(uid)
 	if u == nil || u.Available() < req.Amount {
 		writeErr(w, 400, "insufficient balance")
@@ -2312,7 +2367,16 @@ func handleSettleMarket(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		WinnerSelectionID int64 `json:"winner_selection_id"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "invalid request body")
+		return
+	}
+	if req.WinnerSelectionID == 0 {
+		// Settling with selection_id 0 silently marks every back bet as a
+		// loser. Force the operator to be explicit.
+		writeErr(w, 400, "winner_selection_id is required")
+		return
+	}
 	settled, paidOut := store.SettleMarket(marketID, req.WinnerSelectionID)
 	store.AddAudit(getUserID(r), r.Header.Get("X-Username"), "settlement",
 		fmt.Sprintf("market=%s winner=%d bets=%d payout=%.2f", marketID, req.WinnerSelectionID, settled, paidOut), r.RemoteAddr)
@@ -2496,8 +2560,11 @@ func handlePanelCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "username, password, and role are required")
 		return
 	}
-	if len(req.Password) < 6 {
-		writeErr(w, 400, "password must be at least 6 characters")
+	// Same complexity rules as public registration. Previously this path
+	// only checked length>=6, letting agents create sub-users with weak
+	// passwords that public registration would reject.
+	if err := ValidatePassword(req.Password); err != nil {
+		writeErr(w, 400, err.Error())
 		return
 	}
 
@@ -2533,7 +2600,10 @@ func handlePanelCreditTransfer(w http.ResponseWriter, r *http.Request) {
 		ToUserID int64   `json:"to_user_id"`
 		Amount   float64 `json:"amount"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "invalid request body")
+		return
+	}
 
 	if req.Amount <= 0 {
 		writeErr(w, 400, "amount must be positive")
@@ -2583,7 +2653,10 @@ func handlePanelUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Status string `json:"status"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "invalid request body")
+		return
+	}
 
 	if req.Status != "active" && req.Status != "suspended" && req.Status != "blocked" {
 		writeErr(w, 400, "status must be active, suspended, or blocked")
