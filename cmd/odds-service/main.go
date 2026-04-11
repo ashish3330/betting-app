@@ -373,6 +373,7 @@ func main() {
 		middleware.MetricsMiddleware("odds-service"),
 		middleware.RequestLogger(log),
 		middleware.SecurityHeaders,
+		middleware.EncryptionMiddleware,
 	)(mux)
 
 	srv := &http.Server{

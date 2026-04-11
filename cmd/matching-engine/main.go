@@ -169,7 +169,13 @@ func main() {
 		Port:        port,
 		Logger:      log,
 	}
-	if err := service.Run(ctx, runtimeCfg, service.DefaultMiddleware("matching-engine", log)(mux)); err != nil {
+	// Encryption middleware unwraps the AES-GCM envelope on POST/PUT
+	// bodies. Without it the matching-engine sees opaque ciphertext
+	// when the gateway forwards bet placements from the encryption-aware
+	// frontend, and req.Validate() reports every field missing.
+	base := service.DefaultMiddleware("matching-engine", log)
+	extra := middleware.EncryptionMiddleware
+	if err := service.Run(ctx, runtimeCfg, base(extra(mux))); err != nil {
 		log.Error("service failed", "err", err)
 		os.Exit(1)
 	}

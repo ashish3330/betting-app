@@ -368,7 +368,7 @@ func main() {
 		Port:        port,
 		Logger:      log,
 	}
-	if err := service.Run(ctx, runtimeCfg, service.DefaultMiddleware("wallet-service", log)(mux)); err != nil {
+	if err := service.Run(ctx, runtimeCfg, service.DefaultMiddleware("wallet-service", log)(middleware.EncryptionMiddleware(mux))); err != nil {
 		log.Error("service failed", "err", err)
 		os.Exit(1)
 	}

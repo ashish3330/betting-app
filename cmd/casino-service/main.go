@@ -108,6 +108,7 @@ func main() {
 		middleware.CORSWithWhitelist(getStringSliceEnv("CORS_ORIGINS", []string{"http://localhost:3000"})),
 		middleware.MaxBodySize(int64(getIntEnv("MAX_BODY_SIZE_MB", 1))*1024*1024),
 		middleware.PerIPRateLimiter(getIntEnv("RATE_LIMIT_RPS", 100), getIntEnv("RATE_LIMIT_BURST", 200)),
+		middleware.EncryptionMiddleware,
 	)
 
 	runtimeCfg := service.Config{
