@@ -1513,7 +1513,10 @@ func (s *Store) SettleMarket(marketID string, winnerSelectionID int64) (int, flo
 		u.Balance = roundMoney(u.Balance + pnl - commission)
 
 		now := time.Now().Format(time.RFC3339)
-		s.addLedger(bet.UserID, bet.MatchedStake, "release", "release:"+bet.ID, bet.ID, now)
+		// Ledger MUST mirror the exposure release amount, not the raw stake.
+		// For lay bets that's stake*(price-1); using MatchedStake here would
+		// leave the audit trail unreconcilable against balance+exposure.
+		s.addLedger(bet.UserID, exposureToRelease, "release", "release:"+bet.ID, bet.ID, now)
 		s.addLedger(bet.UserID, pnl, "settlement", "settlement:"+bet.ID, bet.ID, now)
 		if commission > 0 {
 			s.addLedger(bet.UserID, -commission, "commission", "commission:"+bet.ID, bet.ID, now)

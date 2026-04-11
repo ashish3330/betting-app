@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -3010,29 +3011,53 @@ func handleCashoutAccept(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Calculate cashout
+	// Calculate cashout offer (95% of position value, 10% house margin on
+	// back winnings). Same formula as handleCashoutOffer so the user pays
+	// what they were quoted.
 	cashout := bet.MatchedStake * 0.95
 	if bet.Side == "back" {
 		cashout = bet.MatchedStake * (bet.Price - 1) * 0.90
 	}
 
+	// Compute exposure release using the same liability formula as
+	// SettleMarket. CRITICAL: for lay bets the held exposure is
+	// MatchedStake*(price-1), NOT just MatchedStake — using the wrong
+	// value here permanently leaks exposure (P1.4-class bug, fixed
+	// previously for settle/void but missed for cashout).
+	exposureToRelease := bet.MatchedStake
+	if bet.Side == "lay" {
+		exposureToRelease = roundMoney(bet.MatchedStake * (bet.Price - 1))
+	}
+
 	// Settle the bet
 	bet.Status = "settled"
-	bet.Profit = cashout
+	bet.Profit = roundMoney(cashout)
 
 	u := store.users[uid]
 	if u != nil {
-		u.Exposure -= bet.MatchedStake
-		if u.Exposure < 0 {
-			u.Exposure = 0
-		}
-		u.Balance += cashout
+		u.Exposure = roundMoney(math.Max(u.Exposure-exposureToRelease, 0))
+		u.Balance = roundMoney(u.Balance + cashout)
 	}
 
+	// Keep the per-user-per-market exposure index in sync. Without this
+	// the navbar exposure breakdown and future bet placements see stale
+	// liability for this market.
+	store.releaseExposureLocked(bet)
+
 	now := time.Now().Format(time.RFC3339)
-	store.addLedger(uid, bet.MatchedStake, "release", "cashout-release:"+betID, betID, now)
+	// Ledger release amount mirrors actual exposure released (lay-aware)
+	// so the audit trail reconciles against balance+exposure.
+	store.addLedger(uid, exposureToRelease, "release", "cashout-release:"+betID, betID, now)
 	store.addLedger(uid, cashout, "settlement", "cashout:"+betID, betID, now)
 	store.mu.Unlock()
+
+	// Persist to DB so the cashout survives restart. Was previously a pure
+	// in-memory mutation, meaning a server bounce reverted the user's
+	// balance and showed the bet as "matched" again.
+	if useDB() && u != nil {
+		dbUpdateBet(bet)
+		dbUpdateBalance(uid, u.Balance, u.Exposure)
+	}
 
 	// Audit
 	store.AddAudit(uid, "", "cashout_accepted", fmt.Sprintf("bet=%s amount=%.2f", betID, cashout), "")
