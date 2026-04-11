@@ -3,7 +3,7 @@
 export default function WhatsAppWidget() {
   const phone = process.env.NEXT_PUBLIC_WHATSAPP_PHONE || "919999999999";
   const message = encodeURIComponent(
-    "Hi, I need help with my 3XBet account"
+    "Hi, I need help with my Lotus Exchange account"
   );
 
   return (

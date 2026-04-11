@@ -11,10 +11,10 @@ export default function TermsPage() {
       {/* 1. Introduction */}
       <Section num={1} title="Introduction">
         <p>
-          Welcome to 3XBet (&quot;the Platform&quot;, &quot;we&quot;, &quot;us&quot;, &quot;our&quot;). By
+          Welcome to Lotus Exchange (&quot;the Platform&quot;, &quot;we&quot;, &quot;us&quot;, &quot;our&quot;). By
           accessing or using our services, you agree to be bound by these Terms &amp; Conditions. If you
           do not agree, you must not use the Platform. These terms constitute a legally binding agreement
-          between you and 3XBet.
+          between you and Lotus Exchange.
         </p>
       </Section>
 
@@ -26,7 +26,7 @@ export default function TermsPage() {
           <li><strong>&quot;Lay Bet&quot;</strong> means a bet placed against an outcome occurring.</li>
           <li><strong>&quot;Exchange&quot;</strong> means the peer-to-peer betting marketplace operated by us.</li>
           <li><strong>&quot;Market&quot;</strong> means a specific betting event or proposition listed on the Exchange.</li>
-          <li><strong>&quot;Commission&quot;</strong> means the fee charged by 3XBet on net winnings.</li>
+          <li><strong>&quot;Commission&quot;</strong> means the fee charged by Lotus Exchange on net winnings.</li>
           <li><strong>&quot;KYC&quot;</strong> means Know Your Customer verification procedures.</li>
           <li><strong>&quot;Wallet&quot;</strong> means your digital balance held on the Platform.</li>
         </ul>
@@ -59,7 +59,7 @@ export default function TermsPage() {
       {/* 5. Betting Rules */}
       <Section num={5} title="Betting Rules">
         <p className="mb-2">
-          3XBet operates as a peer-to-peer betting exchange. Unlike traditional bookmakers, you
+          Lotus Exchange operates as a peer-to-peer betting exchange. Unlike traditional bookmakers, you
           bet against other users.
         </p>
         <ul className="list-disc list-inside space-y-1">
@@ -86,7 +86,7 @@ export default function TermsPage() {
       {/* 7. Commission */}
       <Section num={7} title="Commission">
         <ul className="list-disc list-inside space-y-1">
-          <li>3XBet charges a commission on net winnings per market.</li>
+          <li>Lotus Exchange charges a commission on net winnings per market.</li>
           <li>The standard commission rate is displayed in your account settings.</li>
           <li>Commission is deducted automatically upon market settlement.</li>
           <li>Commission rates may vary by sport, market type, or account level.</li>
@@ -142,7 +142,7 @@ export default function TermsPage() {
           terms shall be subject to the exclusive jurisdiction of the competent courts.
         </p>
         <p className="mt-2">
-          By using 3XBet, you acknowledge that you have read, understood, and agreed to these
+          By using Lotus Exchange, you acknowledge that you have read, understood, and agreed to these
           Terms &amp; Conditions in their entirety.
         </p>
       </Section>

@@ -49,7 +49,7 @@ export default function ResponsibleGamblingPage() {
             risk and that the odds are never guaranteed.
           </p>
           <p>
-            At 3XBet, we provide tools and resources to help you gamble responsibly. We
+            At Lotus Exchange, we provide tools and resources to help you gamble responsibly. We
             encourage all our users to set limits, take breaks, and seek help if gambling stops being
             fun.
           </p>

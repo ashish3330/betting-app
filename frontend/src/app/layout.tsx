@@ -19,7 +19,7 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "3XBet - Premium Betting Exchange",
+  title: "Lotus Exchange - Premium Betting Exchange",
   description:
     "Back and Lay on Cricket, Football, Tennis and more. Real-time odds, live scores, and instant settlements.",
   manifest: "/manifest.json",
@@ -30,7 +30,7 @@ export const metadata: Metadata = {
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "3XBet",
+    title: "Lotus Exchange",
   },
 };
 

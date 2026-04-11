@@ -59,7 +59,7 @@ export default function Footer() {
         {/* Copyright */}
         <div className="text-center">
           <p className="text-[10px] text-gray-500">
-            &copy; 2026 3XBet. All rights reserved.
+            &copy; 2026 Lotus Exchange. All rights reserved.
           </p>
         </div>
       </div>

@@ -10,12 +10,129 @@ import Footer from "@/components/Footer";
 import { ToastProvider } from "@/components/Toast";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import OfflineBanner from "@/components/OfflineBanner";
-import GlobalBetSlip from "@/components/GlobalBetSlip";
-import MobileNav from "@/components/MobileNav";
+import dynamic from "next/dynamic";
+
+// Render the bet slip and mobile nav client-side only to avoid any
+// SSR-time crashes from hooks that touch browser APIs.
+const GlobalBetSlip = dynamic(() => import("@/components/GlobalBetSlip"), { ssr: false });
+const MobileNav = dynamic(() => import("@/components/MobileNav"), { ssr: false });
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
-import { api, Competition } from "@/lib/api";
+import { api, Competition, Sport } from "@/lib/api";
+
+// Default sports used when the API is unreachable — keeps the sidebar
+// populated during outages and on first paint.
+const FALLBACK_SPORTS: { sport: string; label: string }[] = [
+  { sport: "cricket", label: "Cricket" },
+  { sport: "football", label: "Football" },
+  { sport: "tennis", label: "Tennis" },
+  { sport: "basketball", label: "Basketball" },
+  { sport: "ice_hockey", label: "Ice Hockey" },
+  { sport: "baseball", label: "Baseball" },
+  { sport: "boxing", label: "Boxing" },
+  { sport: "mma", label: "MMA" },
+  { sport: "kabaddi", label: "Kabaddi" },
+  { sport: "horse_racing", label: "Horse Racing" },
+];
+
+// Simple, intentional inline SVG icons keyed by sport slug. Any unknown
+// sport falls back to a generic trophy icon.
+function SportIcon({ sport, className = "w-4 h-4" }: { sport: string; className?: string }) {
+  const common = {
+    className,
+    fill: "none" as const,
+    stroke: "currentColor" as const,
+    strokeWidth: 1.8,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    viewBox: "0 0 24 24",
+  };
+  switch (sport) {
+    case "cricket":
+      return (
+        <svg {...common}>
+          <circle cx="9" cy="15" r="4" />
+          <path d="M9 11.5v.01M11 13.5v.01M7 16.5v.01" />
+          <path d="M13 11l6-6M14 4h5v5" />
+        </svg>
+      );
+    case "football":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 3l3 4-1 5-4 0-1-5z" />
+          <path d="M12 12l4 3M12 12l-4 3M12 12V7" />
+        </svg>
+      );
+    case "tennis":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M4 6c4 2 7 5 7 9s-3 5-6 6" />
+          <path d="M20 18c-4-2-7-5-7-9s3-5 6-6" />
+        </svg>
+      );
+    case "basketball":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M3 12h18M12 3v18M5 6c3 3 3 9 0 12M19 6c-3 3-3 9 0 12" />
+        </svg>
+      );
+    case "ice_hockey":
+      return (
+        <svg {...common}>
+          <ellipse cx="12" cy="17" rx="7" ry="2" />
+          <path d="M5 17V15h14v2M12 15V5M9 5h6" />
+        </svg>
+      );
+    case "baseball":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M6 7c2 1 3 3 3 5s-1 4-3 5M18 7c-2 1-3 3-3 5s1 4 3 5" />
+        </svg>
+      );
+    case "boxing":
+      return (
+        <svg {...common}>
+          <path d="M7 4h8a2 2 0 012 2v5a3 3 0 01-3 3H9l-1 6H6l1-6H5a1 1 0 01-1-1V7a3 3 0 013-3z" />
+          <path d="M9 10h5" />
+        </svg>
+      );
+    case "mma":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M8 9v6M16 9v6M8 12h8M9 16l3-2 3 2" />
+        </svg>
+      );
+    case "kabaddi":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="5" r="2" />
+          <path d="M12 7v6M9 10l3-1 3 1M9 20l3-7 3 7M6 14h12" />
+        </svg>
+      );
+    case "horse_racing":
+      return (
+        <svg {...common}>
+          <path d="M5 18c1-5 4-8 9-8 3 0 5 2 5 4v4" />
+          <path d="M7 18v2M16 18v2M14 6l3-2M14 6l1 3" />
+          <circle cx="14" cy="6" r="0.5" fill="currentColor" />
+        </svg>
+      );
+    default:
+      return (
+        <svg {...common}>
+          <path d="M8 4h8v3a4 4 0 01-8 0V4z" />
+          <path d="M6 5H4v2a3 3 0 003 3M18 5h2v2a3 3 0 01-3 3" />
+          <path d="M10 14h4v3h-4zM8 20h8" />
+        </svg>
+      );
+  }
+}
 
 export default function ClientLayout({
   children,
@@ -24,6 +141,26 @@ export default function ClientLayout({
 }) {
   const pathname = usePathname();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sports, setSports] = useState<Sport[] | null>(null);
+
+  // Load the sports list once — sidebar will fall back to hardcoded
+  // list if the API fails or returns an empty payload.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .fetchSports()
+      .then((data) => {
+        if (cancelled) return;
+        if (Array.isArray(data) && data.length > 0) setSports(data);
+        else setSports([]);
+      })
+      .catch(() => {
+        if (!cancelled) setSports([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Close sidebar on any navigation (pathname or search params)
   useEffect(() => {
@@ -75,38 +212,21 @@ export default function ClientLayout({
       />
       <OfflineBanner />
 
-      {/* Scrolling announcement ticker — like playzone9 */}
-      <div className="bg-[#1a6fb5] overflow-hidden h-7 flex items-center relative dark-section">
-        <div className="animate-marquee whitespace-nowrap flex items-center gap-8 text-white text-[12px] font-medium">
-          <span>🚀🎉 The Game Begins Now!</span>
-          <span>🏆 IPL 2026 is Live — Place your bets now!</span>
-          <span>💰 Instant deposits via UPI</span>
-          <span>🎰 New Casino Games Added</span>
-          <span>⚡ Best odds guaranteed</span>
-          <span>🏏 Live Cricket Betting 24/7</span>
-          <span>🔥 Welcome Bonus — Deposit Now!</span>
-          <span>🚀🎉 The Game Begins Now!</span>
-          <span>🏆 IPL 2026 is Live — Place your bets now!</span>
-          <span>💰 Instant deposits via UPI</span>
-          <span>🎰 New Casino Games Added</span>
-          <span>⚡ Best odds guaranteed</span>
-        </div>
-      </div>
-
-      {/* Live match ticker — scrolling match names like playzone9 */}
-      <div className="bg-[#2a2d3a] overflow-hidden h-8 flex items-center border-b border-gray-800/40 dark-section">
-        <div className="animate-marquee whitespace-nowrap flex items-center gap-6 text-[11px]">
-          {/* These would be dynamic in production */}
-          <span className="flex items-center gap-1.5 text-gray-300">🏏 <span className="text-white font-medium">Indian Premier League</span></span>
-          <span className="flex items-center gap-1.5 text-gray-300">⚽ <span className="text-white font-medium">Arsenal v Chelsea</span> <span className="text-green-400 text-[10px]">LIVE</span></span>
-          <span className="flex items-center gap-1.5 text-gray-300">🎾 <span className="text-white font-medium">Djokovic v Alcaraz</span> <span className="text-green-400 text-[10px]">LIVE</span></span>
-          <span className="flex items-center gap-1.5 text-gray-300">🏀 <span className="text-white font-medium">Lakers v Celtics</span></span>
-          <span className="flex items-center gap-1.5 text-gray-300">🥊 <span className="text-white font-medium">Fury v Usyk III</span></span>
-          <span className="flex items-center gap-1.5 text-gray-300">🏏 <span className="text-white font-medium">MI v CSK</span> <span className="text-green-400 text-[10px]">LIVE</span></span>
-          <span className="flex items-center gap-1.5 text-gray-300">⚽ <span className="text-white font-medium">Man Utd v Liverpool</span></span>
-          <span className="flex items-center gap-1.5 text-gray-300">🏏 <span className="text-white font-medium">Indian Premier League</span></span>
-          <span className="flex items-center gap-1.5 text-gray-300">⚽ <span className="text-white font-medium">Arsenal v Chelsea</span> <span className="text-green-400 text-[10px]">LIVE</span></span>
-          <span className="flex items-center gap-1.5 text-gray-300">🎾 <span className="text-white font-medium">Djokovic v Alcaraz</span></span>
+      {/* Slim announcement bar — single evergreen ticker, pauses on hover */}
+      <div className="bg-[#1a6fb5] overflow-hidden h-6 flex items-center relative dark-section border-b border-black/10">
+        <div className="animate-marquee whitespace-nowrap flex items-center gap-8 text-white text-[11px] font-medium hover:[animation-play-state:paused]">
+          <span>Welcome to Lotus Exchange — Trusted by millions</span>
+          <span>Instant deposits via UPI &amp; Net Banking</span>
+          <span>Best odds guaranteed across all sports</span>
+          <span>24x7 customer support</span>
+          <span>Welcome bonus on your first deposit</span>
+          <span>Live streaming on featured markets</span>
+          <span>Welcome to Lotus Exchange — Trusted by millions</span>
+          <span>Instant deposits via UPI &amp; Net Banking</span>
+          <span>Best odds guaranteed across all sports</span>
+          <span>24x7 customer support</span>
+          <span>Welcome bonus on your first deposit</span>
+          <span>Live streaming on featured markets</span>
         </div>
       </div>
 
@@ -146,35 +266,52 @@ export default function ClientLayout({
                 </button>
               </div>
 
-              {/* Sports Section — expandable with leagues */}
+              {/* Sports Section — expandable with leagues, driven by API with fallback */}
               <SidebarSection title="Sports">
-                <SportTree sport="cricket" label="Cricket" icon="🏏" pathname={pathname} />
-                <SportTree sport="football" label="Football" icon="⚽" pathname={pathname} />
-                <SportTree sport="tennis" label="Tennis" icon="🎾" pathname={pathname} />
-                <SportTree sport="basketball" label="Basketball" icon="🏀" pathname={pathname} />
-                <SportTree sport="ice_hockey" label="Ice Hockey" icon="🏒" pathname={pathname} />
-                <SportTree sport="baseball" label="Baseball" icon="⚾" pathname={pathname} />
-                <SportTree sport="boxing" label="Boxing" icon="🥊" pathname={pathname} />
-                <SportTree sport="mma" label="MMA" icon="🤼" pathname={pathname} />
-                <SportTree sport="kabaddi" label="Kabaddi" icon="🤾" pathname={pathname} />
-                <SportTree sport="horse_racing" label="Horse Racing" icon="🏇" pathname={pathname} />
+                {(() => {
+                  const apiSports = (sports && sports.length > 0) ? sports : null;
+                  if (apiSports) {
+                    return apiSports.map((s) => {
+                      const slug = (s.slug || s.id || "").replace(/-/g, "_");
+                      const label = s.name || slug;
+                      return (
+                        <SportTree
+                          key={s.id || slug}
+                          sport={slug}
+                          label={label}
+                          liveCount={s.active_events ?? 0}
+                          pathname={pathname}
+                        />
+                      );
+                    });
+                  }
+                  return FALLBACK_SPORTS.map((s) => (
+                    <SportTree
+                      key={s.sport}
+                      sport={s.sport}
+                      label={s.label}
+                      liveCount={0}
+                      pathname={pathname}
+                    />
+                  ));
+                })()}
               </SidebarSection>
 
               {/* Casino Section */}
               <SidebarSection title="Casino">
-                <SidebarLink href="/casino" icon="🎰" label="All Games" active={pathname === "/casino"} />
-                <SidebarLink href="/casino/live_casino" icon="🔴" label="Live Casino" active={pathname === "/casino/live_casino"} />
-                <SidebarLink href="/casino/slots" icon="🎲" label="Slots" active={pathname === "/casino/slots"} />
-                <SidebarLink href="/casino/crash_games" icon="🚀" label="Crash Games" active={pathname === "/casino/crash_games"} />
-                <SidebarLink href="/casino/virtual_sports" icon="🎮" label="Virtual Sports" active={pathname === "/casino/virtual_sports"} />
+                <SidebarLink href="/casino" iconKey="casino-all" label="All Games" active={pathname === "/casino"} />
+                <SidebarLink href="/casino/live_casino" iconKey="casino-live" label="Live Casino" active={pathname === "/casino/live_casino"} />
+                <SidebarLink href="/casino/slots" iconKey="casino-slots" label="Slots" active={pathname === "/casino/slots"} />
+                <SidebarLink href="/casino/crash_games" iconKey="casino-crash" label="Crash Games" active={pathname === "/casino/crash_games"} />
+                <SidebarLink href="/casino/virtual_sports" iconKey="casino-virtual" label="Virtual Sports" active={pathname === "/casino/virtual_sports"} />
               </SidebarSection>
 
               {/* Quick Links */}
               <SidebarSection title="Quick Links">
-                <SidebarLink href="/bets" icon="📋" label="My Bets" active={pathname === "/bets"} />
-                <SidebarLink href="/wallet" icon="💰" label="Wallet" active={pathname === "/wallet"} />
-                <SidebarLink href="/account" icon="👤" label="Account" active={pathname?.startsWith("/account") || false} />
-                <SidebarLink href="/account/referral" icon="🎁" label="Referral" active={pathname === "/account/referral"} />
+                <SidebarLink href="/bets" iconKey="bets" label="My Bets" active={pathname === "/bets"} />
+                <SidebarLink href="/wallet" iconKey="wallet" label="Wallet" active={pathname === "/wallet"} />
+                <SidebarLink href="/account" iconKey="account" label="Account" active={pathname?.startsWith("/account") || false} />
+                <SidebarLink href="/account/referral" iconKey="referral" label="Referral" active={pathname === "/account/referral"} />
               </SidebarSection>
             </div>
           </aside>
@@ -218,14 +355,100 @@ function SidebarSection({ title, children }: { title: string; children: React.Re
   );
 }
 
+function GenericIcon({ iconKey, className = "w-4 h-4" }: { iconKey: string; className?: string }) {
+  const common = {
+    className,
+    fill: "none" as const,
+    stroke: "currentColor" as const,
+    strokeWidth: 1.8,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    viewBox: "0 0 24 24",
+  };
+  switch (iconKey) {
+    case "casino-all":
+      return (
+        <svg {...common}>
+          <rect x="3" y="3" width="8" height="8" rx="1" />
+          <rect x="13" y="3" width="8" height="8" rx="1" />
+          <rect x="3" y="13" width="8" height="8" rx="1" />
+          <rect x="13" y="13" width="8" height="8" rx="1" />
+        </svg>
+      );
+    case "casino-live":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="4" fill="currentColor" stroke="none" />
+          <circle cx="12" cy="12" r="9" />
+        </svg>
+      );
+    case "casino-slots":
+      return (
+        <svg {...common}>
+          <rect x="3" y="5" width="18" height="14" rx="2" />
+          <path d="M8 9v6M12 9v6M16 9v6" />
+        </svg>
+      );
+    case "casino-crash":
+      return (
+        <svg {...common}>
+          <path d="M4 20l6-8 4 4 6-10" />
+          <path d="M20 6h-4M20 6v4" />
+        </svg>
+      );
+    case "casino-virtual":
+      return (
+        <svg {...common}>
+          <rect x="2" y="7" width="20" height="10" rx="3" />
+          <path d="M7 12h3M8.5 10.5v3M15 11v.01M17 13v.01" />
+        </svg>
+      );
+    case "bets":
+      return (
+        <svg {...common}>
+          <rect x="4" y="3" width="16" height="18" rx="2" />
+          <path d="M8 7h8M8 11h8M8 15h5" />
+        </svg>
+      );
+    case "wallet":
+      return (
+        <svg {...common}>
+          <path d="M3 10h18M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2z" />
+          <circle cx="17" cy="13" r="1" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case "account":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="8" r="4" />
+          <path d="M4 20c0-4 4-6 8-6s8 2 8 6" />
+        </svg>
+      );
+    case "referral":
+      return (
+        <svg {...common}>
+          <rect x="3" y="8" width="18" height="5" rx="1" />
+          <path d="M12 8v13M3 13v7a1 1 0 001 1h16a1 1 0 001-1v-7" />
+          <path d="M12 8c-2-3-6-3-6-1s2 1 6 1zM12 8c2-3 6-3 6-1s-2 1-6 1z" />
+        </svg>
+      );
+    default:
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="9" />
+        </svg>
+      );
+  }
+}
+
 function SidebarLink({
   href,
-  icon,
+  iconKey,
   label,
   active,
 }: {
   href: string;
-  icon: string;
+  iconKey: string;
   label: string;
   active: boolean;
 }) {
@@ -238,7 +461,9 @@ function SidebarLink({
           : "text-gray-400 hover:text-white hover:bg-white/5"
       }`}
     >
-      <span className="text-sm w-5 text-center">{icon}</span>
+      <span className="w-5 flex items-center justify-center">
+        <GenericIcon iconKey={iconKey} />
+      </span>
       {label}
     </Link>
   );
@@ -249,12 +474,12 @@ function SidebarLink({
 function SportTree({
   sport,
   label,
-  icon,
+  liveCount,
   pathname,
 }: {
   sport: string;
   label: string;
-  icon: string;
+  liveCount?: number;
   pathname: string | null;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -297,8 +522,15 @@ function SportTree({
               : "text-gray-400 hover:text-white hover:bg-white/5"
           }`}
         >
-          <span className="text-sm w-5 text-center">{icon}</span>
-          {label}
+          <span className="w-5 flex items-center justify-center">
+            <SportIcon sport={sport} />
+          </span>
+          <span className="flex-1 truncate">{label}</span>
+          {liveCount && liveCount > 0 ? (
+            <span className="text-[9px] font-bold bg-green-500/15 text-green-400 px-1.5 py-0.5 rounded-full leading-none flex-shrink-0">
+              {liveCount}
+            </span>
+          ) : null}
         </Link>
         <button
           onClick={(e) => { e.preventDefault(); e.stopPropagation(); setExpanded(!expanded); }}

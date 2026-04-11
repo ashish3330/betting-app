@@ -48,7 +48,7 @@ export default function ReferralPage() {
   const shareWhatsApp = () => {
     if (!stats) return;
     const message = encodeURIComponent(
-      `Join 3XBet using my referral link and get bonus rewards!\n\n${stats.referral_link}\n\nReferral Code: ${stats.referral_code}`
+      `Join Lotus Exchange using my referral link and get bonus rewards!\n\n${stats.referral_link}\n\nReferral Code: ${stats.referral_code}`
     );
     window.open(`https://wa.me/?text=${message}`, "_blank");
   };

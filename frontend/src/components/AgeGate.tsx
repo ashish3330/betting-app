@@ -54,7 +54,7 @@ export default function AgeGate({ children }: { children: React.ReactNode }) {
 
         <h2 className="text-xl font-bold text-white mb-2">Age Verification Required</h2>
         <p className="text-sm text-gray-400 mb-6">
-          3XBet is an online betting platform. You must be at least 18 years of age to access
+          Lotus Exchange is an online betting platform. You must be at least 18 years of age to access
           this site. Please confirm your age to continue.
         </p>
 

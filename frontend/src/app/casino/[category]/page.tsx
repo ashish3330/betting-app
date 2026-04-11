@@ -2,102 +2,20 @@
 
 import { useToast } from "@/components/Toast";
 import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { api, CasinoGame } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import Link from "next/link";
-
-/* ------------------------------------------------------------------ */
-/*  Category metadata                                                  */
-/* ------------------------------------------------------------------ */
-
-interface CategoryMeta {
-  title: string;
-  description: string;
-}
-
-const CATEGORY_META: Record<string, CategoryMeta> = {
-  live_casino: {
-    title: "Live Casino",
-    description: "Play with real dealers in real-time.",
-  },
-  virtual_sports: {
-    title: "Virtual Sports",
-    description: "Fast-paced virtual sports with instant results.",
-  },
-  virtual: {
-    title: "Virtual Sports",
-    description: "Fast-paced virtual sports with instant results.",
-  },
-  slots: {
-    title: "Slots",
-    description: "Spin the reels on premium slot machines.",
-  },
-  crash: {
-    title: "Crash Games",
-    description: "Cash out before the crash.",
-  },
-  crash_games: {
-    title: "Crash Games",
-    description: "Cash out before the crash.",
-  },
-  card: {
-    title: "Card Games",
-    description: "Classic card games. Poker, Hi-Lo, 32 Card Casino.",
-  },
-  card_games: {
-    title: "Card Games",
-    description: "Classic card games. Poker, Hi-Lo, 32 Card Casino.",
-  },
-};
-
-interface GameItem {
-  id: string;
-  name: string;
-  type: string;
-  provider_id: string;
-  provider_name: string;
-  is_live: boolean;
-  image?: string | null;
-  icon: string;
-  category: string;
-  badge?: "NEW" | "HOT" | null;
-  min_bet?: number;
-}
-
-const ALL_GAMES: GameItem[] = [
-  { id: "teen-patti", name: "Teen Patti", type: "teen_patti", provider_id: "ezugi", provider_name: "Ezugi", is_live: true, image: null, icon: "TP", category: "live_casino", badge: "HOT", min_bet: 100 },
-  { id: "andar-bahar", name: "Andar Bahar", type: "andar_bahar", provider_id: "evolution", provider_name: "Evolution", is_live: true, image: null, icon: "AB", category: "live_casino", badge: "HOT", min_bet: 100 },
-  { id: "dragon-tiger", name: "Dragon Tiger", type: "dragon_tiger", provider_id: "ezugi", provider_name: "Ezugi", is_live: true, image: null, icon: "DT", category: "live_casino", badge: null, min_bet: 50 },
-  { id: "roulette", name: "Auto Roulette", type: "roulette", provider_id: "evolution", provider_name: "Evolution", is_live: true, image: null, icon: "RO", category: "live_casino", badge: null, min_bet: 50 },
-  { id: "baccarat", name: "Baccarat", type: "baccarat", provider_id: "evolution", provider_name: "Evolution", is_live: true, image: null, icon: "BA", category: "live_casino", badge: null, min_bet: 100 },
-  { id: "blackjack-vip", name: "Blackjack VIP", type: "blackjack", provider_id: "evolution", provider_name: "Evolution", is_live: true, image: null, icon: "BJ", category: "live_casino", badge: null, min_bet: 500 },
-  { id: "32-card", name: "32 Card Casino", type: "32_card", provider_id: "ezugi", provider_name: "Ezugi", is_live: true, image: null, icon: "32", category: "card", badge: "NEW", min_bet: 50 },
-  { id: "lucky7", name: "Lucky 7", type: "lucky7", provider_id: "betgames", provider_name: "BetGames", is_live: true, image: null, icon: "L7", category: "card", badge: null, min_bet: 50 },
-  { id: "poker", name: "Casino Hold'em", type: "poker", provider_id: "evolution", provider_name: "Evolution", is_live: true, image: null, icon: "PK", category: "card", badge: null, min_bet: 200 },
-  { id: "hi-lo", name: "Hi-Lo", type: "hi_lo", provider_id: "ezugi", provider_name: "Ezugi", is_live: true, image: null, icon: "HL", category: "card", badge: null, min_bet: 50 },
-  { id: "3card-poker", name: "3 Card Poker", type: "3card_poker", provider_id: "evolution", provider_name: "Evolution", is_live: true, image: null, icon: "3P", category: "card", badge: null, min_bet: 100 },
-  { id: "crash-aviator", name: "Aviator", type: "aviator", provider_id: "betgames", provider_name: "BetGames", is_live: false, image: null, icon: "AV", category: "crash", badge: "HOT", min_bet: 10 },
-  { id: "crash-jetx", name: "JetX", type: "jetx", provider_id: "betgames", provider_name: "BetGames", is_live: false, image: null, icon: "JX", category: "crash", badge: "NEW", min_bet: 10 },
-  { id: "crash-cashcrash", name: "Cash or Crash", type: "cash_crash", provider_id: "evolution", provider_name: "Evolution", is_live: true, image: null, icon: "CC", category: "crash", badge: null, min_bet: 50 },
-  { id: "virtual-cricket", name: "Virtual Cricket", type: "virtual_cricket", provider_id: "tvbet", provider_name: "TVBet", is_live: false, image: null, icon: "VC", category: "virtual", badge: "NEW", min_bet: 20 },
-  { id: "virtual-football", name: "Virtual Football", type: "virtual_football", provider_id: "tvbet", provider_name: "TVBet", is_live: false, image: null, icon: "VF", category: "virtual", badge: null, min_bet: 20 },
-  { id: "virtual-horse", name: "Virtual Horse Racing", type: "virtual_horse", provider_id: "tvbet", provider_name: "TVBet", is_live: false, image: null, icon: "VH", category: "virtual", badge: "NEW", min_bet: 20 },
-  { id: "virtual-greyhound", name: "Virtual Greyhound", type: "virtual_greyhound", provider_id: "tvbet", provider_name: "TVBet", is_live: false, image: null, icon: "VG", category: "virtual", badge: null, min_bet: 20 },
-  { id: "slots-golden", name: "Golden Fortune", type: "slots_golden", provider_id: "superspade", provider_name: "Super Spade", is_live: false, image: null, icon: "GF", category: "slots", badge: null, min_bet: 10 },
-  { id: "slots-treasure", name: "Treasure Hunt", type: "slots_treasure", provider_id: "superspade", provider_name: "Super Spade", is_live: false, image: null, icon: "TH", category: "slots", badge: "NEW", min_bet: 10 },
-  { id: "slots-megamoolah", name: "Mega Moolah", type: "slot_mega", provider_id: "superspade", provider_name: "Super Spade", is_live: false, image: null, icon: "MM", category: "slots", badge: "HOT", min_bet: 10 },
-  { id: "slots-bonanza", name: "Sweet Bonanza", type: "slot_bonanza", provider_id: "superspade", provider_name: "Super Spade", is_live: false, image: null, icon: "SB", category: "slots", badge: null, min_bet: 10 },
-];
-
-const PROVIDERS = [
-  { id: "all", name: "All" },
-  { id: "evolution", name: "Evolution" },
-  { id: "ezugi", name: "Ezugi" },
-  { id: "betgames", name: "BetGames" },
-  { id: "superspade", name: "Super Spade" },
-  { id: "tvbet", name: "TVBet" },
-];
+import {
+  CASINO_GAMES,
+  CASINO_PROVIDERS,
+  CASINO_CATEGORY_META,
+  CATEGORY_ALIAS,
+  CasinoGameItem,
+  GameCategory,
+  canonicalCategory,
+} from "@/lib/casino-games";
+import { CasinoGameTile } from "@/components/CasinoGameTile";
 
 /* ------------------------------------------------------------------ */
 /*  Component                                                          */
@@ -106,8 +24,20 @@ const PROVIDERS = [
 export default function CasinoCategoryPage() {
   const { addToast } = useToast();
   const params = useParams();
-  const category = params.category as string;
+  const router = useRouter();
+  const rawCategory = (params.category as string) || "";
   const { isLoggedIn } = useAuth();
+
+  // Redirect legacy duplicates to the canonical slug.
+  useEffect(() => {
+    const canon = CATEGORY_ALIAS[rawCategory];
+    if (canon && canon !== rawCategory) {
+      router.replace(`/casino/${canon}`);
+    }
+  }, [rawCategory, router]);
+
+  const category = canonicalCategory(rawCategory);
+  const categoryKey = (category === "all" ? "live_casino" : category) as GameCategory;
 
   const [apiGames, setApiGames] = useState<CasinoGame[]>([]);
   const [loading, setLoading] = useState(true);
@@ -115,19 +45,20 @@ export default function CasinoCategoryPage() {
   const [activeProvider, setActiveProvider] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
 
-  const meta = CATEGORY_META[category] || {
-    title: category?.replace(/_/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase()) || "Games",
-    description: "Browse casino games",
-  };
+  const meta =
+    CASINO_CATEGORY_META[categoryKey] || {
+      title: rawCategory?.replace(/_/g, " ").replace(/\b\w/g, (c: string) => c.toUpperCase()) || "Games",
+      description: "Browse casino games",
+    };
 
   useEffect(() => {
     loadGames();
-  }, [category]);
+  }, [categoryKey]);
 
   async function loadGames() {
     setLoading(true);
     try {
-      const data = await api.fetchGamesByCategory(category);
+      const data = await api.fetchGamesByCategory(categoryKey);
       setApiGames(Array.isArray(data) ? data : []);
     } catch {
       // fallback to static data
@@ -136,26 +67,28 @@ export default function CasinoCategoryPage() {
     }
   }
 
-  const staticGames = ALL_GAMES.filter((g) => {
-    if (g.category === category) return true;
-    if (category === "virtual_sports" && g.category === "virtual") return true;
-    if (category === "card_games" && g.category === "card") return true;
-    if (category === "crash_games" && g.category === "crash") return true;
-    return false;
-  });
+  const staticGames = CASINO_GAMES.filter((g) => g.category === categoryKey);
 
-  const allGames: GameItem[] = apiGames.length > 0
-    ? apiGames.map((g) => {
-        const f = ALL_GAMES.find((fg) => fg.type === g.type);
-        return {
-          ...g,
-          icon: f?.icon || g.name.slice(0, 2).toUpperCase(),
-          category: g.category || category,
-          badge: f?.badge || null,
-          min_bet: f?.min_bet || 50,
-        };
-      })
-    : staticGames;
+  const allGames: CasinoGameItem[] =
+    apiGames.length > 0
+      ? apiGames.map((g) => {
+          const f = CASINO_GAMES.find((fg) => fg.type === g.type);
+          const cat = canonicalCategory(g.category || f?.category || categoryKey);
+          return {
+            id: g.id,
+            name: g.name,
+            type: g.type,
+            provider_id: g.provider_id,
+            provider_name: g.provider_name,
+            is_live: g.is_live,
+            image: g.image ?? null,
+            icon: f?.icon || g.name.slice(0, 2).toUpperCase(),
+            category: (cat === "all" ? categoryKey : cat) as GameCategory,
+            badge: f?.badge ?? null,
+            min_bet: f?.min_bet ?? 50,
+          };
+        })
+      : staticGames;
 
   const filteredGames = allGames.filter((g) => {
     const matchProv = activeProvider === "all" || g.provider_id === activeProvider;
@@ -163,7 +96,7 @@ export default function CasinoCategoryPage() {
     return matchProv && matchSearch;
   });
 
-  async function launchGame(game: GameItem) {
+  async function launchGame(game: CasinoGameItem) {
     if (!isLoggedIn) {
       window.location.href = "/login";
       return;
@@ -220,7 +153,7 @@ export default function CasinoCategoryPage() {
 
           {/* Provider filter */}
           <div className="flex gap-2 overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
-            {PROVIDERS.map((prov) => (
+            {CASINO_PROVIDERS.map((prov) => (
               <button
                 key={prov.id}
                 onClick={() => setActiveProvider(prov.id)}
@@ -257,58 +190,12 @@ export default function CasinoCategoryPage() {
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-4">
             {filteredGames.map((game) => (
-              <button
+              <CasinoGameTile
                 key={game.id}
-                onClick={() => launchGame(game)}
-                disabled={launchingId === game.id}
-                className="text-left group"
-              >
-                <div className="bg-surface rounded-lg border border-gray-800 h-36 sm:h-40 p-3 sm:p-4 flex flex-col justify-between relative transition hover:border-gray-600">
-                  {/* Top badges */}
-                  <div className="flex items-start justify-between">
-                    <span className="bg-gray-800 text-gray-400 text-[9px] sm:text-[10px] font-semibold px-2 py-0.5 rounded uppercase tracking-wider">
-                      {game.provider_name}
-                    </span>
-                    <div className="flex flex-col items-end gap-1">
-                      {game.is_live && (
-                        <span className="bg-red-500/20 text-red-400 text-[9px] font-bold px-1.5 py-0.5 rounded flex items-center gap-1">
-                          <span className="w-1 h-1 bg-red-500 rounded-full" />
-                          LIVE
-                        </span>
-                      )}
-                      {game.badge === "NEW" && (
-                        <span className="bg-emerald-500/20 text-emerald-400 text-[9px] font-bold px-1.5 py-0.5 rounded">NEW</span>
-                      )}
-                      {game.badge === "HOT" && (
-                        <span className="bg-orange-500/20 text-orange-400 text-[9px] font-bold px-1.5 py-0.5 rounded">HOT</span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Center icon */}
-                  <div className="flex-1 flex items-center justify-center">
-                    <div className="text-3xl sm:text-4xl font-black text-gray-600 select-none">{game.icon}</div>
-                    {launchingId === game.id && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/40 rounded-lg">
-                        <div className="w-5 h-5 border-2 border-gray-500 border-t-white rounded-full animate-spin" />
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Game info */}
-                <div className="mt-2 px-1">
-                  <h3 className="text-sm font-medium text-white truncate group-hover:text-gray-300 transition-colors">
-                    {game.name}
-                  </h3>
-                  <div className="flex items-center justify-between mt-0.5">
-                    <p className="text-[10px] text-gray-500">{game.provider_name}</p>
-                    {game.min_bet && (
-                      <p className="text-[10px] text-gray-500">Min: {game.min_bet}</p>
-                    )}
-                  </div>
-                </div>
-              </button>
+                game={game}
+                launching={launchingId === game.id}
+                onLaunch={launchGame}
+              />
             ))}
           </div>
         )}
@@ -324,8 +211,8 @@ export default function CasinoCategoryPage() {
           </Link>
 
           <div className="hidden sm:flex items-center gap-2">
-            {Object.entries(CATEGORY_META)
-              .filter(([key]) => key !== category && !["virtual", "card", "crash"].includes(key))
+            {Object.entries(CASINO_CATEGORY_META)
+              .filter(([key]) => key !== categoryKey)
               .slice(0, 3)
               .map(([key, val]) => (
                 <Link

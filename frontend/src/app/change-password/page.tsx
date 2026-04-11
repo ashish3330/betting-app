@@ -78,7 +78,7 @@ export default function ChangePasswordPage() {
         <div className="text-center mb-6">
           <img
             src={theme === "dark" ? "/logo.svg?v=3" : "/logo-light.svg?v=3"}
-            alt="3XBet"
+            alt="Lotus Exchange"
             className="h-16 w-auto mx-auto mb-3"
           />
           <h1 className="text-lg font-bold text-white">Change Password</h1>

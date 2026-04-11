@@ -88,7 +88,7 @@ export default function CreateUserPage() {
 
   function copyCredentials() {
     if (!created) return;
-    const text = `3XBet Login\nUsername: ${created.username}\nPassword: ${created.password}\nURL: ${window.location.origin}/login`;
+    const text = `Lotus Exchange Login\nUsername: ${created.username}\nPassword: ${created.password}\nURL: ${window.location.origin}/login`;
     navigator.clipboard.writeText(text);
     addToast({ type: "success", title: "Credentials copied to clipboard!" });
   }
@@ -96,7 +96,7 @@ export default function CreateUserPage() {
   function shareWhatsApp() {
     if (!created) return;
     const text = encodeURIComponent(
-      `*3XBet Login*\nUsername: ${created.username}\nPassword: ${created.password}\nLogin: ${window.location.origin}/login\n\n_Please change your password after first login._`
+      `*Lotus Exchange Login*\nUsername: ${created.username}\nPassword: ${created.password}\nLogin: ${window.location.origin}/login\n\n_Please change your password after first login._`
     );
     window.open(`https://wa.me/?text=${text}`, "_blank");
   }

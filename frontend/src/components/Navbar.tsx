@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 import { useState, useRef, useEffect } from "react";
 import { getTheme, toggleTheme, initTheme, type Theme } from "@/lib/theme";
@@ -12,8 +13,16 @@ interface NavbarProps {
   liveCount?: number;
 }
 
+const PRIMARY_NAV_LINKS: { href: string; label: string; match: (p: string | null) => boolean }[] = [
+  { href: "/sports", label: "Sports", match: (p) => !!p && p.startsWith("/sports") },
+  { href: "/markets?filter=live", label: "In-Play", match: (p) => !!p && p.startsWith("/markets") },
+  { href: "/casino", label: "Casino", match: (p) => !!p && p.startsWith("/casino") },
+  { href: "/promotions", label: "Promotions", match: (p) => !!p && p.startsWith("/promotions") },
+];
+
 export default function Navbar({ onToggleSidebar, sidebarOpen = false, liveCount = 0 }: NavbarProps) {
   const { user, isLoggedIn, balance, logout } = useAuth();
+  const pathname = usePathname();
   const [accountOpen, setAccountOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -118,8 +127,28 @@ export default function Navbar({ onToggleSidebar, sidebarOpen = false, liveCount
 
           {/* Logo — switches between dark/light variants */}
           <Link href="/" className="flex items-center">
-            <img src={theme === "dark" ? "/logo.svg?v=3" : "/logo-light.svg?v=3"} alt="3XBet" className="h-8 w-auto" />
+            <img src={theme === "dark" ? "/logo.svg?v=3" : "/logo-light.svg?v=3"} alt="Lotus Exchange" className="h-8 w-auto" />
           </Link>
+
+          {/* Primary nav — desktop only */}
+          <div className="hidden lg:flex items-center gap-1 ml-3">
+            {PRIMARY_NAV_LINKS.map((link) => {
+              const active = link.match(pathname);
+              return (
+                <Link
+                  key={link.href}
+                  href={link.href}
+                  className={`px-3 h-9 flex items-center text-[13px] font-medium rounded-md transition ${
+                    active
+                      ? "text-white bg-white/10"
+                      : "text-gray-400 hover:text-white hover:bg-white/5"
+                  }`}
+                >
+                  {link.label}
+                </Link>
+              );
+            })}
+          </div>
         </div>
 
         {/* Center: Live indicator + Search — hidden on mobile */}
@@ -190,15 +219,23 @@ export default function Navbar({ onToggleSidebar, sidebarOpen = false, liveCount
 
           {isLoggedIn && balance ? (
             <>
-              {/* Deposit / Withdraw stacked — visible on all screens */}
-              <div className="flex flex-col gap-0.5">
-                <Link href="/wallet/deposit"
-                  className="bg-green-600 hover:bg-green-700 text-white text-[8px] sm:text-[10px] font-bold px-1.5 sm:px-2.5 py-0.5 rounded transition text-center leading-tight">
+              {/* Deposit CTA + wallet icon */}
+              <div className="flex items-center gap-1">
+                <Link
+                  href="/wallet/deposit"
+                  className="h-9 inline-flex items-center justify-center bg-lotus hover:bg-lotus-light text-white text-sm font-semibold px-3 sm:px-4 rounded-md transition shadow-sm"
+                >
                   Deposit
                 </Link>
-                <Link href="/wallet/withdraw"
-                  className="bg-red-600 hover:bg-red-700 text-white text-[8px] sm:text-[10px] font-bold px-1.5 sm:px-2.5 py-0.5 rounded transition text-center leading-tight">
-                  Withdraw
+                <Link
+                  href="/wallet"
+                  aria-label="Wallet"
+                  title="Wallet"
+                  className="h-9 w-9 inline-flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/5 rounded-md transition"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2zm12 6h2" />
+                  </svg>
                 </Link>
               </div>
 
@@ -206,8 +243,8 @@ export default function Navbar({ onToggleSidebar, sidebarOpen = false, liveCount
               <div className="flex flex-col items-end leading-tight min-w-0">
                 <div className="flex items-center gap-0.5">
                   <span className="text-[9px] text-gray-500 hidden sm:inline">Bal:</span>
-                  <span className="text-profit font-bold text-[10px] sm:text-[11px] font-mono truncate max-w-[70px] sm:max-w-none">
-                    {"\u20B9"}{balance.available_balance?.toLocaleString("en-IN") ?? "0"}
+                  <span className="text-profit font-bold text-[10px] sm:text-[11px] font-mono truncate max-w-[90px] sm:max-w-none">
+                    {"\u20B9"}{(balance.available_balance ?? 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                   </span>
                 </div>
                 <div ref={exposureRef} className="relative">
@@ -228,7 +265,7 @@ export default function Navbar({ onToggleSidebar, sidebarOpen = false, liveCount
                     >
                       <span className="text-[9px] text-gray-500">Exp:</span>
                       <span className={`font-bold text-[11px] font-mono ${balance.exposure > 0 ? "text-loss" : "text-gray-500"}`}>
-                        {balance.exposure > 0 ? "-" : ""}{"\u20B9"}{balance.exposure?.toLocaleString("en-IN") ?? "0"}
+                        {balance.exposure > 0 ? "-" : ""}{"\u20B9"}{(balance.exposure ?? 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </span>
                       <svg className={`w-2.5 h-2.5 text-gray-500 transition-transform ${exposureOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 9l-7 7-7-7" />
@@ -237,7 +274,7 @@ export default function Navbar({ onToggleSidebar, sidebarOpen = false, liveCount
 
                     {/* Exposure breakdown dropdown */}
                     {exposureOpen && (
-                      <div className="fixed right-1 sm:right-2 mt-1 bg-[var(--dropdown-bg)] border border-gray-800 rounded-lg shadow-2xl py-1 w-64 sm:w-72 z-[100] max-h-60 overflow-y-auto" style={{ top: "50px" }}>
+                      <div className="absolute right-0 top-full mt-1 bg-[var(--dropdown-bg)] border border-gray-800 rounded-lg shadow-2xl py-1 w-64 sm:w-72 z-[100] max-h-60 overflow-y-auto">
                         <div className="px-3 py-1.5 border-b border-gray-800/60">
                           <span className="text-[10px] font-bold text-gray-400 uppercase">Exposure Breakdown</span>
                         </div>
@@ -350,7 +387,7 @@ export default function Navbar({ onToggleSidebar, sidebarOpen = false, liveCount
               </button>
 
               {accountOpen && (
-                <div className="fixed right-2 mt-1 bg-[var(--dropdown-bg)] border border-gray-800 rounded-lg shadow-2xl py-1 w-52 z-[100]" style={{ top: "50px" }}>
+                <div className="absolute right-0 top-full mt-1 bg-[var(--dropdown-bg)] border border-gray-800 rounded-lg shadow-2xl py-1 w-52 z-[100]">
                   {/* User info header */}
                   <div className="px-3 py-2 border-b border-gray-800/60">
                     <div className="text-xs font-medium text-white">

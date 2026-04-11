@@ -13,10 +13,23 @@ interface ResponsibleLimits {
   excluded_until?: string;
 }
 
-interface KYCDocument {
-  name: string;
-  status: "pending" | "verified" | "rejected";
-  uploadedAt: string;
+type KYCOverallStatus = "verified" | "pending" | "not_submitted" | "rejected";
+
+interface KYCStatusResponse {
+  status?: KYCOverallStatus;
+  overall_status?: KYCOverallStatus;
+  documents?: Array<{ type: string; status: string }>;
+}
+
+function fmtINR(n: number | null | undefined) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "\u20B90.00";
+  return "\u20B9" + n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function todayISO() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.toISOString().slice(0, 10);
 }
 
 export default function AccountPage() {
@@ -46,29 +59,31 @@ export default function AccountPage() {
         <p className="text-xs text-gray-500">Manage your profile and preferences</p>
       </div>
 
+      {/* KPI strip */}
+      <AccountKPIs />
+
       {/* Quick Links */}
-      <div className="grid grid-cols-3 gap-2">
-        <Link
-          href="/wallet"
-          className="bg-surface rounded-xl border border-gray-800 p-4 text-center hover:border-gray-700 transition group"
-        >
-          <div className="text-xl font-bold text-profit group-hover:scale-110 transition">+</div>
-          <div className="text-xs text-gray-400 mt-1">Deposit</div>
-        </Link>
-        <Link
-          href="/wallet"
-          className="bg-surface rounded-xl border border-gray-800 p-4 text-center hover:border-gray-700 transition group"
-        >
-          <div className="text-xl font-bold text-loss group-hover:scale-110 transition">-</div>
-          <div className="text-xs text-gray-400 mt-1">Withdraw</div>
-        </Link>
-        <Link
-          href="/account/history"
-          className="bg-surface rounded-xl border border-gray-800 p-4 text-center hover:border-gray-700 transition group"
-        >
-          <div className="text-xl font-bold text-lotus group-hover:scale-110 transition">H</div>
-          <div className="text-xs text-gray-400 mt-1">History</div>
-        </Link>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <QuickLink href="/wallet" label="Deposit" accent="text-profit">
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12M12 16.5V3" />
+          </svg>
+        </QuickLink>
+        <QuickLink href="/wallet" label="Withdraw" accent="text-loss">
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M7.5 7.5 12 3m0 0 4.5 4.5M12 3v13.5" />
+          </svg>
+        </QuickLink>
+        <QuickLink href="/account/history" label="History" accent="text-lotus">
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+          </svg>
+        </QuickLink>
+        <QuickLink href="/account/referral" label="Referral" accent="text-amber-400">
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M21 11.25v8.25a1.5 1.5 0 0 1-1.5 1.5H5.25a1.5 1.5 0 0 1-1.5-1.5v-8.25M12 4.875A3.375 3.375 0 1 0 15.375 8.25H12V4.875ZM12 4.875A3.375 3.375 0 1 1 8.625 8.25H12V4.875ZM12 4.875v14.25m-9-9h18" />
+          </svg>
+        </QuickLink>
       </div>
 
       {/* Profile Info */}
@@ -90,6 +105,126 @@ export default function AccountPage() {
 
       {/* Responsible Gambling */}
       <ResponsibleGamblingSection />
+    </div>
+  );
+}
+
+function QuickLink({ href, label, accent, children }: { href: string; label: string; accent: string; children: React.ReactNode }) {
+  return (
+    <Link
+      href={href}
+      className="bg-surface rounded-xl border border-gray-800 p-3 sm:p-4 flex flex-col items-center gap-1.5 hover:border-gray-700 hover:bg-surface-light transition group"
+    >
+      <div className={`${accent} group-hover:scale-110 transition`}>{children}</div>
+      <div className="text-xs text-gray-400 group-hover:text-white transition">{label}</div>
+    </Link>
+  );
+}
+
+function AccountKPIs() {
+  const [balance, setBalance] = useState<number | null>(null);
+  const [available, setAvailable] = useState<number | null>(null);
+  const [exposure, setExposure] = useState<number | null>(null);
+  const [openBets, setOpenBets] = useState<number | null>(null);
+  const [todayPnL, setTodayPnL] = useState<number | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [bal, openHist, todayHist] = await Promise.allSettled([
+          api.getBalance(),
+          api.fetchBettingHistory({ status: "open" }),
+          api.fetchBettingHistory({ status: "settled", from: todayISO() }),
+        ]);
+        if (cancelled) return;
+
+        if (bal.status === "fulfilled") {
+          setBalance(bal.value.balance ?? 0);
+          setAvailable(bal.value.available_balance ?? bal.value.balance ?? 0);
+          setExposure(bal.value.exposure ?? 0);
+        }
+        if (openHist.status === "fulfilled") {
+          const bets = openHist.value?.bets || [];
+          setOpenBets(bets.length);
+        }
+        if (todayHist.status === "fulfilled") {
+          const bets = todayHist.value?.bets || [];
+          const start = new Date();
+          start.setHours(0, 0, 0, 0);
+          const sum = bets.reduce((acc, b) => {
+            const settledAt = b.settled_at ? new Date(b.settled_at) : null;
+            if (!settledAt || settledAt < start) return acc;
+            return acc + (b.pnl ?? 0);
+          }, 0);
+          setTodayPnL(sum);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const cards = [
+    {
+      label: "Available",
+      value: fmtINR(available ?? balance ?? 0),
+      accent: "text-white",
+      icon: (
+        <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v10.5A2.25 2.25 0 0 0 4.5 19.5Z" />
+        </svg>
+      ),
+    },
+    {
+      label: "Exposure",
+      value: fmtINR(exposure ?? 0),
+      accent: "text-loss",
+      icon: (
+        <svg className="w-5 h-5 text-loss/80" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+        </svg>
+      ),
+    },
+    {
+      label: "Open Bets",
+      value: openBets === null ? "-" : String(openBets),
+      accent: "text-white",
+      icon: (
+        <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 6v.75m0 3v.75m0 3v.75m0 3V18m-9-5.25h5.25M7.5 15h3M3.375 5.25c-.621 0-1.125.504-1.125 1.125v3.026a2.999 2.999 0 0 1 0 5.198v3.026c0 .621.504 1.125 1.125 1.125h17.25c.621 0 1.125-.504 1.125-1.125v-3.026a2.999 2.999 0 0 1 0-5.198V6.375c0-.621-.504-1.125-1.125-1.125H3.375Z" />
+        </svg>
+      ),
+    },
+    {
+      label: "Today's P&L",
+      value: (todayPnL ?? 0) >= 0 ? `+${fmtINR(todayPnL ?? 0)}` : `-${fmtINR(Math.abs(todayPnL ?? 0))}`,
+      accent: (todayPnL ?? 0) >= 0 ? "text-profit" : "text-loss",
+      icon: (
+        <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18 9 11.25l4.306 4.306a11.95 11.95 0 0 1 5.814-5.518l2.74-1.22m0 0-5.94-2.281m5.94 2.28-2.28 5.941" />
+        </svg>
+      ),
+    },
+  ];
+
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+      {cards.map((c) => (
+        <div key={c.label} className="bg-surface rounded-xl border border-gray-800 p-3">
+          <div className="flex items-center gap-2">
+            {c.icon}
+            <span className="text-[10px] uppercase tracking-wider text-gray-500">{c.label}</span>
+          </div>
+          <div className={`mt-2 text-sm font-mono font-semibold ${c.accent}`}>
+            {loading ? <span className="inline-block w-16 h-4 bg-gray-800 animate-pulse rounded" /> : c.value}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -198,14 +333,50 @@ const KYC_DOC_TYPES = [
 const ALLOWED_FILE_TYPES = ["image/jpeg", "image/png", "application/pdf"];
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
 
+interface KYCDocState {
+  name: string;
+  status: "pending" | "verified" | "rejected";
+  uploadedAt: string;
+}
+
 function KYCUploadSection() {
-  const [docs, setDocs] = useState<Record<string, KYCDocument>>({});
+  const [docs, setDocs] = useState<Record<string, KYCDocState>>({});
+  const [overallStatus, setOverallStatus] = useState<KYCOverallStatus>("not_submitted");
+  const [statusLoaded, setStatusLoaded] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploading, setUploading] = useState<string | null>(null);
 
   useEffect(() => {
-    // Fetch KYC status from server (clean up any legacy localStorage data)
-    localStorage.removeItem("kyc_documents");
+    // Clean up any legacy localStorage data.
+    try {
+      localStorage.removeItem("kyc_documents");
+    } catch {
+      /* ignore */
+    }
+
+    // Fetch real KYC state from the backend so the UI survives reloads.
+    (async () => {
+      try {
+        const data = await api.request<KYCStatusResponse>("/api/v1/kyc/status", { auth: true });
+        const status = (data.overall_status || data.status || "not_submitted") as KYCOverallStatus;
+        setOverallStatus(status);
+        if (Array.isArray(data.documents)) {
+          const mapped: Record<string, KYCDocState> = {};
+          for (const d of data.documents) {
+            mapped[d.type] = {
+              name: d.type,
+              status: (d.status === "verified" || d.status === "rejected" ? d.status : "pending") as KYCDocState["status"],
+              uploadedAt: "",
+            };
+          }
+          setDocs(mapped);
+        }
+      } catch {
+        // Endpoint may not exist yet — fall back to "not_submitted".
+      } finally {
+        setStatusLoaded(true);
+      }
+    })();
   }, []);
 
   async function handleFileUpload(docKey: string, docLabel: string, file: File) {
@@ -272,7 +443,16 @@ function KYCUploadSection() {
   }
 
   const allUploaded = KYC_DOC_TYPES.every((dt) => docs[dt.key]);
-  const allVerified = KYC_DOC_TYPES.every((dt) => docs[dt.key]?.status === "verified");
+  const allVerified = overallStatus === "verified" || KYC_DOC_TYPES.every((dt) => docs[dt.key]?.status === "verified");
+  const isRejected = overallStatus === "rejected";
+
+  const statusLabel: { label: string; hint: string; color: string; dot: string } = allVerified
+    ? { label: "Verified", hint: "Your identity has been verified successfully.", color: "text-profit", dot: "bg-profit/20" }
+    : isRejected
+    ? { label: "Rejected", hint: "One or more documents were rejected. Please re-upload.", color: "text-loss", dot: "bg-loss/20" }
+    : allUploaded || overallStatus === "pending"
+    ? { label: "Under Review", hint: "Your documents are being reviewed by our team.", color: "text-yellow-500", dot: "bg-yellow-500/20" }
+    : { label: "Not Submitted", hint: "Upload your ID and address proof to complete KYC.", color: "text-gray-400", dot: "bg-gray-700/40" };
 
   return (
     <section className="bg-surface rounded-xl border border-gray-800 p-5">
@@ -280,16 +460,14 @@ function KYCUploadSection() {
 
       {/* Overall Status */}
       <div className="flex items-center gap-3 mb-4">
-        <div
-          className={`w-10 h-10 rounded-full flex items-center justify-center ${
-            allVerified
-              ? "bg-profit/20"
-              : "bg-yellow-500/20"
-          }`}
-        >
+        <div className={`w-10 h-10 rounded-full flex items-center justify-center ${statusLabel.dot}`}>
           {allVerified ? (
             <svg className="w-5 h-5 text-profit" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+            </svg>
+          ) : isRejected ? (
+            <svg className="w-5 h-5 text-loss" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
           ) : (
             <svg className="w-5 h-5 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -298,14 +476,10 @@ function KYCUploadSection() {
           )}
         </div>
         <div>
-          <p className={`text-sm font-medium ${allVerified ? "text-profit" : "text-yellow-500"}`}>
-            {allVerified ? "KYC Verified" : allUploaded ? "Under Review" : "Pending Verification"}
+          <p className={`text-sm font-medium ${statusLabel.color}`}>
+            {statusLoaded ? `KYC Status: ${statusLabel.label}` : "Loading..."}
           </p>
-          <p className="text-xs text-gray-500">
-            {allVerified
-              ? "Your identity has been verified successfully."
-              : "Upload your ID and address proof to complete KYC."}
-          </p>
+          <p className="text-xs text-gray-500">{statusLabel.hint}</p>
         </div>
       </div>
 
@@ -349,7 +523,7 @@ function KYCDocCard({
 }: {
   docKey: string;
   label: string;
-  doc?: KYCDocument;
+  doc?: KYCDocState;
   onUpload: (key: string, label: string, file: File) => void;
   getStatusBadge: (status: string) => React.ReactNode;
   isUploading?: boolean;

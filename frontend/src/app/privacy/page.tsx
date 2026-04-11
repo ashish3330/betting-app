@@ -10,7 +10,7 @@ export default function PrivacyPage() {
 
       {/* 1. Information We Collect */}
       <Section num={1} title="Information We Collect">
-        <p className="mb-2">We collect the following types of information when you use 3XBet:</p>
+        <p className="mb-2">We collect the following types of information when you use Lotus Exchange:</p>
         <ul className="list-disc list-inside space-y-1">
           <li><strong>Personal Information:</strong> Name, email address, phone number, date of birth, and residential address provided during registration.</li>
           <li><strong>Identity Documents:</strong> PAN Card, Aadhaar Card, bank statements, and other documents submitted for KYC verification.</li>

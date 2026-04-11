@@ -568,6 +568,7 @@ export interface User {
   path?: string;
   created_at?: string;
   force_password_change?: boolean;
+  kyc_status?: "pending" | "verified" | "rejected" | "not_submitted" | string;
 }
 
 export interface Sport {

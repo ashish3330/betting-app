@@ -8,8 +8,10 @@
   --back: #72bbef;
   --lay: #faa9ba;
   --lotus: #0D9488;
-  --gold: #0D9488;
-  --gold-dim: rgba(255, 215, 0, 0.15);
+  --lotus-light: #14B8A6;
+  --lotus-dark: #0F766E;
+  /* Real amber gold — reserved for VIP/jackpot accents, not main brand */
+  --gold: #F5C518;
   --bg-primary: #0a0c14;
   --bg-surface: #1a1d26;
   --bg-surface-light: #252836;
@@ -40,10 +42,19 @@
 body {
   background-color: var(--bg-primary);
   color: var(--text-primary);
-  font-family: "Inter", system-ui, sans-serif;
+  font-family: var(--font-inter), system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
   transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Tabular numerics for financial figures — odds, stakes, balances, P&L */
+.font-mono,
+.tabular-nums {
+  font-family: var(--font-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-feature-settings: "tnum" 1, "cv11" 1;
+  font-variant-numeric: tabular-nums;
 }
 
 [data-theme="light"] body {
@@ -356,253 +367,81 @@ input[type="number"] {
 }
 
 /* ============================================
-   FUNCTIONAL CSS ONLY — no fancy effects
+   FUNCTIONAL ANIMATIONS — used in components
    ============================================ */
 
-/* Odds flash on price change */
-.odds-up { animation: flashGreen 0.5s ease; }
-.odds-down { animation: flashRed 0.5s ease; }
-@keyframes flashGreen { 0%,100% { background: inherit; } 50% { background: rgba(34,197,94,0.15); } }
-@keyframes flashRed { 0%,100% { background: inherit; } 50% { background: rgba(239,68,68,0.15); } }
-
-/* Live pulse */
-@keyframes livePulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
-.animate-live-pulse { animation: livePulse 2s ease-in-out infinite; }
-
-/* Slide up for mobile betslip */
-@keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
-.animate-slide-up { animation: slideUp 0.3s ease-out; }
-
-/* Marquee for bottom ticker */
-@keyframes marquee { from { transform: translateX(100%); } to { transform: translateX(-100%); } }
-.animate-marquee { animation: marquee 40s linear infinite; }
-
-/* Float for minimal hero accent */
-@keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
-.animate-float { animation: float 6s ease-in-out infinite; }
-
-/* Suspended market overlay */
-.suspended { position: relative; }
-.suspended::after {
-  content: 'SUSPENDED';
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0,0,0,0.6);
-  color: #facc15;
-  font-weight: bold;
-  font-size: 11px;
-  letter-spacing: 2px;
-  z-index: 5;
-}
-
-/* Safe area for mobile bottom bar */
-.safe-area-pb { padding-bottom: env(safe-area-inset-bottom, 0); }
-
-/* LEGACY classes kept for compatibility but simplified */
-.card-shine { position: relative; overflow: hidden;
-}
-.card-shine::before {
-  content: '';
-  position: absolute;
-  top: -50%;
-  left: -150%;
-  width: 200%;
-  height: 200%;
-  background: linear-gradient(
-    to right,
-    transparent 0%,
-    rgba(255, 215, 0, 0.08) 40%,
-    rgba(255, 215, 0, 0.25) 50%,
-    rgba(255, 215, 0, 0.08) 60%,
-    transparent 100%
-  );
-  transform: rotate(30deg);
-  transition: left 0.7s ease;
-  pointer-events: none;
-  z-index: 2;
-}
-.card-shine:hover::before {
-  left: 150%;
-}
-
-/* ============================================
-   GOLD GLOW EFFECT
-   ============================================ */
-.glow-gold {
-  transition: box-shadow 0.3s ease, transform 0.3s ease;
-}
-.glow-gold:hover {
-  box-shadow: 0 0 20px rgba(255, 215, 0, 0.35), 0 0 50px rgba(255, 215, 0, 0.1);
-}
-
-/* ============================================
-   SPARKLE / PARTICLE ANIMATIONS
-   ============================================ */
-@keyframes sparkle {
-  0%, 100% { opacity: 0; transform: scale(0) rotate(0deg); }
-  50% { opacity: 1; transform: scale(1) rotate(180deg); }
-}
-
-@keyframes sparkleFloat {
-  0% { transform: translateY(0) translateX(0) scale(0); opacity: 0; }
-  20% { opacity: 1; transform: translateY(-20px) translateX(10px) scale(1); }
-  80% { opacity: 0.5; transform: translateY(-80px) translateX(-10px) scale(0.5); }
-  100% { opacity: 0; transform: translateY(-120px) translateX(20px) scale(0); }
-}
-
-.sparkle-particle {
-  animation: sparkleFloat 3s ease-in-out infinite;
-}
-
-/* ============================================
-   PULSE GLOW FOR LIVE BADGES
-   ============================================ */
-@keyframes pulseGlow {
-  0%, 100% { box-shadow: 0 0 4px #ff0000; }
-  50% { box-shadow: 0 0 12px #ff0000, 0 0 24px rgba(255, 0, 0, 0.3); }
-}
-.live-pulse {
-  animation: pulseGlow 2s ease-in-out infinite;
-}
-
-@keyframes pulseDot {
-  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
-  50% { opacity: 0.7; box-shadow: 0 0 0 4px rgba(239, 68, 68, 0); }
-}
-.pulse-dot {
-  animation: pulseDot 1.5s ease-in-out infinite;
-}
-
-/* ============================================
-   GRADIENT TEXT
-   ============================================ */
-.text-gradient {
-  background: linear-gradient(135deg, #0D9488, #14B8A6);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-}
-
-.text-gradient-lotus {
-  background: linear-gradient(135deg, #0D9488, #14B8A6);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-}
-
-/* ============================================
-   FLOATING ANIMATION
-   ============================================ */
-@keyframes float {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-10px); }
-}
-.animate-float {
-  animation: float 3s ease-in-out infinite;
-}
-
-/* ============================================
-   HERO BACKGROUND ANIMATIONS
-   ============================================ */
-@keyframes heroShimmer {
-  0% { background-position: -200% center; }
-  100% { background-position: 200% center; }
-}
-
-@keyframes gradientShift {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
-}
-
-.hero-gradient {
-  background: linear-gradient(135deg, #0a0c14 0%, #1a0a2e 25%, #16082a 50%, #0d1117 75%, #0a0c14 100%);
-  background-size: 400% 400%;
-  animation: gradientShift 15s ease infinite;
-}
-
-.hero-gradient-casino {
-  background: linear-gradient(135deg, #0a0c14 0%, #1a1000 20%, #2a1500 40%, #1a0a2e 60%, #0a0c14 100%);
-  background-size: 400% 400%;
-  animation: gradientShift 12s ease infinite;
-}
-
-/* ============================================
-   CAROUSEL ANIMATION
-   ============================================ */
-@keyframes scrollCarousel {
-  0% { transform: translateX(0); }
-  100% { transform: translateX(-50%); }
-}
-.auto-scroll {
-  animation: scrollCarousel 30s linear infinite;
-}
-.auto-scroll:hover {
-  animation-play-state: paused;
-}
-
-/* ============================================
-   BLINKING ODDS
-   ============================================ */
-@keyframes blinkOdds {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
-.blink-odds {
-  animation: blinkOdds 1s ease-in-out infinite;
-}
-
-/* ============================================
-   EXISTING ANIMATIONS (preserved)
-   ============================================ */
+/* Live pulse — used on LIVE badges, score dots */
 @keyframes livePulse {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.4; }
+  50% { opacity: 0.45; }
 }
 .animate-live-pulse {
   animation: livePulse 1.5s ease-in-out infinite;
 }
 
+/* Odds flash on price change (row-level) */
 @keyframes flashGreen {
   0%, 100% { background: inherit; }
-  50% { background: #2d6b2d; }
+  50% { background: rgba(34, 197, 94, 0.18); }
 }
 @keyframes flashRed {
   0%, 100% { background: inherit; }
-  50% { background: #6b2d2d; }
+  50% { background: rgba(239, 68, 68, 0.18); }
 }
-.odds-up {
-  animation: flashGreen 0.6s ease;
+.odds-up   { animation: flashGreen 0.6s ease; }
+.odds-down { animation: flashRed   0.6s ease; }
+
+/* Full-cell flash for live price changes (MarketTable / OrderBook) */
+@keyframes flash-up {
+  0%   { background-color: rgba(34, 197, 94, 0.5); }
+  100% { background-color: transparent; }
 }
-.odds-down {
-  animation: flashRed 0.6s ease;
+@keyframes flash-down {
+  0%   { background-color: rgba(239, 68, 68, 0.5); }
+  100% { background-color: transparent; }
+}
+.animate-flash-up   { animation: flash-up   400ms ease-out; }
+.animate-flash-down { animation: flash-down 400ms ease-out; }
+
+/* Mobile bottom-sheet slide up (BetSlip) */
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+.animate-slide-up { animation: slideUp 0.3s ease-out; }
+
+/* Subtle entry for bet slip rows */
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-in { animation: slideIn 0.2s ease-out; }
+
+/* Ticker marquee — bottom announcement bar */
+@keyframes marquee {
+  0%   { transform: translateX(100%); }
+  100% { transform: translateX(-100%); }
+}
+.animate-marquee { animation: marquee 30s linear infinite; }
+.ticker-scroll {
+  animation: marquee 30s linear infinite;
+}
+.ticker-scroll:hover {
+  animation-play-state: paused;
 }
 
-/* Back/Lay color utility classes */
-.back-cell {
-  background: #72bbef;
-  color: #000;
-}
-.back-cell-dark {
-  background: #a8d8f0;
-  color: #000;
-}
-.lay-cell {
-  background: #faa9ba;
-  color: #000;
-}
-.lay-cell-dark {
-  background: #f7c3cf;
-  color: #000;
-}
+/* ============================================
+   BACK / LAY CELL COLORS
+   ============================================ */
+.back-cell      { background: #72bbef; color: #000; }
+.back-cell-dark { background: #a8d8f0; color: #000; }
+.lay-cell       { background: #faa9ba; color: #000; }
+.lay-cell-dark  { background: #f7c3cf; color: #000; }
 
-/* Suspended overlay */
-.suspended {
-  position: relative;
-}
+/* ============================================
+   SUSPENDED MARKET OVERLAY
+   ============================================ */
+.suspended { position: relative; }
 .suspended::after {
   content: "SUSPENDED";
   position: absolute;
@@ -619,69 +458,17 @@ input[type="number"] {
   pointer-events: none;
 }
 
-/* Ticker scroll animation */
-@keyframes ticker {
-  from { transform: translateX(100%); }
-  to { transform: translateX(-100%); }
-}
-.ticker-scroll {
-  animation: ticker 30s linear infinite;
-}
-.ticker-scroll:hover {
-  animation-play-state: paused;
-}
-
-@keyframes marquee {
-  0% { transform: translateX(100%); }
-  100% { transform: translateX(-100%); }
-}
-.animate-marquee {
-  animation: marquee 30s linear infinite;
-}
-
-/* Bet slip entry animation */
-@keyframes slideIn {
-  from { opacity: 0; transform: translateY(-8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-.animate-in {
-  animation: slideIn 0.2s ease-out;
-}
-
-@keyframes slideUp {
-  0% { transform: translateY(100%); }
-  100% { transform: translateY(0); }
-}
-.animate-slide-up {
-  animation: slideUp 0.3s ease-out;
-}
-
-@keyframes selectionGlow {
-  0%, 100% { box-shadow: none; }
-  50% { box-shadow: 0 0 8px rgba(255, 215, 0, 0.3); }
-}
-.selection-glow {
-  animation: selectionGlow 2s ease-in-out infinite;
-}
-
-.safe-area-pb {
-  padding-bottom: env(safe-area-inset-bottom, 0px);
-}
-
 /* ============================================
-   NEW BADGE PULSE
+   SCROLL UTILITIES
    ============================================ */
-@keyframes badgePulse {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.05); }
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
-.badge-pulse {
-  animation: badgePulse 2s ease-in-out infinite;
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
 }
 
-/* ============================================
-   HORIZONTAL SCROLL SNAP
-   ============================================ */
 .scroll-snap-x {
   scroll-snap-type: x mandatory;
   -webkit-overflow-scrolling: touch;
@@ -690,41 +477,16 @@ input[type="number"] {
   scroll-snap-align: start;
 }
 
-/* ============================================
-   PLAY BUTTON OVERLAY
-   ============================================ */
-.play-overlay {
-  opacity: 0;
-  transition: opacity 0.3s ease, transform 0.3s ease;
-  transform: scale(0.8);
-}
-.group:hover .play-overlay {
-  opacity: 1;
-  transform: scale(1);
+/* Safe area for mobile bottom nav / betslip */
+.safe-area-pb {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 /* ============================================
-   CATEGORY TAB ACTIVE INDICATOR
-   ============================================ */
-.tab-active {
-  position: relative;
-}
-.tab-active::after {
-  content: '';
-  position: absolute;
-  bottom: -2px;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: linear-gradient(90deg, #0D9488, #14B8A6);
-  border-radius: 1px;
-}
-
-/* ============================================
-   MATCH NAME MARQUEE ON MOBILE (train effect)
+   MATCH NAME MARQUEE — train effect on mobile only
    ============================================ */
 @keyframes marqueeText {
-  0% { transform: translateX(0); }
+  0%   { transform: translateX(0); }
   100% { transform: translateX(-50%); }
 }
 
@@ -742,27 +504,40 @@ input[type="number"] {
   }
 }
 
-/* On desktop (sm+), never animate — just truncate */
 @media (min-width: 641px) {
   .marquee-container {
-    overflow: hidden;
     text-overflow: ellipsis;
   }
   .marquee-container .marquee-content {
-    animation: none !important;
+    animation: none;
   }
 }
 
-/* Prevent ANY horizontal scroll on mobile */
-html, body {
-  overflow-x: hidden !important;
+/* ============================================
+   HORIZONTAL OVERFLOW — proper fix, not workaround
+   Use `overflow-x: clip` on body so sticky positioning
+   (navbar, betslip) keeps working. `clip` doesn't create
+   a new scroll container like `hidden` does.
+   Any component that needs to scroll horizontally
+   (market depth, odds grid) must wrap itself in an
+   `overflow-x-auto` container with a min-w-0 parent.
+   ============================================ */
+html {
+  overflow-x: clip;
+}
+body {
+  overflow-x: clip;
   max-width: 100vw;
 }
 
-.scrollbar-none {
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-.scrollbar-none::-webkit-scrollbar {
-  display: none;
+/* Reduced motion — respect user preference */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

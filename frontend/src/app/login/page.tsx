@@ -48,9 +48,9 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         {/* Logo */}
         <div className="text-center mb-6">
-          <img src={theme === "dark" ? "/logo.svg?v=3" : "/logo-light.svg?v=3"} alt="3XBet" className="h-16 w-auto mx-auto mb-3" />
-          <h1 className="text-lg font-bold text-white">Login</h1>
-          <p className="text-xs text-gray-400 mt-1">3XBet</p>
+          <img src={theme === "dark" ? "/logo.svg?v=3" : "/logo-light.svg?v=3"} alt="Lotus Exchange" className="h-16 w-auto mx-auto mb-3" />
+          <h1 className="text-lg font-bold text-white">Welcome back</h1>
+          <p className="text-xs text-gray-400 mt-1">Sign in to Lotus Exchange</p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-3">
@@ -85,6 +85,12 @@ export default function LoginPage() {
             className="w-full h-10 bg-lotus hover:bg-lotus-light text-white rounded-lg text-sm font-semibold transition disabled:opacity-50">
             {loading ? "Signing in..." : "Sign In"}
           </button>
+
+          <div className="text-right">
+            <Link href="/forgot-password" className="text-[11px] text-gray-400 hover:text-lotus transition">
+              Forgot Password?
+            </Link>
+          </div>
         </form>
 
         {/* Divider */}
@@ -126,24 +132,26 @@ export default function LoginPage() {
           Instant access, no registration needed
         </p>
 
-        {/* Quick login for testing */}
-        <div className="mt-4 bg-surface rounded-lg border border-gray-800/60 p-3">
-          <p className="text-[10px] text-gray-500 mb-2 font-medium">Quick Login (Testing)</p>
-          <div className="grid grid-cols-2 gap-1">
-            {[
-              { user: "player1", pass: "Player@123", label: "Player" },
-              { user: "agent1", pass: "Agent@123", label: "Agent" },
-              { user: "master1", pass: "Master@123", label: "Master" },
-              { user: "superadmin", pass: "Admin@123", label: "Admin" },
-            ].map((d) => (
-              <button key={d.user} type="button"
-                onClick={() => { setUsername(d.user); setPassword(d.pass); }}
-                className="text-[11px] text-gray-400 hover:text-white bg-surface-light hover:bg-surface-lighter rounded px-2 py-1.5 text-left transition">
-                <span className="text-gray-500">{d.label}:</span> <span className="font-mono">{d.user}</span>
-              </button>
-            ))}
+        {/* Quick login — dev only, stripped from production build */}
+        {process.env.NODE_ENV !== "production" && (
+          <div className="mt-4 bg-surface rounded-lg border border-gray-800/60 p-3">
+            <p className="text-[10px] text-gray-500 mb-2 font-medium">Quick Login (Dev Only)</p>
+            <div className="grid grid-cols-2 gap-1">
+              {[
+                { user: "player1", pass: "Player@123", label: "Player" },
+                { user: "agent1", pass: "Agent@123", label: "Agent" },
+                { user: "master1", pass: "Master@123", label: "Master" },
+                { user: "superadmin", pass: "Admin@123", label: "Admin" },
+              ].map((d) => (
+                <button key={d.user} type="button"
+                  onClick={() => { setUsername(d.user); setPassword(d.pass); }}
+                  className="text-[11px] text-gray-400 hover:text-white bg-surface-light hover:bg-surface-lighter rounded px-2 py-1.5 text-left transition">
+                  <span className="text-gray-500">{d.label}:</span> <span className="font-mono">{d.user}</span>
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
 
         <p className="text-center text-xs text-gray-500 mt-4">
           Need an account? <Link href="/register" className="text-lotus hover:underline">Register</Link>
