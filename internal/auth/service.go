@@ -33,10 +33,27 @@ func userKey(userID int64) string {
 	return userCacheKey + strconv.FormatInt(userID, 10)
 }
 
-// Argon2 parameters — hardened from the original 1 iteration / 64KB.
+// Argon2id parameters. These are deliberately kept in lock-step with the
+// monolith hashPassword in cmd/server/store.go so that password hashes
+// produced by either binary verify against the other. If you change the
+// values here, you MUST also update cmd/server/store.go (and re-hash any
+// existing data via a migration).
+//
+// Current values, chosen to match the strongest of the two implementations:
+//
+//	time      = 3 iterations
+//	memory    = 64 * 1024 KiB (= 64 MiB)
+//	threads   = 4
+//	keyLen    = 32 bytes
+//	saltLen   = 16 bytes
+//
+// These satisfy the OWASP 2023 Argon2id minimum recommendation
+// (m=46 MiB, t=1, p=1) with margin and were verified equal to the
+// monolith's parameters at cmd/server/store.go:763 / :772 on the
+// microservice-paradigm branch.
 const (
 	argon2Iterations = 3
-	argon2Memory     = 64 * 1024 // 64 MB
+	argon2Memory     = 64 * 1024 // 64 MiB, matches cmd/server/store.go
 	argon2Threads    = 4
 	argon2KeyLength  = 32
 	argon2SaltLength = 16

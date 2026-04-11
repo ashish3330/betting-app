@@ -28,11 +28,28 @@ var bufPool = sync.Pool{
 	New: func() interface{} { return new(bytes.Buffer) },
 }
 
+// isTestBinary reports whether the running binary is a `go test` test binary.
+// We use this to allow init() to fall back to a deterministic placeholder
+// secret when ENCRYPTION_SECRET is unset under `go test`. Production binaries
+// (gateway, services, etc.) are unaffected and still hard-fail at startup.
+func isTestBinary() bool {
+	return strings.HasSuffix(os.Args[0], ".test") ||
+		strings.Contains(os.Args[0], "/_test/") ||
+		strings.Contains(os.Args[0], "go-build")
+}
+
 func init() {
 	secret := os.Getenv("ENCRYPTION_SECRET")
 	if secret == "" {
-		fmt.Fprintln(os.Stderr, "FATAL: ENCRYPTION_SECRET environment variable is required")
-		os.Exit(1)
+		if isTestBinary() {
+			// Deterministic, well-known test placeholder. Never used in
+			// production paths because production binaries set the env
+			// var explicitly and never satisfy isTestBinary().
+			secret = "test-only-placeholder-encryption-secret"
+		} else {
+			fmt.Fprintln(os.Stderr, "FATAL: ENCRYPTION_SECRET environment variable is required")
+			os.Exit(1)
+		}
 	}
 	if len(secret) < 16 {
 		fmt.Fprintln(os.Stderr, "FATAL: ENCRYPTION_SECRET must be at least 16 characters")

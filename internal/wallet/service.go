@@ -265,13 +265,87 @@ func (s *Service) ReleaseFunds(ctx context.Context, userID int64, amount float64
 // SettleBet
 // ---------------------------------------------------------------------------
 
+// settlementOutcome is the JSON payload we persist alongside the
+// settlement_idempotency row so a replay can return the same answer.
+type settlementOutcome struct {
+	UserID     int64   `json:"user_id"`
+	BetID      string  `json:"bet_id"`
+	PnL        float64 `json:"pnl"`
+	Commission float64 `json:"commission"`
+	AppliedAt  string  `json:"applied_at"`
+}
+
+// SettleBet credits/debits the user's balance for a settled bet.
+//
+// Idempotency: betID is used as the idempotency key. Bet IDs are random hex
+// strings created at bet placement (see internal/matching) and are globally
+// unique, so reusing them here gives us at-most-once semantics without an
+// extra parameter at the call site. The first SettleBet for a given betID
+// claims a row in betting.settlement_idempotency INSIDE the same transaction
+// that mutates the user balance and writes ledger entries; any subsequent
+// call short-circuits, returns ErrDuplicateOperation, and reads the original
+// outcome back from the idempotency table for diagnostics.
+//
+// Callers that previously inspected the ledger UNIQUE(reference) constraint
+// for duplicate detection will now see ErrDuplicateOperation here first,
+// which is the same sentinel they already handle (see
+// internal/settlement/service.go).
 func (s *Service) SettleBet(ctx context.Context, userID int64, betID string, pnl float64, commission float64) error {
+	if betID == "" {
+		return fmt.Errorf("settle bet: betID is required for idempotency")
+	}
+
 	// READ COMMITTED + row lock via FOR UPDATE below.
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return fmt.Errorf("settle bet: begin tx: %w", err)
 	}
 	defer tx.Rollback()
+
+	// Claim the idempotency key first. If a row already exists for this
+	// betID we treat the operation as already applied and return the
+	// recorded outcome via ErrDuplicateOperation.
+	outcome := settlementOutcome{
+		UserID:     userID,
+		BetID:      betID,
+		PnL:        pnl,
+		Commission: commission,
+		AppliedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	outcomeJSON, err := json.Marshal(outcome)
+	if err != nil {
+		return fmt.Errorf("settle bet: marshal outcome: %w", err)
+	}
+	idemRes, err := tx.ExecContext(ctx,
+		`INSERT INTO betting.settlement_idempotency (key, applied_at, result_json)
+		 VALUES ($1, NOW(), $2::jsonb)
+		 ON CONFLICT (key) DO NOTHING`,
+		betID, string(outcomeJSON),
+	)
+	if err != nil {
+		return fmt.Errorf("settle bet: claim idempotency key: %w", err)
+	}
+	claimed, err := idemRes.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("settle bet: idempotency rows affected: %w", err)
+	}
+	if claimed == 0 {
+		// Row already exists. Roll back our (no-op) tx and read the prior
+		// outcome from a fresh statement so the caller can log it.
+		_ = tx.Rollback()
+		var priorJSON []byte
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT result_json FROM betting.settlement_idempotency WHERE key = $1`,
+			betID,
+		).Scan(&priorJSON); err == nil {
+			s.logger.InfoContext(ctx, "settle bet: duplicate, returning prior outcome",
+				"bet_id", betID, "user_id", userID, "prior", string(priorJSON))
+		} else {
+			s.logger.InfoContext(ctx, "settle bet: duplicate, prior outcome unavailable",
+				"bet_id", betID, "user_id", userID, "error", err)
+		}
+		return ErrDuplicateOperation
+	}
 
 	// Lock the row before updating to prevent serialization failures.
 	var balance float64
@@ -291,43 +365,29 @@ func (s *Service) SettleBet(ctx context.Context, userID int64, betID string, pnl
 		return fmt.Errorf("settle bet: update balance: %w", err)
 	}
 
-	// Settlement ledger entry
+	// Settlement ledger entry. The ON CONFLICT here is now belt-and-braces
+	// since the idempotency table above already gates re-entry, but we keep
+	// it so a manually-inserted ledger row from cmd/server doesn't blow up.
 	ref := fmt.Sprintf("settlement:%s", betID)
-	res, err := tx.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO ledger (user_id, amount, type, reference, bet_id, created_at)
 		 VALUES ($1, $2, 'settlement', $3, $4, NOW())
 		 ON CONFLICT (reference) DO NOTHING`,
 		userID, pnl, ref, betID,
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("settle bet: insert settlement ledger: %w", err)
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("settle bet: rows affected: %w", err)
-	}
-	if rows == 0 {
-		return ErrDuplicateOperation
 	}
 
 	// Commission entry if applicable
 	if commission > 0 {
 		commRef := fmt.Sprintf("commission:%s", betID)
-		commRes, err := tx.ExecContext(ctx,
+		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO ledger (user_id, amount, type, reference, bet_id, created_at)
 			 VALUES ($1, $2, 'commission', $3, $4, NOW())
 			 ON CONFLICT (reference) DO NOTHING`,
 			userID, -commission, commRef, betID,
-		)
-		if err != nil {
+		); err != nil {
 			return fmt.Errorf("settle bet: insert commission ledger: %w", err)
-		}
-		commRows, err := commRes.RowsAffected()
-		if err != nil {
-			return fmt.Errorf("settle bet: commission rows affected: %w", err)
-		}
-		if commRows == 0 {
-			return ErrDuplicateOperation
 		}
 
 		_, err = tx.ExecContext(ctx,
@@ -347,6 +407,28 @@ func (s *Service) SettleBet(ctx context.Context, userID int64, betID string, pnl
 
 	s.logger.InfoContext(ctx, "bet settled",
 		"user_id", userID, "bet_id", betID, "pnl", pnl, "commission", commission)
+	return nil
+}
+
+// EnsureSettlementIdempotencySchema creates the betting.settlement_idempotency
+// table if it does not already exist. Call once at service startup before
+// SettleBet is invoked. The table is intentionally narrow: a primary key on
+// the idempotency key, an applied_at timestamp for forensics/cleanup, and a
+// JSONB blob holding the recorded outcome so that duplicate calls can return
+// the original answer.
+func EnsureSettlementIdempotencySchema(db *sql.DB) error {
+	if db == nil {
+		return errors.New("ensure settlement idempotency schema: db is nil")
+	}
+	const stmt = `
+CREATE TABLE IF NOT EXISTS betting.settlement_idempotency (
+    key         TEXT PRIMARY KEY,
+    applied_at  TIMESTAMPTZ DEFAULT NOW(),
+    result_json JSONB
+)`
+	if _, err := db.Exec(stmt); err != nil {
+		return fmt.Errorf("create settlement_idempotency table: %w", err)
+	}
 	return nil
 }
 
