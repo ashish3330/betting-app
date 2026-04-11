@@ -151,49 +151,15 @@ func main() {
 		})
 	})))
 
-	mux.Handle("GET /api/v1/bets/history", authMw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		userID := middleware.UserIDFromContext(r.Context())
-		rows, err := db.QueryContext(r.Context(),
-			`SELECT id, market_id, side, price, stake, matched_stake, status, created_at
-			 FROM betting.orders
-			 WHERE user_id = $1
-			 ORDER BY created_at DESC
-			 LIMIT 50`, userID)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "failed to fetch bet history"})
-			return
-		}
-		defer rows.Close()
-
-		type betRecord struct {
-			ID           string  `json:"id"`
-			MarketID     string  `json:"market_id"`
-			Side         string  `json:"side"`
-			Price        float64 `json:"price"`
-			Stake        float64 `json:"stake"`
-			MatchedStake float64 `json:"matched_stake"`
-			Status       string  `json:"status"`
-			CreatedAt    string  `json:"created_at"`
-		}
-
-		var bets []betRecord
-		for rows.Next() {
-			var b betRecord
-			if err := rows.Scan(&b.ID, &b.MarketID, &b.Side, &b.Price, &b.Stake, &b.MatchedStake, &b.Status, &b.CreatedAt); err != nil {
-				log.Error("failed to scan bet row", "error", err)
-				continue
-			}
-			bets = append(bets, b)
-		}
-		if bets == nil {
-			bets = []betRecord{}
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(bets)
-	})))
+	// User-facing bet read endpoints. These used to be served by the
+	// monolith (cmd/server/main.go:handleUserBets / handleBetsHistory);
+	// the matching-engine now owns them because it already owns the
+	// betting.bets table. The previous inline /bets/history handler
+	// queried a non-existent betting.orders table — see
+	// scripts/api-test/main.go's skip list for the bug report.
+	mux.Handle("GET /api/v1/bets", authMw(http.HandlerFunc(handler.UserBets)))
+	mux.Handle("GET /api/v1/bets/history", authMw(http.HandlerFunc(handler.BetsHistoryHandler)))
+	mux.Handle("GET /api/v1/positions/{marketId}", authMw(http.HandlerFunc(handler.GetPositions)))
 
 	// Prometheus scrape endpoint
 	mux.Handle("GET /metrics", service.MetricsHandler())

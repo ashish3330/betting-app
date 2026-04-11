@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
@@ -29,6 +30,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/bet/place", h.PlaceBet)
 	mux.HandleFunc("DELETE /api/v1/bet/{betId}/cancel", h.CancelBet)
 	mux.HandleFunc("GET /api/v1/market/{marketId}/orderbook", h.GetOrderBook)
+	mux.HandleFunc("GET /api/v1/bets", h.UserBets)
+	mux.HandleFunc("GET /api/v1/bets/history", h.BetsHistoryHandler)
+	mux.HandleFunc("GET /api/v1/positions/{marketId}", h.GetPositions)
 }
 
 func (h *Handler) PlaceBet(w http.ResponseWriter, r *http.Request) {
@@ -152,4 +156,98 @@ func (h *Handler) GetOrderBook(w http.ResponseWriter, r *http.Request) {
 		"back":      backs,
 		"lay":       lays,
 	})
+}
+
+// UserBets implements GET /api/v1/bets — the bet listing endpoint used by
+// the navbar exposure popup, the bets page, and the account history page.
+// Supports ?status=open|matched|settled|cancelled|void, ?market_id=<id>,
+// ?page=<n> and ?limit=<n> query parameters.
+//
+// This is the matching-engine port of cmd/server/main.go:handleUserBets.
+func (h *Handler) UserBets(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+	if userID == 0 {
+		httputil.WriteError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	q := r.URL.Query()
+	statusFilter := q.Get("status")
+	marketFilter := q.Get("market_id")
+
+	// ?limit and ?offset are both supported. The monolith uses page/limit;
+	// the integration test and some frontend callers use limit/offset. We
+	// translate offset into an equivalent page number so the service layer
+	// stays page-based.
+	page, _ := strconv.Atoi(q.Get("page"))
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if offsetStr := q.Get("offset"); offsetStr != "" && page == 0 {
+		if offset, err := strconv.Atoi(offsetStr); err == nil && offset >= 0 {
+			effLimit := limit
+			if effLimit <= 0 || effLimit > 100 {
+				effLimit = 50
+			}
+			page = offset/effLimit + 1
+		}
+	}
+
+	result, err := h.ListUserBets(r.Context(), userID, statusFilter, marketFilter, page, limit)
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "list user bets failed", "user_id", userID, "error", err)
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to fetch bets")
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, result)
+}
+
+// BetsHistoryHandler implements GET /api/v1/bets/history — returns every
+// valid-status bet for the authenticated user plus aggregate summary stats
+// (total stake, PnL, won/lost/pending counts).
+//
+// Replaces the previous inline handler in cmd/matching-engine/main.go which
+// incorrectly queried the non-existent betting.orders table. See the skip
+// list in scripts/api-test/main.go for the bug report.
+func (h *Handler) BetsHistoryHandler(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+	if userID == 0 {
+		httputil.WriteError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	result, err := h.BetsHistory(r.Context(), userID)
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "bet history failed", "user_id", userID, "error", err)
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to fetch bet history")
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, result)
+}
+
+// GetPositions implements GET /api/v1/positions/{marketId} — returns the
+// user's net matched position per runner for a single market. New handler
+// for the microservices split; the monolith computes this inline inside
+// the exposure popup handler.
+func (h *Handler) GetPositions(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+	if userID == 0 {
+		httputil.WriteError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	marketID := r.PathValue("marketId")
+	if marketID == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "market_id required")
+		return
+	}
+
+	result, err := h.GetUserPositionsForMarket(r.Context(), userID, marketID)
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "positions query failed", "user_id", userID, "market_id", marketID, "error", err)
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to fetch positions")
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, result)
 }
