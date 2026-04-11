@@ -8,12 +8,9 @@ import (
 	"time"
 )
 
-// EnrichedBet mirrors the monolith's enriched bet payload so the existing
-// frontend (navbar exposure breakdown, history page, etc.) keeps working
-// unchanged when it hits the matching-engine instead of cmd/server.
-//
-// Field order and JSON tags intentionally match handleUserBets in
-// cmd/server/main.go.
+// EnrichedBet is the enriched bet payload consumed by the frontend
+// (navbar exposure breakdown, history page, etc.). Field order and JSON
+// tags are part of the public API contract.
 type EnrichedBet struct {
 	ID             string    `json:"id"`
 	MarketID       string    `json:"market_id"`
@@ -37,7 +34,7 @@ type EnrichedBet struct {
 	ProfitLoss    float64 `json:"profit_loss"`
 }
 
-// BetsHistorySummary mirrors the monolith's handleBetsHistory summary payload.
+// BetsHistorySummary is the summary payload returned by /bets/history.
 type BetsHistorySummary struct {
 	TotalBets  int     `json:"total_bets"`
 	TotalStake float64 `json:"total_stake"`
@@ -79,9 +76,9 @@ type PositionsResult struct {
 	Positions  []Position `json:"positions"`
 }
 
-// status validation mirrors the monolith: we never return pending / partial /
-// unmatched bets to the user — those represent in-flight engine state rather
-// than a realised exposure.
+// status validation: we never return pending / partial / unmatched bets
+// to the user — those represent in-flight engine state rather than a
+// realised exposure.
 var validUserBetStatuses = map[string]bool{
 	"matched":   true,
 	"settled":   true,
@@ -89,13 +86,12 @@ var validUserBetStatuses = map[string]bool{
 	"void":      true,
 }
 
-// ListUserBets returns the bets for a user, optionally filtered by status and
-// market, paginated. This is the porting of cmd/server/main.go:handleUserBets
-// into the matching-engine, except enrichment is done via SQL joins instead
-// of an in-memory store lookup.
+// ListUserBets returns the bets for a user, optionally filtered by status
+// and market, paginated. Enrichment is done via SQL joins against
+// betting.markets / betting.runners.
 //
-// The status filter accepts the "open" alias (matched but not yet settled) in
-// addition to the raw statuses.
+// The status filter accepts the "open" alias (matched but not yet settled)
+// in addition to the raw statuses.
 func (h *Handler) ListUserBets(ctx context.Context, userID int64, statusFilter, marketFilter string, page, limit int) (*BetsListResult, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
@@ -146,7 +142,7 @@ func (h *Handler) ListUserBets(ctx context.Context, userID int64, statusFilter, 
 }
 
 // BetsHistory returns all valid-status bets for the user plus aggregated
-// summary stats. Ported from cmd/server/main.go:handleBetsHistory.
+// summary stats.
 //
 // Unlike ListUserBets this always returns the full list so the frontend
 // history page can show lifetime totals. Callers that need pagination should
@@ -332,8 +328,8 @@ func queryEnrichedBets(ctx context.Context, db *sql.DB, userID int64) ([]Enriche
 		); err != nil {
 			return nil, fmt.Errorf("scan bet: %w", err)
 		}
-		// Display side mirrors the monolith: fancy/session markets use
-		// "yes"/"no" instead of back/lay so the history table reads naturally.
+		// Display side: fancy/session markets use "yes"/"no" instead of
+		// back/lay so the history table reads naturally.
 		if b.DisplaySide == "" {
 			if strings.EqualFold(b.MarketType, "fancy") || strings.EqualFold(b.MarketType, "session") {
 				if b.Side == "back" {

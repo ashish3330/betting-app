@@ -222,8 +222,8 @@ func (s *Service) GetReferralCode(ctx context.Context, userID int64) (string, er
 	return code.String, nil
 }
 
-// ReferralStats mirrors the shape returned by the monolith's GetReferralStats
-// so frontend code can consume either service transparently.
+// ReferralStats is the payload shape consumed by the frontend referral
+// dashboard.
 type ReferralStats struct {
 	ReferralCode   string         `json:"referral_code"`
 	ReferralLink   string         `json:"referral_link"`
@@ -242,11 +242,11 @@ type ReferredUser struct {
 
 // GetReferralStats returns the referral code plus aggregated stats for a user.
 //
-// The auth.users table in the microservices migration set does not declare a
-// `referred_by` column (it is only ALTER-ed in by the monolith's bootstrap
-// path), so the count-and-aggregate query is guarded by a pg_catalog lookup.
-// If the column is not present we simply return zero totals rather than
-// erroring out — the caller still gets a usable, well-formed response.
+// The auth.users table in the microservices migration set does not always
+// declare a `referred_by` column, so the count-and-aggregate query is
+// guarded by a pg_catalog lookup. If the column is not present we simply
+// return zero totals rather than erroring out — the caller still gets a
+// usable, well-formed response.
 func (s *Service) GetReferralStats(ctx context.Context, userID int64) (*ReferralStats, error) {
 	code, err := s.GetReferralCode(ctx, userID)
 	if err != nil {
@@ -294,9 +294,9 @@ func (s *Service) GetReferralStats(ctx context.Context, userID int64) (*Referral
 		if err := rows.Scan(&ru.Username, &ru.JoinedAt, &ru.Status); err != nil {
 			return nil, fmt.Errorf("scan referred user: %w", err)
 		}
-		// Match the monolith's mock earnings formula (1% of a notional 1000
-		// first-deposit). Real earnings accounting lives in the reporting
-		// pipeline; this endpoint is just for the referral dashboard card.
+		// Mock earnings formula: 1% of a notional 1000 first-deposit. Real
+		// earnings accounting lives in the reporting pipeline; this endpoint
+		// is just for the referral dashboard card.
 		ru.Earnings = 10.0
 		stats.TotalEarnings += ru.Earnings
 		stats.ReferredUsers = append(stats.ReferredUsers, ru)

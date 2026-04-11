@@ -141,8 +141,7 @@ func (h *Handler) authenticatedUserID(r *http.Request) (int64, bool) {
 }
 
 // GetSessions returns the active sessions for the authenticated user.
-// Ported from cmd/server/main.go:handleGetSessions. The most recent
-// successful login is flagged current=true.
+// The most recent successful login is flagged current=true.
 func (h *Handler) GetSessions(w http.ResponseWriter, r *http.Request) {
 	uid, ok := h.authenticatedUserID(r)
 	if !ok {
@@ -161,8 +160,8 @@ func (h *Handler) GetSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 // LoginHistory returns the last N login records for the authenticated
-// user. Ported from cmd/server/main.go:handleLoginHistory. The `limit`
-// query parameter defaults to 20 and is capped at 500 by the service.
+// user. The `limit` query parameter defaults to 20 and is capped at 500
+// by the service.
 func (h *Handler) LoginHistory(w http.ResponseWriter, r *http.Request) {
 	uid, ok := h.authenticatedUserID(r)
 	if !ok {
@@ -190,8 +189,7 @@ func (h *Handler) LoginHistory(w http.ResponseWriter, r *http.Request) {
 
 // OTPResend issues a fresh OTP code for a user. This endpoint is PUBLIC
 // (used during the pre-login OTP flow) so it must not expose whether a
-// user_id exists — all failures return the same 200 body. Ported from
-// cmd/server/main.go:handleOTPResend.
+// user_id exists — all failures return the same 200 body.
 func (h *Handler) OTPResend(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		UserID int64 `json:"user_id"`
@@ -217,7 +215,7 @@ func (h *Handler) OTPResend(w http.ResponseWriter, r *http.Request) {
 }
 
 // LogoutAllSessions revokes every refresh token belonging to the
-// authenticated user. Ported from cmd/server/main.go:handleLogoutAllSessions.
+// authenticated user.
 func (h *Handler) LogoutAllSessions(w http.ResponseWriter, r *http.Request) {
 	uid, ok := h.authenticatedUserID(r)
 	if !ok {

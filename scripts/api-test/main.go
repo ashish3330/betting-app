@@ -28,17 +28,14 @@ var (
 	mode    = flag.String("mode", "monolith", "target mode: 'monolith' or 'microservices' (skips tests for endpoints not yet implemented in microservices)")
 )
 
-// endpointsMissingInMicroservices lists test names that hit endpoints only
-// available in the monolith today. When running with --mode=microservices,
-// these are recorded as skipped instead of failed so the run is actionable.
+// endpointsMissingInMicroservices lists test names that hit endpoints not
+// yet implemented in microservices mode. When running with
+// --mode=microservices, entries in this map are recorded as skipped
+// instead of failed so the run is actionable.
 //
-// TODO(microservices): implement each of these in the relevant service and
-// remove its entry from this set as they come online.
-// All previously skipped endpoints have now been ported to the appropriate
-// microservice. The skip-list is intentionally empty so the integration
-// suite exercises every route in --mode=microservices identically to the
-// monolith run, and any future regression on a ported endpoint shows up
-// as a real failure instead of a silent skip.
+// The skip-list is intentionally empty: every route is exercised in
+// --mode=microservices, so any regression on a previously-skipped
+// endpoint shows up as a real failure instead of a silent skip.
 var endpointsMissingInMicroservices = map[string]string{}
 
 var (

@@ -192,8 +192,8 @@ func (s *Service) ListCompetitions(ctx context.Context, sport string) ([]*models
 // ListEvents fetches events optionally filtered by competition and/or sport.
 //
 // betting.events uses sport_id as the FK to betting.sports, so we filter on
-// sport_id. An empty competitionID skips the competition filter, matching the
-// monolith's /api/v1/events?sport= behaviour.
+// sport_id. An empty competitionID skips the competition filter; this is the
+// behaviour expected by GET /api/v1/events?sport=.
 func (s *Service) ListEvents(ctx context.Context, competitionID, sport string) ([]*models.Event, error) {
 	query := `SELECT id, competition_id, sport_id, name, home_team, away_team, start_time, status, in_play, score
 			  FROM events WHERE 1=1`

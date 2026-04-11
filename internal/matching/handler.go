@@ -162,8 +162,6 @@ func (h *Handler) GetOrderBook(w http.ResponseWriter, r *http.Request) {
 // the navbar exposure popup, the bets page, and the account history page.
 // Supports ?status=open|matched|settled|cancelled|void, ?market_id=<id>,
 // ?page=<n> and ?limit=<n> query parameters.
-//
-// This is the matching-engine port of cmd/server/main.go:handleUserBets.
 func (h *Handler) UserBets(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	if userID == 0 {
@@ -175,10 +173,10 @@ func (h *Handler) UserBets(w http.ResponseWriter, r *http.Request) {
 	statusFilter := q.Get("status")
 	marketFilter := q.Get("market_id")
 
-	// ?limit and ?offset are both supported. The monolith uses page/limit;
-	// the integration test and some frontend callers use limit/offset. We
-	// translate offset into an equivalent page number so the service layer
-	// stays page-based.
+	// Both page/limit and limit/offset are accepted: the integration test
+	// and some frontend callers use limit/offset while others use page/limit.
+	// We translate offset into an equivalent page number so the service
+	// layer stays page-based.
 	page, _ := strconv.Atoi(q.Get("page"))
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	if offsetStr := q.Get("offset"); offsetStr != "" && page == 0 {
@@ -226,9 +224,7 @@ func (h *Handler) BetsHistoryHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetPositions implements GET /api/v1/positions/{marketId} — returns the
-// user's net matched position per runner for a single market. New handler
-// for the microservices split; the monolith computes this inline inside
-// the exposure popup handler.
+// user's net matched position per runner for a single market.
 func (h *Handler) GetPositions(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.UserIDFromContext(r.Context())
 	if userID == 0 {

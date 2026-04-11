@@ -151,12 +151,8 @@ func main() {
 		})
 	})))
 
-	// User-facing bet read endpoints. These used to be served by the
-	// monolith (cmd/server/main.go:handleUserBets / handleBetsHistory);
-	// the matching-engine now owns them because it already owns the
-	// betting.bets table. The previous inline /bets/history handler
-	// queried a non-existent betting.orders table — see
-	// scripts/api-test/main.go's skip list for the bug report.
+	// User-facing bet read endpoints. The matching-engine owns these
+	// because it already owns the betting.bets table.
 	mux.Handle("GET /api/v1/bets", authMw(http.HandlerFunc(handler.UserBets)))
 	mux.Handle("GET /api/v1/bets/history", authMw(http.HandlerFunc(handler.BetsHistoryHandler)))
 	mux.Handle("GET /api/v1/positions/{marketId}", authMw(http.HandlerFunc(handler.GetPositions)))

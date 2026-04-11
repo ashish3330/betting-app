@@ -192,7 +192,7 @@ func main() {
 		// Casino webhooks — no auth (provider-authenticated)
 		{prefix: "/api/v1/casino/webhook/", proxyName: "casino", requireAuth: false},
 
-		// Public casino catalog (match monolith behaviour)
+		// Public casino catalog
 		{prefix: "/api/v1/casino/providers", proxyName: "casino", requireAuth: false},
 		{prefix: "/api/v1/casino/games", proxyName: "casino", requireAuth: false},
 		{prefix: "/api/v1/casino/categories", proxyName: "casino", requireAuth: false},
@@ -218,7 +218,7 @@ func main() {
 		{prefix: "/api/v1/panel/", proxyName: "admin", requireAuth: true},
 		{prefix: "/api/v1/hierarchy/", proxyName: "hierarchy", requireAuth: true},
 		{prefix: "/api/v1/responsible-gambling/", proxyName: "hierarchy", requireAuth: true},
-		// Alias — the monolith/tests/frontend also use /responsible/; route to same service.
+		// Alias — the tests and frontend also use /responsible/; route to same service.
 		{prefix: "/api/v1/responsible/", proxyName: "hierarchy", requireAuth: true},
 		{prefix: "/api/v1/referral/", proxyName: "hierarchy", requireAuth: true},
 		{prefix: "/api/v1/kyc/", proxyName: "hierarchy", requireAuth: true},

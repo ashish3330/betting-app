@@ -20,9 +20,9 @@ import (
 
 type contextKey string
 
-// Legacy per-field context keys. Kept for backwards compatibility with
-// callers (notably cmd/server/main.go) that inject claims directly without
-// going through AuthMiddleware. Newer code paths use a single userCtx struct.
+// Per-field context keys. Kept for backwards compatibility with callers
+// that inject claims directly without going through AuthMiddleware.
+// Newer code paths use a single userCtx struct.
 const (
 	UserIDKey   contextKey = "user_id"
 	UsernameKey contextKey = "username"

@@ -24,8 +24,8 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/responsible-gambling/session", h.SessionInfo)
 
 	// Short-form /responsible/* aliases. These match the URLs used by the
-	// frontend and the integration test suite, which never adopted the
-	// longer /responsible-gambling/ prefix used by the original monolith.
+	// frontend and the integration test suite, which use the shorter
+	// /responsible/ prefix instead of /responsible-gambling/.
 	mux.HandleFunc("GET /api/v1/responsible/limits", h.GetLimits)
 	mux.HandleFunc("PUT /api/v1/responsible/limits", h.UpdateLimits)
 	mux.HandleFunc("POST /api/v1/responsible/self-exclude", h.SelfExclude)

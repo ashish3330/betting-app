@@ -527,7 +527,7 @@ func (s *Service) checkResponsibleGambling(ctx context.Context, userID int64) er
 		return nil // no limits set yet — allowed
 	}
 	if err != nil {
-		// Tolerate the table being absent in the monolith schema; otherwise
+		// Tolerate the table being absent (older schema variants); otherwise
 		// fail closed on a real query error.
 		msg := strings.ToLower(err.Error())
 		if strings.Contains(msg, "does not exist") || strings.Contains(msg, "undefined_table") {
@@ -547,9 +547,8 @@ func (s *Service) checkResponsibleGambling(ctx context.Context, userID int64) er
 }
 
 // checkKYCVerified blocks casino launch unless the user has completed KYC.
-// Fails closed on DB error. Tolerates the column being absent on the
-// monolith's lighter schema (returns nil — KYC enforcement is then handled
-// by the monolith's own withdraw path).
+// Fails closed on DB error. Tolerates the kyc_status column being absent
+// (returns nil — KYC enforcement is then handled by the withdraw path).
 func (s *Service) checkKYCVerified(ctx context.Context, userID int64) error {
 	var status sql.NullString
 	err := s.db.QueryRowContext(ctx,

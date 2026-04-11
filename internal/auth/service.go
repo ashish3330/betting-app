@@ -33,13 +33,11 @@ func userKey(userID int64) string {
 	return userCacheKey + strconv.FormatInt(userID, 10)
 }
 
-// Argon2id parameters. These are deliberately kept in lock-step with the
-// monolith hashPassword in cmd/server/store.go so that password hashes
-// produced by either binary verify against the other. If you change the
-// values here, you MUST also update cmd/server/store.go (and re-hash any
-// existing data via a migration).
+// Argon2id parameters. If you change any of these values you MUST
+// re-hash any existing stored passwords via a migration, otherwise
+// previously-issued hashes will fail to verify.
 //
-// Current values, chosen to match the strongest of the two implementations:
+// Current values:
 //
 //	time      = 3 iterations
 //	memory    = 64 * 1024 KiB (= 64 MiB)
@@ -48,12 +46,10 @@ func userKey(userID int64) string {
 //	saltLen   = 16 bytes
 //
 // These satisfy the OWASP 2023 Argon2id minimum recommendation
-// (m=46 MiB, t=1, p=1) with margin and were verified equal to the
-// monolith's parameters at cmd/server/store.go:763 / :772 on the
-// microservice-paradigm branch.
+// (m=46 MiB, t=1, p=1) with margin.
 const (
 	argon2Iterations = 3
-	argon2Memory     = 64 * 1024 // 64 MiB, matches cmd/server/store.go
+	argon2Memory     = 64 * 1024 // 64 MiB
 	argon2Threads    = 4
 	argon2KeyLength  = 32
 	argon2SaltLength = 16
@@ -384,7 +380,7 @@ func (s *Service) IsBlacklisted(ctx context.Context, token string) bool {
 //
 // The query handles both schema variants that exist in this codebase:
 //   - migrations/004_production_hardening.sql: self_excluded_until TIMESTAMPTZ
-//   - cmd/server/db.go inline migration: self_excluded BOOLEAN + excluded_until TIMESTAMPTZ
+//   - older inline migration: self_excluded BOOLEAN + excluded_until TIMESTAMPTZ
 func (s *Service) CheckSelfExclusion(ctx context.Context, userID int64) error {
 	// Try the canonical column first (from migration 004).
 	var until sql.NullTime
@@ -617,8 +613,7 @@ type LoginRecord struct {
 // SessionInfo is a single active session, derived from login history.
 // The auth-service does not yet maintain a dedicated sessions table here,
 // so we surface recent successful logins (from auth.login_history) as
-// sessions — this matches the monolith's handleGetSessions shape which
-// the integration tests exercise.
+// sessions — this is the shape the integration tests exercise.
 type SessionInfo struct {
 	ID        string    `json:"id"`
 	IP        string    `json:"ip"`
@@ -629,7 +624,7 @@ type SessionInfo struct {
 
 // GetLoginHistory returns the most recent `limit` login_history rows for
 // the given user, ordered newest first. The auth.login_history table is
-// created by migration 001 / cmd/server/db.go.
+// created by migration 001.
 func (s *Service) GetLoginHistory(ctx context.Context, userID int64, limit int) ([]*LoginRecord, error) {
 	if limit <= 0 {
 		limit = 20
@@ -666,9 +661,9 @@ func (s *Service) GetLoginHistory(ctx context.Context, userID int64, limit int) 
 }
 
 // GetActiveSessions returns recent successful logins as "sessions". The
-// first entry is flagged current=true. This matches the shape the
-// monolith's handleGetSessions returns so the integration tests pass
-// without a dedicated sessions tracker in the auth-service.
+// first entry is flagged current=true. This is the shape the integration
+// tests expect, and lets us avoid a dedicated sessions tracker in the
+// auth-service.
 func (s *Service) GetActiveSessions(ctx context.Context, userID int64) ([]*SessionInfo, error) {
 	history, err := s.GetLoginHistory(ctx, userID, 10)
 	if err != nil {

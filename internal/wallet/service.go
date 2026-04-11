@@ -382,7 +382,7 @@ func (s *Service) SettleBet(ctx context.Context, userID int64, betID string, pnl
 
 	// Settlement ledger entry. The ON CONFLICT here is now belt-and-braces
 	// since the idempotency table above already gates re-entry, but we keep
-	// it so a manually-inserted ledger row from cmd/server doesn't blow up.
+	// it so a manually-inserted ledger row doesn't blow up.
 	ref := fmt.Sprintf("settlement:%s", betID)
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO ledger (user_id, amount, type, reference, bet_id, created_at)
