@@ -276,6 +276,9 @@ func main() {
 	mux.HandleFunc("GET /api/v1/admin/reconcile", requireRole(handleReconcile, "superadmin", "admin"))
 	// Audit chain verification: admin-only tamper detection.
 	mux.HandleFunc("GET /api/v1/admin/audit/verify", requireRole(handleVerifyAuditChain, "superadmin", "admin"))
+	// Withdrawal finalization: admin-only complete/reject of pending withdrawals.
+	mux.HandleFunc("POST /api/v1/admin/withdraw/{txID}/complete", requireRole(handleWithdrawComplete, "superadmin", "admin"))
+	mux.HandleFunc("POST /api/v1/admin/withdraw/{txID}/reject", requireRole(handleWithdrawReject, "superadmin", "admin"))
 	mux.HandleFunc("GET /api/v1/admin/users", requireRole(handleAdminListUsers, "superadmin", "admin"))
 	mux.HandleFunc("GET /api/v1/admin/users/{id}", requireRole(handleAdminGetUser, "superadmin", "admin"))
 	mux.HandleFunc("GET /api/v1/admin/markets", requireRole(handleAdminListMarkets, "superadmin", "admin"))
