@@ -160,8 +160,11 @@ func (s *Service) AcceptOffer(ctx context.Context, offerID string, userID int64)
 		return nil, fmt.Errorf("offer has expired, request a new one")
 	}
 
-	// --- Step 2: Serializable transaction for acceptance + outbox write. ---
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	// --- Step 2: ReadCommitted transaction for acceptance + outbox write. ---
+	// The cashout_offers row is locked with SELECT ... FOR UPDATE below, which
+	// serializes concurrent accept attempts on the same offer without the
+	// overhead of SERIALIZABLE predicate locks.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}

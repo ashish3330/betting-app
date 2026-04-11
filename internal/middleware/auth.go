@@ -2,12 +2,12 @@ package middleware
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,12 +19,30 @@ import (
 
 type contextKey string
 
+// Legacy per-field context keys. Kept for backwards compatibility with
+// callers (notably cmd/server/main.go) that inject claims directly without
+// going through AuthMiddleware. Newer code paths use a single userCtx struct.
 const (
 	UserIDKey   contextKey = "user_id"
 	UsernameKey contextKey = "username"
 	RoleKey     contextKey = "role"
 	PathKey     contextKey = "path"
 )
+
+// userCtx bundles per-request identity into a single struct so we pay for
+// exactly one context.WithValue call per authenticated request instead of
+// four. Each WithValue allocates a new context node, so collapsing the four
+// Stores into one is a meaningful saving on the hot path.
+type userCtx struct {
+	UserID   int64
+	Username string
+	Role     models.Role
+	Path     string
+}
+
+type userCtxKeyType struct{}
+
+var userCtxKey = userCtxKeyType{}
 
 // responseWriter wraps http.ResponseWriter to capture the status code for logging.
 type responseWriter struct {
@@ -33,8 +51,23 @@ type responseWriter struct {
 	written    bool
 }
 
-func newResponseWriter(w http.ResponseWriter) *responseWriter {
-	return &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+// respWriterPool recycles responseWriter wrappers across requests so we avoid
+// a heap allocation in RequestLogger on every call.
+var respWriterPool = sync.Pool{
+	New: func() interface{} { return new(responseWriter) },
+}
+
+func acquireResponseWriter(w http.ResponseWriter) *responseWriter {
+	rw := respWriterPool.Get().(*responseWriter)
+	rw.ResponseWriter = w
+	rw.statusCode = http.StatusOK
+	rw.written = false
+	return rw
+}
+
+func releaseResponseWriter(rw *responseWriter) {
+	rw.ResponseWriter = nil
+	respWriterPool.Put(rw)
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
@@ -59,6 +92,56 @@ func (rw *responseWriter) Unwrap() http.ResponseWriter {
 }
 
 // ---------------------------------------------------------------------------
+// Token validation cache
+// ---------------------------------------------------------------------------
+
+// tokenCache memoizes JWT validation. JWT parsing is ~20-30µs per call; caching
+// knocks that to a constant-time map lookup for the common case of a client
+// that reuses the same token for many requests within its TTL.
+//
+// The cache is capped to avoid unbounded growth from token rotation.
+type tokenCache struct {
+	mu    sync.RWMutex
+	items map[string]*auth.Claims
+}
+
+const tokenCacheCap = 10000
+
+var jwtCache = &tokenCache{items: make(map[string]*auth.Claims, 1024)}
+
+func (c *tokenCache) get(token string) (*auth.Claims, bool) {
+	c.mu.RLock()
+	claims, ok := c.items[token]
+	c.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	// Honor JWT expiry — a cached entry past its TTL is useless.
+	if claims.ExpiresAt != nil && time.Now().After(claims.ExpiresAt.Time) {
+		c.mu.Lock()
+		delete(c.items, token)
+		c.mu.Unlock()
+		return nil, false
+	}
+	return claims, true
+}
+
+func (c *tokenCache) put(token string, claims *auth.Claims) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.items) >= tokenCacheCap {
+		// Simple bounded eviction: drop an arbitrary existing entry. This
+		// keeps the cache from growing unbounded without the complexity of
+		// full LRU bookkeeping on the hot path.
+		for k := range c.items {
+			delete(c.items, k)
+			break
+		}
+	}
+	c.items[token] = claims
+}
+
+// ---------------------------------------------------------------------------
 // Auth middleware
 // ---------------------------------------------------------------------------
 
@@ -76,16 +159,28 @@ func AuthMiddleware(authService *auth.Service) func(http.Handler) http.Handler {
 				return
 			}
 
-			claims, err := authService.ValidateToken(token)
-			if err != nil {
-				http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
-				return
+			claims, ok := jwtCache.get(token)
+			if !ok {
+				var err error
+				claims, err = authService.ValidateToken(token)
+				if err != nil {
+					http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+					return
+				}
+				jwtCache.put(token, claims)
 			}
 
-			ctx := context.WithValue(r.Context(), UserIDKey, claims.UserID)
-			ctx = context.WithValue(ctx, UsernameKey, claims.Username)
-			ctx = context.WithValue(ctx, RoleKey, claims.Role)
-			ctx = context.WithValue(ctx, PathKey, claims.Path)
+			// Collapse four WithValue calls into one by stashing a single
+			// struct value. UserIDFromContext et al. read from this fast
+			// path first and fall back to the legacy per-field keys for
+			// callers that still set them individually.
+			uc := &userCtx{
+				UserID:   claims.UserID,
+				Username: claims.Username,
+				Role:     claims.Role,
+				Path:     claims.Path,
+			}
+			ctx := context.WithValue(r.Context(), userCtxKey, uc)
 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
@@ -100,8 +195,8 @@ func RequireRole(roles ...models.Role) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			role, ok := r.Context().Value(RoleKey).(models.Role)
-			if !ok || !roleSet[role] {
+			role := RoleFromContext(r.Context())
+			if role == "" || !roleSet[role] {
 				http.Error(w, `{"error":"insufficient permissions"}`, http.StatusForbidden)
 				return
 			}
@@ -224,7 +319,9 @@ func PerUserRateLimiter(rps int, burst int) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			userID := UserIDFromContext(r.Context())
-			key := fmt.Sprintf("user:%d", userID)
+			// strconv avoids the fmt.Sprintf reflection path — a noticeable
+			// win on a per-request hot path.
+			key := "user:" + strconv.FormatInt(userID, 10)
 			if !rl.getLimiter(key).Allow() {
 				w.Header().Set("Retry-After", "1")
 				http.Error(w, `{"error":"rate limit exceeded, slow down"}`, http.StatusTooManyRequests)
@@ -244,17 +341,28 @@ func PerUserRateLimiter(rps int, burst int) func(http.Handler) http.Handler {
 func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Skip observability and liveness endpoints entirely — they
+			// fire every few seconds and would otherwise dominate the log
+			// volume and the RequestLogger's per-request cost.
+			if r.URL.Path == "/metrics" || r.URL.Path == "/health" || r.URL.Path == "/healthz" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			start := time.Now()
-			rw := newResponseWriter(w)
+			rw := acquireResponseWriter(w)
+			defer releaseResponseWriter(rw)
 
 			next.ServeHTTP(rw, r)
 
-			logger.InfoContext(r.Context(), "http request",
-				"method", r.Method,
-				"path", r.URL.Path,
-				"status", rw.statusCode,
-				"duration", time.Since(start).String(),
-				"request_id", RequestIDFromContext(r.Context()),
+			// Typed slog attributes avoid boxing ints/strings through the
+			// variadic interface{} path, which allocates per call.
+			logger.LogAttrs(r.Context(), slog.LevelInfo, "http request",
+				slog.String("method", r.Method),
+				slog.String("path", r.URL.Path),
+				slog.Int("status", rw.statusCode),
+				slog.Duration("duration", time.Since(start)),
+				slog.String("request_id", RequestIDFromContext(r.Context())),
 			)
 		})
 	}
@@ -272,12 +380,12 @@ func RecoverPanic(logger *slog.Logger) func(http.Handler) http.Handler {
 			defer func() {
 				if rec := recover(); rec != nil {
 					stack := string(debug.Stack())
-					logger.ErrorContext(r.Context(), "panic recovered",
-						"error", fmt.Sprintf("%v", rec),
-						"stack", stack,
-						"method", r.Method,
-						"path", r.URL.Path,
-						"request_id", RequestIDFromContext(r.Context()),
+					logger.LogAttrs(r.Context(), slog.LevelError, "panic recovered",
+						slog.Any("error", rec),
+						slog.String("stack", stack),
+						slog.String("method", r.Method),
+						slog.String("path", r.URL.Path),
+						slog.String("request_id", RequestIDFromContext(r.Context())),
 					)
 					http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
 				}
@@ -315,14 +423,40 @@ func extractBearerToken(r *http.Request) string {
 	return ""
 }
 
+// userCtxFromContext pulls the bundled userCtx out of the request context if
+// AuthMiddleware stashed one. Returns nil when no struct was set so callers
+// can fall back to the legacy per-field keys.
+func userCtxFromContext(ctx context.Context) *userCtx {
+	if v, ok := ctx.Value(userCtxKey).(*userCtx); ok {
+		return v
+	}
+	return nil
+}
+
 func UserIDFromContext(ctx context.Context) int64 {
+	if uc := userCtxFromContext(ctx); uc != nil {
+		return uc.UserID
+	}
 	if v, ok := ctx.Value(UserIDKey).(int64); ok {
 		return v
 	}
 	return 0
 }
 
+func UsernameFromContext(ctx context.Context) string {
+	if uc := userCtxFromContext(ctx); uc != nil {
+		return uc.Username
+	}
+	if v, ok := ctx.Value(UsernameKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
 func RoleFromContext(ctx context.Context) models.Role {
+	if uc := userCtxFromContext(ctx); uc != nil {
+		return uc.Role
+	}
 	if v, ok := ctx.Value(RoleKey).(models.Role); ok {
 		return v
 	}
@@ -332,6 +466,9 @@ func RoleFromContext(ctx context.Context) models.Role {
 // PathFromContext returns the hierarchical path stored in the context (set by
 // AuthMiddleware from JWT claims). Returns empty string if not present.
 func PathFromContext(ctx context.Context) string {
+	if uc := userCtxFromContext(ctx); uc != nil {
+		return uc.Path
+	}
 	if v, ok := ctx.Value(PathKey).(string); ok {
 		return v
 	}

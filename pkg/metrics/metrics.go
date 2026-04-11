@@ -16,14 +16,25 @@ var (
 			Name: "lotus_http_requests_total",
 			Help: "Total number of HTTP requests",
 		},
-		[]string{"service", "method", "path", "status"},
+		[]string{"service", "method", "path"},
+	)
+
+	// HTTPErrorsTotal counts failing requests bucketed by status class (4xx/5xx).
+	// Splitting errors out of the main counter keeps the happy-path metric at
+	// low cardinality while still letting us alert on error rate.
+	HTTPErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "lotus_http_errors_total",
+			Help: "HTTP request errors by class",
+		},
+		[]string{"service", "method", "path", "class"},
 	)
 
 	HTTPRequestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "lotus_http_request_duration_seconds",
 			Help:    "HTTP request duration in seconds",
-			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+			Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1},
 		},
 		[]string{"service", "method", "path"},
 	)
@@ -134,6 +145,7 @@ var (
 func init() {
 	prometheus.MustRegister(
 		HTTPRequestsTotal,
+		HTTPErrorsTotal,
 		HTTPRequestDuration,
 		BetsPlacedTotal,
 		BetStakeTotal,

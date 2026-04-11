@@ -146,6 +146,9 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8080"
+      GOMEMLIMIT: "${GATEWAY_GOMEMLIMIT:-400MiB}"
+      GOGC: "${GOGC:-100}"
+      GOMAXPROCS: "${GOMAXPROCS:-2}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,auth,public"
       REDIS_URL: "redis:6379"
@@ -230,6 +233,9 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8081"
+      GOMEMLIMIT: "${AUTH_GOMEMLIMIT:-200MiB}"
+      GOGC: "${GOGC:-100}"
+      GOMAXPROCS: "${GOMAXPROCS:-2}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=auth,public"
       REDIS_URL: "redis:6379"
@@ -260,6 +266,9 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8082"
+      GOMEMLIMIT: "${WALLET_GOMEMLIMIT:-200MiB}"
+      GOGC: "${GOGC:-100}"
+      GOMAXPROCS: "${GOMAXPROCS:-2}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
@@ -290,6 +299,9 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8083"
+      GOMEMLIMIT: "${MATCHING_GOMEMLIMIT:-1800MiB}"
+      GOGC: "${MATCHING_GOGC:-100}"
+      GOMAXPROCS: "${MATCHING_GOMAXPROCS:-4}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
@@ -320,6 +332,9 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8084"
+      GOMEMLIMIT: "${PAYMENT_GOMEMLIMIT:-200MiB}"
+      GOGC: "${GOGC:-100}"
+      GOMAXPROCS: "${GOMAXPROCS:-2}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
@@ -350,6 +365,9 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8085"
+      GOMEMLIMIT: "${CASINO_GOMEMLIMIT:-200MiB}"
+      GOGC: "${GOGC:-100}"
+      GOMAXPROCS: "${GOMAXPROCS:-2}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
@@ -380,6 +398,9 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8086"
+      GOMEMLIMIT: "${ODDS_GOMEMLIMIT:-200MiB}"
+      GOGC: "${GOGC:-100}"
+      GOMAXPROCS: "${GOMAXPROCS:-2}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
@@ -410,6 +431,9 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8087"
+      GOMEMLIMIT: "${FRAUD_GOMEMLIMIT:-200MiB}"
+      GOGC: "${GOGC:-100}"
+      GOMAXPROCS: "${GOMAXPROCS:-2}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
@@ -440,6 +464,9 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8088"
+      GOMEMLIMIT: "${REPORTING_GOMEMLIMIT:-200MiB}"
+      GOGC: "${GOGC:-100}"
+      GOMAXPROCS: "${GOMAXPROCS:-2}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
@@ -468,6 +495,9 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8089"
+      GOMEMLIMIT: "${RISK_GOMEMLIMIT:-200MiB}"
+      GOGC: "${GOGC:-100}"
+      GOMAXPROCS: "${GOMAXPROCS:-2}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
@@ -495,6 +525,9 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8090"
+      GOMEMLIMIT: "${HIERARCHY_GOMEMLIMIT:-200MiB}"
+      GOGC: "${GOGC:-100}"
+      GOMAXPROCS: "${GOMAXPROCS:-2}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       REDIS_URL: "redis:6379"
@@ -522,6 +555,9 @@ services:
       - ../.env
     environment:
       HTTP_PORT: "8091"
+      GOMEMLIMIT: "${NOTIFICATION_GOMEMLIMIT:-200MiB}"
+      GOGC: "${GOGC:-100}"
+      GOMAXPROCS: "${GOMAXPROCS:-2}"
       OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-jaeger:4318}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,public"
       NATS_URL: "nats://nats:4222"
@@ -548,6 +584,9 @@ services:
       - ../.env
     environment:
       ADMIN_SERVICE_PORT: "8092"
+      GOMEMLIMIT: "${ADMIN_GOMEMLIMIT:-200MiB}"
+      GOGC: "${GOGC:-100}"
+      GOMAXPROCS: "${GOMAXPROCS:-2}"
       DATABASE_URL: "postgres://${POSTGRES_USER:-lotus}:${POSTGRES_PASSWORD:-L0tus!Xchg2026}@postgres:5432/${POSTGRES_DB:-bettingdb}?sslmode=disable&search_path=betting,auth,public"
       REDIS_URL: "redis:6379"
       REDIS_PASSWORD: "${REDIS_PASSWORD:-R3dis!Lotus2026}"

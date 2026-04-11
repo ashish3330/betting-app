@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/lib/pq"
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
 	"github.com/lotus-exchange/lotus-exchange/internal/wallet"
 )
@@ -64,7 +65,11 @@ type betSettlement struct {
 }
 
 func (s *Service) SettleMarket(ctx context.Context, marketID string, winnerSelectionID int64) (*SettlementResult, error) {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	// READ COMMITTED is sufficient — the market row is locked with FOR UPDATE
+	// below, and batched bets are locked with FOR UPDATE in settleBatch, which
+	// provides all the serialization we need for the "settle a market once"
+	// invariant without the contention of SERIALIZABLE.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
@@ -196,6 +201,45 @@ func (s *Service) settleBatch(
 		return nil, 0, fmt.Errorf("iterate bets: %w", err)
 	}
 
+	// Bulk-fetch commission rates once per batch, replacing the prior N+1
+	// pattern that ran one SELECT per settled bet.
+	commissionRates := make(map[int64]float64, len(bets))
+	if len(bets) > 0 {
+		userIDs := make([]int64, 0, len(bets))
+		seen := make(map[int64]struct{}, len(bets))
+		for _, b := range bets {
+			if _, ok := seen[b.UserID]; ok {
+				continue
+			}
+			seen[b.UserID] = struct{}{}
+			userIDs = append(userIDs, b.UserID)
+		}
+
+		crRows, err := tx.QueryContext(ctx,
+			`SELECT id, COALESCE(commission_rate, 2.0)
+			 FROM users
+			 WHERE id = ANY($1)`,
+			pq.Array(userIDs),
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf("bulk fetch commission rates: %w", err)
+		}
+		for crRows.Next() {
+			var id int64
+			var rate float64
+			if err := crRows.Scan(&id, &rate); err != nil {
+				crRows.Close()
+				return nil, 0, fmt.Errorf("scan commission rate: %w", err)
+			}
+			commissionRates[id] = rate
+		}
+		if err := crRows.Err(); err != nil {
+			crRows.Close()
+			return nil, 0, fmt.Errorf("iterate commission rates: %w", err)
+		}
+		crRows.Close()
+	}
+
 	// Single P&L + commission calculation loop
 	settlements := make([]betSettlement, 0, len(bets))
 	for _, bet := range bets {
@@ -217,18 +261,15 @@ func (s *Service) settleBatch(
 			}
 		}
 
-		// Commission from database, not hardcoded
+		// Commission from the bulk-loaded map. Default to 2.0% if the user
+		// row was not returned (shouldn't happen, but stay defensive).
 		var commission float64
 		if pnl > 0 {
-			var commRate float64
-			err := tx.QueryRowContext(ctx,
-				"SELECT COALESCE(commission_rate, 2.0) FROM users WHERE id = $1",
-				bet.UserID,
-			).Scan(&commRate)
-			if err != nil {
-				return nil, 0, fmt.Errorf("get commission rate for user %d: %w", bet.UserID, err)
+			rate, ok := commissionRates[bet.UserID]
+			if !ok {
+				rate = 2.0
 			}
-			commission = pnl * commRate / 100
+			commission = pnl * rate / 100
 		}
 
 		settlements = append(settlements, betSettlement{
@@ -366,20 +407,27 @@ func (s *Service) ProcessOutbox(ctx context.Context) error {
 		return fmt.Errorf("iterate outbox: %w", err)
 	}
 
-	// Mark claimed events as "processing" within the claim transaction so
-	// they are not picked up again if the process crashes.
-	for _, ev := range events {
-		_, err := claimTx.ExecContext(ctx,
-			"UPDATE settlement_events SET status = 'processing' WHERE id = $1",
-			ev.ID,
-		)
-		if err != nil {
-			return fmt.Errorf("mark event %d as processing: %w", ev.ID, err)
+	// Mark claimed events as "processing" in a single batched UPDATE instead
+	// of one round-trip per event.
+	if len(events) > 0 {
+		ids := make([]int64, 0, len(events))
+		for _, ev := range events {
+			ids = append(ids, ev.ID)
+		}
+		if _, err := claimTx.ExecContext(ctx,
+			"UPDATE settlement_events SET status = 'processing' WHERE id = ANY($1)",
+			pq.Array(ids),
+		); err != nil {
+			return fmt.Errorf("batch mark events as processing: %w", err)
 		}
 	}
 	if err := claimTx.Commit(); err != nil {
 		return fmt.Errorf("commit claim tx: %w", err)
 	}
+
+	// Collect post-processing results so we can batch-update at the end.
+	processedIDs := make([]int64, 0, len(events))
+	failedIDs := make([]int64, 0)
 
 	for _, ev := range events {
 		var processErr error
@@ -424,20 +472,32 @@ func (s *Service) ProcessOutbox(ctx context.Context) error {
 			processErr = fmt.Errorf("unknown event type: %s", ev.EventType)
 		}
 
-		newStatus := "processed"
 		if processErr != nil {
-			newStatus = "failed"
 			s.logger.ErrorContext(ctx, "outbox event failed",
 				"event_id", ev.ID, "bet_id", ev.BetID, "error", processErr)
+			failedIDs = append(failedIDs, ev.ID)
+		} else {
+			processedIDs = append(processedIDs, ev.ID)
 		}
+	}
 
-		_, err := s.db.ExecContext(ctx,
-			"UPDATE settlement_events SET status = $1, processed_at = NOW() WHERE id = $2",
-			newStatus, ev.ID,
-		)
-		if err != nil {
-			s.logger.ErrorContext(ctx, "failed to update outbox status",
-				"event_id", ev.ID, "error", err)
+	// Batch update terminal statuses to avoid one round-trip per event.
+	if len(processedIDs) > 0 {
+		if _, err := s.db.ExecContext(ctx,
+			"UPDATE settlement_events SET status = 'processed', processed_at = NOW() WHERE id = ANY($1)",
+			pq.Array(processedIDs),
+		); err != nil {
+			s.logger.ErrorContext(ctx, "failed to batch-update processed outbox events",
+				"count", len(processedIDs), "error", err)
+		}
+	}
+	if len(failedIDs) > 0 {
+		if _, err := s.db.ExecContext(ctx,
+			"UPDATE settlement_events SET status = 'failed', processed_at = NOW() WHERE id = ANY($1)",
+			pq.Array(failedIDs),
+		); err != nil {
+			s.logger.ErrorContext(ctx, "failed to batch-update failed outbox events",
+				"count", len(failedIDs), "error", err)
 		}
 	}
 

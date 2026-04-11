@@ -3,9 +3,11 @@ package wallet
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
@@ -17,6 +19,19 @@ import (
 // transient failure.
 var ErrDuplicateOperation = errors.New("duplicate operation")
 
+// balanceCacheKey is the Redis key prefix for cached wallet summaries.
+// A very short TTL keeps latency low for hot reads without letting stale
+// values linger long enough to matter for the user experience; mutating
+// operations also explicitly invalidate the key after their DB commit.
+const (
+	balanceCacheKey = "wallet:balance:"
+	balanceCacheTTL = 3 * time.Second
+)
+
+func balanceKey(userID int64) string {
+	return balanceCacheKey + strconv.FormatInt(userID, 10)
+}
+
 type Service struct {
 	db     *sql.DB
 	redis  *redis.Client
@@ -27,11 +42,38 @@ func NewService(db *sql.DB, rdb *redis.Client, logger *slog.Logger) *Service {
 	return &Service{db: db, redis: rdb, logger: logger}
 }
 
+// invalidateBalance best-effort deletes the cached balance for a user.
+// Errors are swallowed because the DB is the source of truth and the cache
+// will expire on its own within balanceCacheTTL.
+func (s *Service) invalidateBalance(ctx context.Context, userID int64) {
+	if s.redis == nil {
+		return
+	}
+	if err := s.redis.Del(ctx, balanceKey(userID)).Err(); err != nil {
+		s.logger.WarnContext(ctx, "wallet: balance cache invalidation failed",
+			"user_id", userID, "error", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // GetBalance
 // ---------------------------------------------------------------------------
 
 func (s *Service) GetBalance(ctx context.Context, userID int64) (*models.WalletSummary, error) {
+	// Short-TTL Redis cache in front of the balance read. The balance query
+	// plus ledger aggregation is one of the hottest endpoints in the API, so
+	// a 3-second cache collapses thundering-herd polling from the dashboard
+	// into a single DB hit per user per window.
+	key := balanceKey(userID)
+	if s.redis != nil {
+		if cached, err := s.redis.Get(ctx, key).Bytes(); err == nil {
+			var summary models.WalletSummary
+			if json.Unmarshal(cached, &summary) == nil {
+				return &summary, nil
+			}
+		}
+	}
+
 	var summary models.WalletSummary
 	summary.UserID = userID
 
@@ -56,6 +98,17 @@ func (s *Service) GetBalance(ctx context.Context, userID int64) (*models.WalletS
 		return nil, fmt.Errorf("aggregate ledger totals: %w", err)
 	}
 
+	// Best-effort populate the cache. Failure just means the next request
+	// re-reads from the DB.
+	if s.redis != nil {
+		if data, mErr := json.Marshal(summary); mErr == nil {
+			if setErr := s.redis.Set(ctx, key, data, balanceCacheTTL).Err(); setErr != nil {
+				s.logger.WarnContext(ctx, "wallet: balance cache set failed",
+					"user_id", userID, "error", setErr)
+			}
+		}
+	}
+
 	return &summary, nil
 }
 
@@ -64,7 +117,10 @@ func (s *Service) GetBalance(ctx context.Context, userID int64) (*models.WalletS
 // ---------------------------------------------------------------------------
 
 func (s *Service) HoldFunds(ctx context.Context, userID int64, amount float64, betID string) error {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	// READ COMMITTED is sufficient: the SELECT ... FOR UPDATE below locks the
+	// user row, which gives us the serialization we need for the balance/exposure
+	// invariant without the 40001 retry storms SERIALIZABLE causes at scale.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return fmt.Errorf("hold funds: begin tx: %w", err)
 	}
@@ -123,6 +179,7 @@ func (s *Service) HoldFunds(ctx context.Context, userID int64, amount float64, b
 		s.logger.WarnContext(ctx, "hold funds: redis exposure update failed (best-effort)",
 			"user_id", userID, "error", redisErr)
 	}
+	s.invalidateBalance(ctx, userID)
 
 	s.logger.InfoContext(ctx, "funds held", "user_id", userID, "amount", amount, "bet_id", betID)
 	return nil
@@ -133,7 +190,8 @@ func (s *Service) HoldFunds(ctx context.Context, userID int64, amount float64, b
 // ---------------------------------------------------------------------------
 
 func (s *Service) ReleaseFunds(ctx context.Context, userID int64, amount float64, betID string) error {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	// READ COMMITTED + row lock via FOR UPDATE below.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return fmt.Errorf("release funds: begin tx: %w", err)
 	}
@@ -197,6 +255,7 @@ func (s *Service) ReleaseFunds(ctx context.Context, userID int64, amount float64
 		s.logger.WarnContext(ctx, "release funds: redis exposure update failed (best-effort)",
 			"user_id", userID, "error", redisErr)
 	}
+	s.invalidateBalance(ctx, userID)
 
 	s.logger.InfoContext(ctx, "funds released", "user_id", userID, "amount", amount, "bet_id", betID)
 	return nil
@@ -207,7 +266,8 @@ func (s *Service) ReleaseFunds(ctx context.Context, userID int64, amount float64
 // ---------------------------------------------------------------------------
 
 func (s *Service) SettleBet(ctx context.Context, userID int64, betID string, pnl float64, commission float64) error {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	// READ COMMITTED + row lock via FOR UPDATE below.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return fmt.Errorf("settle bet: begin tx: %w", err)
 	}
@@ -283,6 +343,8 @@ func (s *Service) SettleBet(ctx context.Context, userID int64, betID string, pnl
 		return fmt.Errorf("settle bet: commit: %w", err)
 	}
 
+	s.invalidateBalance(ctx, userID)
+
 	s.logger.InfoContext(ctx, "bet settled",
 		"user_id", userID, "bet_id", betID, "pnl", pnl, "commission", commission)
 	return nil
@@ -293,7 +355,8 @@ func (s *Service) SettleBet(ctx context.Context, userID int64, betID string, pnl
 // ---------------------------------------------------------------------------
 
 func (s *Service) Deposit(ctx context.Context, userID int64, amount float64, reference string) error {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	// READ COMMITTED + row lock via FOR UPDATE below.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return fmt.Errorf("deposit: begin tx: %w", err)
 	}
@@ -336,6 +399,8 @@ func (s *Service) Deposit(ctx context.Context, userID int64, amount float64, ref
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("deposit: commit: %w", err)
 	}
+
+	s.invalidateBalance(ctx, userID)
 	return nil
 }
 
@@ -507,7 +572,8 @@ func (s *Service) Withdraw(ctx context.Context, userID int64, amount float64, re
 		return fmt.Errorf("withdraw: amount must be positive")
 	}
 
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	// READ COMMITTED + row lock via FOR UPDATE below.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return fmt.Errorf("withdraw: begin tx: %w", err)
 	}
@@ -555,6 +621,8 @@ func (s *Service) Withdraw(ctx context.Context, userID int64, amount float64, re
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("withdraw: commit: %w", err)
 	}
+
+	s.invalidateBalance(ctx, userID)
 
 	s.logger.InfoContext(ctx, "withdrawal completed",
 		"user_id", userID, "amount", amount, "reference", reference)

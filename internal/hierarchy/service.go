@@ -85,7 +85,10 @@ func (s *Service) GetDirectChildren(ctx context.Context, userID int64) ([]*model
 }
 
 func (s *Service) TransferCredit(ctx context.Context, req *models.CreditTransferRequest) error {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	// READ COMMITTED — both user rows are pinned with SELECT ... FOR UPDATE
+	// below, which serializes concurrent transfers touching the same rows
+	// without the overhead and retry storms of SERIALIZABLE.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}

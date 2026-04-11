@@ -6,9 +6,11 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 	"unicode"
 
@@ -17,6 +19,18 @@ import (
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/argon2"
 )
+
+// User cache configuration. GetUserByID is hit on almost every authenticated
+// request (the gateway calls it to populate identity headers), so a short
+// per-user cache drastically reduces load on the users table.
+const (
+	userCacheKey = "user:"
+	userCacheTTL = 60 * time.Second
+)
+
+func userKey(userID int64) string {
+	return userCacheKey + strconv.FormatInt(userID, 10)
+}
 
 // Argon2 parameters — hardened from the original 1 iteration / 64KB.
 const (
@@ -409,12 +423,25 @@ func (s *Service) ChangePassword(ctx context.Context, userID int64, oldPassword,
 		return fmt.Errorf("update password: %w", err)
 	}
 
+	s.invalidateUser(ctx, userID)
 	s.logger.InfoContext(ctx, "password changed", "user_id", userID)
 	return nil
 }
 
-// GetUserByID fetches a single user by primary key.
+// GetUserByID fetches a single user by primary key. Results are cached in
+// Redis for a short window (userCacheTTL) to absorb the request-per-hop
+// pattern at the gateway. Mutating paths (ChangePassword, etc.) must call
+// invalidateUser to evict stale entries.
 func (s *Service) GetUserByID(ctx context.Context, userID int64) (*models.User, error) {
+	if s.redis != nil {
+		if cached, err := s.redis.Get(ctx, userKey(userID)).Bytes(); err == nil {
+			var u models.User
+			if json.Unmarshal(cached, &u) == nil {
+				return &u, nil
+			}
+		}
+	}
+
 	var user models.User
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id, username, email, role, path, parent_id, balance, exposure,
@@ -427,7 +454,29 @@ func (s *Service) GetUserByID(ctx context.Context, userID int64) (*models.User, 
 	if err != nil {
 		return nil, fmt.Errorf("user not found: %w", err)
 	}
+
+	if s.redis != nil {
+		if data, mErr := json.Marshal(&user); mErr == nil {
+			if setErr := s.redis.Set(ctx, userKey(userID), data, userCacheTTL).Err(); setErr != nil {
+				s.logger.WarnContext(ctx, "auth: user cache set failed",
+					"user_id", userID, "error", setErr)
+			}
+		}
+	}
+
 	return &user, nil
+}
+
+// invalidateUser best-effort deletes the cached user record. Called after
+// any UPDATE to auth.users so the next read returns fresh state.
+func (s *Service) invalidateUser(ctx context.Context, userID int64) {
+	if s.redis == nil {
+		return
+	}
+	if err := s.redis.Del(ctx, userKey(userID)).Err(); err != nil {
+		s.logger.WarnContext(ctx, "auth: user cache invalidation failed",
+			"user_id", userID, "error", err)
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,9 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
@@ -14,6 +16,28 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// setupSampler returns a sampler configured from the OTEL_TRACES_SAMPLER_ARG
+// environment variable, falling back to 1% sampling in production and full
+// sampling otherwise. This avoids paying the full cost of span export on
+// every request in high-traffic environments.
+func setupSampler() sdktrace.Sampler {
+	ratio := 1.0
+	if r := os.Getenv("OTEL_TRACES_SAMPLER_ARG"); r != "" {
+		if v, err := strconv.ParseFloat(r, 64); err == nil {
+			ratio = v
+		}
+	} else if os.Getenv("ENVIRONMENT") == "production" {
+		ratio = 0.01 // 1% in production by default
+	}
+	if ratio >= 1.0 {
+		return sdktrace.AlwaysSample()
+	}
+	if ratio <= 0.0 {
+		return sdktrace.NeverSample()
+	}
+	return sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))
+}
 
 // SetupTracer configures the global tracer with an OTLP exporter.
 //
@@ -58,9 +82,13 @@ func SetupTracer(ctx context.Context, serviceName, version string, log *slog.Log
 	}
 
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
+		sdktrace.WithBatcher(exporter,
+			sdktrace.WithBatchTimeout(500*time.Millisecond),
+			sdktrace.WithMaxQueueSize(4096),
+			sdktrace.WithMaxExportBatchSize(1024),
+		),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSampler(setupSampler()),
 	)
 
 	otel.SetTracerProvider(tp)

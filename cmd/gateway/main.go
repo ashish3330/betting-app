@@ -385,13 +385,15 @@ func main() {
 	// service.DefaultMiddleware + its own EncryptionMiddleware layer. Running
 	// them again at the gateway would emit duplicate security headers and
 	// double-encrypt response bodies, breaking clients.
+	// RequestLogger is intentionally omitted here: downstream services already
+	// log every request via pkg/service.DefaultMiddleware, and doubling up
+	// wastes CPU and log volume on the hot path.
 	chain := middleware.ChainMiddleware(
 		middleware.RecoverPanic(log),
 		middleware.CORSWithWhitelist(cfg.CORSOrigins),
 		middleware.RequestID,
 		middleware.MetricsMiddleware("gateway"),
 		middleware.MaxBodySize(int64(cfg.MaxBodySizeMB)*1024*1024),
-		middleware.RequestLogger(log),
 		middleware.PerIPRateLimiterWithContext(ctx, cfg.RateLimitRPS, cfg.RateLimitBurst),
 	)
 	handler := chain(mux)

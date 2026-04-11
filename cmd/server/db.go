@@ -207,6 +207,44 @@ func runMigrations(log *slog.Logger) error {
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_kyc_user ON betting.kyc_documents(user_id)`,
+
+		// ── bet_fills (matching engine per-fill rows) ──
+		`CREATE TABLE IF NOT EXISTS betting.bet_fills (
+			id BIGSERIAL PRIMARY KEY,
+			bet_id TEXT NOT NULL,
+			counter_bet_id TEXT NOT NULL,
+			price NUMERIC(10,2) NOT NULL,
+			size NUMERIC(20,2) NOT NULL,
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_bet_fills_bet_id  ON betting.bet_fills(bet_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_bet_fills_counter ON betting.bet_fills(counter_bet_id)`,
+
+		// ── Phase 10: Performance indexes (mirror of migration 010) ──
+		// Make sure the columns the indexes cover actually exist on the
+		// monolith's simpler schema. These ALTERs are idempotent.
+		`ALTER TABLE betting.bets ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ`,
+
+		// Bets: cover settled_at queries (responsible gambling daily-loss check).
+		`CREATE INDEX IF NOT EXISTS idx_bets_user_settled ON betting.bets(user_id, settled_at) WHERE status = 'settled'`,
+		// Bets: cover ClickHouse ingestion (ORDER BY settled_at).
+		`CREATE INDEX IF NOT EXISTS idx_bets_settled_at ON betting.bets(settled_at) WHERE status = 'settled'`,
+		// Users: partial index on active status for the dashboard filter.
+		`CREATE INDEX IF NOT EXISTS idx_users_status_active ON auth.users(status) WHERE status = 'active'`,
+		// Markets / events: ORDER BY start_time default listings (tables may not
+		// exist on the monolith; migration statement failures are logged and skipped).
+		`CREATE INDEX IF NOT EXISTS idx_markets_start_time ON betting.markets(start_time DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_start_time ON betting.events(start_time)`,
+		// Settlement events outbox: pending rows in id order.
+		`CREATE INDEX IF NOT EXISTS idx_settlement_events_pending_id ON betting.settlement_events(id) WHERE status = 'pending'`,
+		// Casino sessions: active session lookup per user.
+		`CREATE INDEX IF NOT EXISTS idx_casino_sessions_user_active ON betting.casino_sessions(user_id) WHERE status = 'active'`,
+		// Notifications: unread badge count.
+		`CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON betting.notifications(user_id, created_at DESC) WHERE read = false`,
+		// Audit log: latest-N-for-user queries.
+		`CREATE INDEX IF NOT EXISTS idx_audit_user_id_desc ON betting.audit_log(user_id, id DESC)`,
+		// Fraud alerts: created_at ordering for the ops dashboard.
+		`CREATE INDEX IF NOT EXISTS idx_fraud_alerts_created ON betting.fraud_alerts(created_at DESC)`,
 	}
 
 	for _, m := range migrations {

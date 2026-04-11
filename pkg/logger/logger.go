@@ -10,8 +10,19 @@ type ctxKey struct{}
 
 func New(env string) *slog.Logger {
 	var handler slog.Handler
+	// In production we elide the per-record time formatting cost by emitting
+	// a Unix-millisecond int instead of RFC3339 text, and we skip AddSource
+	// entirely (runtime.Caller() on every log line is surprisingly expensive
+	// under load). Dev keeps the richer format for easier debugging.
 	opts := &slog.HandlerOptions{
 		AddSource: env != "production",
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if env == "production" && a.Key == slog.TimeKey {
+				t := a.Value.Time()
+				return slog.Int64("ts_ms", t.UnixMilli())
+			}
+			return a
+		},
 	}
 
 	if env == "production" {

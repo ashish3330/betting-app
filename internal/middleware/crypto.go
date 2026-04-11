@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 )
 
 var encryptionKey []byte
@@ -20,6 +21,12 @@ var encryptionKey []byte
 // aead is the AES-GCM cipher created once at init and reused for all
 // encrypt/decrypt operations.  cipher.AEAD is safe for concurrent use.
 var aead cipher.AEAD
+
+// bufPool recycles bytes.Buffer instances used to capture downstream
+// response bodies so we avoid an allocation per request.
+var bufPool = sync.Pool{
+	New: func() interface{} { return new(bytes.Buffer) },
+}
 
 func init() {
 	secret := os.Getenv("ENCRYPTION_SECRET")
@@ -61,19 +68,25 @@ func decryptPayload(encrypted string) ([]byte, error) {
 	return aead.Open(nil, nonce, ciphertext, nil)
 }
 
+// encryptBytes encrypts an already-serialized JSON payload directly, avoiding
+// the json.Marshal → []byte round-trip that was previously necessary when the
+// caller handed us an arbitrary interface{}.
+func encryptBytes(plaintext []byte) (string, error) {
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
+	}
+	ciphertext := aead.Seal(nonce, nonce, plaintext, nil)
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// encryptPayload is retained for callers that still hand us a Go value.
 func encryptPayload(data interface{}) (string, error) {
 	plaintext, err := json.Marshal(data)
 	if err != nil {
 		return "", err
 	}
-
-	nonce := make([]byte, aead.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return "", err
-	}
-
-	ciphertext := aead.Seal(nonce, nonce, plaintext, nil)
-	return base64.StdEncoding.EncodeToString(ciphertext), nil
+	return encryptBytes(plaintext)
 }
 
 type encryptedResponseWriter struct {
@@ -111,22 +124,27 @@ func EncryptionMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Decrypt incoming POST/PUT body if encrypted
+		// Decrypt incoming POST/PUT body if encrypted.  Peek the first byte
+		// before unmarshaling — if it's not '{' the body cannot be our
+		// encryption envelope, so skip the expensive envelope parse.
 		if (r.Method == "POST" || r.Method == "PUT") && r.Body != nil {
 			contentType := r.Header.Get("Content-Type")
 			if strings.Contains(contentType, "application/json") {
 				bodyBytes, err := io.ReadAll(r.Body)
 				r.Body.Close()
 				if err == nil && len(bodyBytes) > 0 {
-					var envelope struct {
-						D string `json:"d"`
-					}
-					if json.Unmarshal(bodyBytes, &envelope) == nil && envelope.D != "" {
-						decrypted, err := decryptPayload(envelope.D)
-						if err == nil {
-							bodyBytes = decrypted
+					trimmed := bytes.TrimLeft(bodyBytes, " \t\r\n")
+					if len(trimmed) > 0 && trimmed[0] == '{' && bytes.Contains(trimmed[:min(16, len(trimmed))], []byte(`"d"`)) {
+						var envelope struct {
+							D string `json:"d"`
 						}
-						// If decryption fails, fall through with original body
+						if json.Unmarshal(bodyBytes, &envelope) == nil && envelope.D != "" {
+							decrypted, err := decryptPayload(envelope.D)
+							if err == nil {
+								bodyBytes = decrypted
+							}
+							// If decryption fails, fall through with original body
+						}
 					}
 					r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				} else {
@@ -135,28 +153,44 @@ func EncryptionMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		// Capture the response
+		// Capture the response into a pooled buffer to avoid allocating a
+		// fresh bytes.Buffer on every request.
+		buf := bufPool.Get().(*bytes.Buffer)
+		buf.Reset()
+		defer func() {
+			// Clip excessively-grown buffers before returning them to the pool
+			// so a single large response doesn't pin memory forever.
+			if buf.Cap() > 64*1024 {
+				buf = new(bytes.Buffer)
+			}
+			bufPool.Put(buf)
+		}()
+
 		erw := &encryptedResponseWriter{
 			ResponseWriter: w,
-			body:           &bytes.Buffer{},
+			body:           buf,
 			statusCode:     200,
 		}
 
 		next.ServeHTTP(erw, r)
 
-		// Encrypt the captured response body
-		responseBody := erw.body.Bytes()
-		if len(responseBody) > 0 {
-			var jsonData json.RawMessage
-			if json.Unmarshal(responseBody, &jsonData) == nil {
-				encrypted, err := encryptPayload(jsonData)
-				if err == nil {
-					w.Header().Set("Content-Type", "application/json")
-					w.Header().Set("X-Encrypted", "true")
-					w.WriteHeader(erw.statusCode)
-					json.NewEncoder(w).Encode(map[string]string{"d": encrypted})
-					return
-				}
+		// The captured body is already valid JSON coming out of our handlers.
+		// Skip the Unmarshal→Marshal round-trip entirely and encrypt the raw
+		// bytes directly. Hand-write the envelope so we avoid a json.Encoder
+		// allocation and a third JSON traversal.
+		responseBody := buf.Bytes()
+		if len(responseBody) > 0 && looksLikeJSON(responseBody) {
+			encrypted, err := encryptBytes(responseBody)
+			if err == nil {
+				h := w.Header()
+				h.Set("Content-Type", "application/json")
+				h.Set("X-Encrypted", "true")
+				w.WriteHeader(erw.statusCode)
+				// {"d":"<base64>"}
+				w.Write([]byte(`{"d":"`))
+				w.Write([]byte(encrypted))
+				w.Write([]byte(`"}`))
+				return
 			}
 		}
 
@@ -165,3 +199,22 @@ func EncryptionMiddleware(next http.Handler) http.Handler {
 		w.Write(responseBody)
 	})
 }
+
+// looksLikeJSON does a cheap prefix check to decide whether the captured
+// response is JSON that we should encrypt. Handlers occasionally write plain
+// text (e.g. error bodies from http.Error); those should pass through
+// unmodified.
+func looksLikeJSON(b []byte) bool {
+	for _, c := range b {
+		switch c {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '{', '[', '"':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+

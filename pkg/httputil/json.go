@@ -1,22 +1,47 @@
 package httputil
 
 import (
+	"bytes"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sync"
 )
+
+// encoderBufPool recycles the intermediate buffer used by WriteJSON so we
+// avoid allocating a fresh bytes.Buffer and json.Encoder on every response.
+var encoderBufPool = sync.Pool{
+	New: func() interface{} { return new(bytes.Buffer) },
+}
 
 // WriteJSON serializes v as JSON with the given status code.
 // On marshal failure, writes a 500 with a generic error message.
 func WriteJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
 	if v == nil {
+		w.WriteHeader(status)
 		return
 	}
-	if err := json.NewEncoder(w).Encode(v); err != nil {
+
+	buf := encoderBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer func() {
+		// Clip excessively grown buffers before returning them to the pool
+		// so a single fat response doesn't pin memory forever.
+		if buf.Cap() > 64*1024 {
+			buf = new(bytes.Buffer)
+		}
+		encoderBufPool.Put(buf)
+	}()
+
+	enc := json.NewEncoder(buf)
+	if err := enc.Encode(v); err != nil {
 		slog.Error("httputil.WriteJSON encode failed", "error", err)
+		http.Error(w, `{"error":"internal"}`, http.StatusInternalServerError)
+		return
 	}
+	w.WriteHeader(status)
+	w.Write(buf.Bytes())
 }
 
 // WriteError writes a JSON error response: {"error": "<message>"}.

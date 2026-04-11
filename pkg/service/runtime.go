@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	_ "net/http/pprof" // registers pprof handlers on http.DefaultServeMux
+	"os"
 	"strings"
 	"time"
 
@@ -41,6 +43,32 @@ func Run(ctx context.Context, cfg Config, handler http.Handler) error {
 	addr := cfg.Port
 	if !strings.HasPrefix(addr, ":") {
 		addr = ":" + addr
+	}
+
+	// Admin HTTP listener bound to localhost that serves pprof and any other
+	// debug endpoints registered on the default mux. Enabled by default
+	// outside production; opt-in in production via PPROF_ENABLED=true.
+	if os.Getenv("ENVIRONMENT") != "production" || os.Getenv("PPROF_ENABLED") == "true" {
+		adminPort := os.Getenv("ADMIN_PORT")
+		if adminPort == "" {
+			adminPort = "6060"
+		}
+		go func() {
+			adminMux := http.NewServeMux()
+			// pprof registers its handlers on http.DefaultServeMux via its
+			// package init. Forward /debug/pprof/ to the default mux so the
+			// admin listener exposes them without touching the main app mux.
+			adminMux.Handle("/debug/pprof/", http.DefaultServeMux)
+			adminSrv := &http.Server{
+				Addr:              "127.0.0.1:" + adminPort,
+				Handler:           adminMux,
+				ReadHeaderTimeout: 5 * time.Second,
+			}
+			cfg.Logger.Info("admin server starting", "addr", adminSrv.Addr)
+			if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				cfg.Logger.Warn("admin server failed", "error", err)
+			}
+		}()
 	}
 
 	// Initialize distributed tracing. When OTEL_EXPORTER_OTLP_ENDPOINT is

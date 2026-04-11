@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -494,11 +495,47 @@ func (e *Engine) ExpireOrders(ctx context.Context, marketID string, before time.
 	return removed, nil
 }
 
-// PersistOrder writes the order and its match result to the PostgreSQL bets table
-// inside a single database transaction so that data is consistent even if the
-// process crashes mid-write.
+// PersistOrder writes the order and its match result to the PostgreSQL bets table.
+//
+// Hot-path optimizations:
+//   - No-fill fast path: if the order did not match anything, we skip the
+//     transaction machinery and perform a single plain INSERT.
+//   - Batched fill inserts: all fills are written in one multi-row INSERT
+//     instead of N round-trips.
+//   - Batched counter-bet update: all counter-party bets are updated in a
+//     single UPDATE ... FROM (VALUES ...) statement instead of N round-trips.
 func (e *Engine) PersistOrder(ctx context.Context, db *sql.DB, req *models.PlaceBetRequest, userID int64, matchResult *models.MatchResult) error {
 	now := time.Now()
+
+	const insertBetSQL = `INSERT INTO bets (id, market_id, selection_id, user_id, side, price, stake,
+		                    matched_stake, unmatched_stake, status, client_ref, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		 ON CONFLICT (id) DO UPDATE SET
+		     matched_stake = EXCLUDED.matched_stake,
+		     unmatched_stake = EXCLUDED.unmatched_stake,
+		     status = EXCLUDED.status`
+
+	// No-fill fast path: skip the transaction entirely.
+	if len(matchResult.Fills) == 0 {
+		_, err := db.ExecContext(ctx, insertBetSQL,
+			matchResult.BetID,
+			req.MarketID,
+			req.SelectionID,
+			userID,
+			string(req.Side),
+			req.Price,
+			req.Stake,
+			matchResult.MatchedStake,
+			matchResult.UnmatchedStake,
+			string(matchResult.Status),
+			req.ClientRef,
+			now,
+		)
+		if err != nil {
+			return fmt.Errorf("persist order (no-fill fast path): %w", err)
+		}
+		return nil
+	}
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -506,14 +543,7 @@ func (e *Engine) PersistOrder(ctx context.Context, db *sql.DB, req *models.Place
 	}
 	defer tx.Rollback() //nolint:errcheck // rollback is a no-op after commit
 
-	_, err = tx.ExecContext(ctx,
-		`INSERT INTO bets (id, market_id, selection_id, user_id, side, price, stake,
-		                    matched_stake, unmatched_stake, status, client_ref, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		 ON CONFLICT (id) DO UPDATE SET
-		     matched_stake = EXCLUDED.matched_stake,
-		     unmatched_stake = EXCLUDED.unmatched_stake,
-		     status = EXCLUDED.status`,
+	_, err = tx.ExecContext(ctx, insertBetSQL,
 		matchResult.BetID,
 		req.MarketID,
 		req.SelectionID,
@@ -531,32 +561,50 @@ func (e *Engine) PersistOrder(ctx context.Context, db *sql.DB, req *models.Place
 		return fmt.Errorf("persist order: %w", err)
 	}
 
-	// Persist individual fills
-	for _, fill := range matchResult.Fills {
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO bet_fills (bet_id, counter_bet_id, price, size, created_at)
-			 VALUES ($1, $2, $3, $4, $5)
-			 ON CONFLICT DO NOTHING`,
-			matchResult.BetID, fill.CounterBetID, fill.Price, fill.Size, fill.Timestamp,
-		)
-		if err != nil {
-			return fmt.Errorf("persist fill: %w", err)
+	// --- Batched multi-row INSERT for fills ---
+	{
+		var sb strings.Builder
+		sb.WriteString("INSERT INTO bet_fills (bet_id, counter_bet_id, price, size, created_at) VALUES ")
+		args := make([]interface{}, 0, len(matchResult.Fills)*5)
+		argIdx := 1
+		for i, f := range matchResult.Fills {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d)", argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4)
+			args = append(args, matchResult.BetID, f.CounterBetID, f.Price, f.Size, f.Timestamp)
+			argIdx += 5
 		}
+		sb.WriteString(" ON CONFLICT DO NOTHING")
 
-		// Update the counter-order's matched/unmatched stakes in DB
-		_, err = tx.ExecContext(ctx,
-			`UPDATE bets SET
-			     matched_stake = matched_stake + $1,
-			     unmatched_stake = GREATEST(unmatched_stake - $1, 0),
-			     status = CASE
-			         WHEN unmatched_stake - $1 <= 0 THEN 'matched'
-			         ELSE 'partial'
-			     END
-			 WHERE id = $2`,
-			fill.Size, fill.CounterBetID,
-		)
-		if err != nil {
-			return fmt.Errorf("update counter bet: %w", err)
+		if _, err := tx.ExecContext(ctx, sb.String(), args...); err != nil {
+			return fmt.Errorf("persist fills batch: %w", err)
+		}
+	}
+
+	// --- Batched counter-bet UPDATE using UPDATE ... FROM (VALUES ...) ---
+	{
+		var sb strings.Builder
+		sb.WriteString("UPDATE bets SET ")
+		sb.WriteString("matched_stake = bets.matched_stake + v.fill_size, ")
+		sb.WriteString("unmatched_stake = GREATEST(bets.unmatched_stake - v.fill_size, 0), ")
+		sb.WriteString("status = CASE WHEN bets.unmatched_stake - v.fill_size <= 0 THEN 'matched' ELSE 'partial' END ")
+		sb.WriteString("FROM (VALUES ")
+		args := make([]interface{}, 0, len(matchResult.Fills)*2)
+		argIdx := 1
+		for i, f := range matchResult.Fills {
+			if i > 0 {
+				sb.WriteString(",")
+			}
+			// Cast fill_size to numeric so Postgres infers the types correctly.
+			fmt.Fprintf(&sb, "($%d,$%d::numeric)", argIdx, argIdx+1)
+			args = append(args, f.CounterBetID, f.Size)
+			argIdx += 2
+		}
+		sb.WriteString(") AS v(counter_bet_id, fill_size) WHERE bets.id = v.counter_bet_id")
+
+		if _, err := tx.ExecContext(ctx, sb.String(), args...); err != nil {
+			return fmt.Errorf("update counter bets batch: %w", err)
 		}
 	}
 
