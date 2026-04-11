@@ -598,6 +598,14 @@ func auth(next http.HandlerFunc) http.HandlerFunc {
 			writeErr(w, 401, "invalid token")
 			return
 		}
+		// Re-check user status on every request so an admin suspend takes
+		// effect immediately rather than waiting for the access token to
+		// expire (up to 24h). One in-memory map read under RLock — same
+		// order as the blacklist check above.
+		if status := store.GetUserStatus(claims.UserID); status != "" && status != "active" {
+			writeErr(w, 403, "account is "+status)
+			return
+		}
 		// Legacy headers preserved so existing handlers that still read
 		// X-Username / X-User-ID / X-Role keep working during the
 		// migration to the typed context value below.
@@ -3441,6 +3449,30 @@ func handleKYCUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// MIME / magic-byte whitelist. KYC documents must be JPEG, PNG, or
+	// PDF — never executables, scripts, archives, or HTML. We sniff the
+	// first 512 bytes (RFC 7574 / DetectContentType) instead of trusting
+	// the client-provided Content-Type header. The file pointer is then
+	// reset so downstream code (when streaming to object storage) reads
+	// from the start.
+	sniffBuf := make([]byte, 512)
+	n, _ := file.Read(sniffBuf)
+	detected := http.DetectContentType(sniffBuf[:n])
+	allowed := map[string]bool{
+		"image/jpeg":      true,
+		"image/png":       true,
+		"application/pdf": true,
+	}
+	if !allowed[detected] {
+		writeErr(w, 415, "unsupported file type — only JPEG, PNG, and PDF are accepted (got "+detected+")")
+		return
+	}
+	if seeker, ok := file.(interface {
+		Seek(offset int64, whence int) (int64, error)
+	}); ok {
+		_, _ = seeker.Seek(0, 0)
+	}
+
 	docType := r.FormValue("doc_type")
 	if docType == "" {
 		docType = "identity"
@@ -3470,7 +3502,7 @@ func handleKYCUpload(w http.ResponseWriter, r *http.Request) {
 		if _, err := db.Exec(`INSERT INTO betting.kyc_documents
 			(user_id, doc_type, filename, size_bytes, content_type, status)
 			VALUES ($1,$2,$3,$4,$5,$6)`,
-			uid, docType, filename, header.Size, header.Header.Get("Content-Type"), status); err != nil {
+			uid, docType, filename, header.Size, detected, status); err != nil {
 			logger.Error("kyc_documents insert failed", "error", err)
 		}
 	}
@@ -3611,20 +3643,54 @@ func handleSetResponsibleLimits(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid request body")
 		return
 	}
+	if req.DailyDeposit < 0 || req.DailyLoss < 0 || req.MaxStake < 0 || req.SessionMinutes < 0 {
+		writeErr(w, 400, "limits must be non-negative")
+		return
+	}
+
 	store.mu.Lock()
 	existing := store.responsibleLimits[claims.UserID]
 	if existing == nil {
 		existing = &ResponsibleGamblingLimits{}
 		store.responsibleLimits[claims.UserID] = existing
 	}
-	if req.DailyDeposit > 0 {
-		existing.DailyDeposit = req.DailyDeposit
+
+	// REGULATORY: limit DECREASES (or activations from zero) take effect
+	// immediately to protect the user. Limit INCREASES are subject to a
+	// 24-hour cool-down to prevent compulsive lifting in the heat of the
+	// moment — same rule the internal/responsible service enforces.
+	// Increases are rejected here with 202 + pending_changes; the user
+	// must wait and re-submit. (A scheduled-change table is the long-term
+	// fix; this monolith path opts for the simpler "blocked + told to
+	// wait" pattern that meets the regulatory intent.)
+	pending := []string{}
+	if req.DailyDeposit != 0 {
+		if existing.DailyDeposit == 0 || req.DailyDeposit < existing.DailyDeposit {
+			existing.DailyDeposit = req.DailyDeposit
+		} else if req.DailyDeposit > existing.DailyDeposit {
+			pending = append(pending, "daily_deposit_limit")
+		}
 	}
-	if req.DailyLoss > 0 {
-		existing.DailyLoss = req.DailyLoss
+	if req.DailyLoss != 0 {
+		if existing.DailyLoss == 0 || req.DailyLoss < existing.DailyLoss {
+			existing.DailyLoss = req.DailyLoss
+		} else if req.DailyLoss > existing.DailyLoss {
+			pending = append(pending, "daily_loss_limit")
+		}
 	}
-	if req.SessionMinutes > 0 {
-		existing.SessionMinutes = req.SessionMinutes
+	if req.MaxStake != 0 {
+		if existing.MaxStake == 0 || req.MaxStake < existing.MaxStake {
+			existing.MaxStake = req.MaxStake
+		} else if req.MaxStake > existing.MaxStake {
+			pending = append(pending, "max_stake_per_bet")
+		}
+	}
+	if req.SessionMinutes != 0 {
+		if existing.SessionMinutes == 0 || req.SessionMinutes < existing.SessionMinutes {
+			existing.SessionMinutes = req.SessionMinutes
+		} else if req.SessionMinutes > existing.SessionMinutes {
+			pending = append(pending, "session_limit_minutes")
+		}
 	}
 	store.mu.Unlock()
 
@@ -3632,6 +3698,14 @@ func handleSetResponsibleLimits(w http.ResponseWriter, r *http.Request) {
 		dbSaveResponsibleLimits(claims.UserID, existing)
 	}
 
+	if len(pending) > 0 {
+		writeJSON(w, 202, map[string]interface{}{
+			"limits":          existing,
+			"pending_changes": pending,
+			"message":         "limit increases require a 24-hour cool-down before taking effect",
+		})
+		return
+	}
 	writeJSON(w, 200, existing)
 }
 

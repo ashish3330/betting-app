@@ -944,6 +944,20 @@ func (s *Store) GetUserByUsername(username string) *User {
 	return u
 }
 
+// GetUserStatus returns the user's current status string ("active",
+// "suspended", "blocked", etc.) without doing the DB sync that GetUser
+// performs. Designed to be called from the auth middleware on every
+// request, so the cost must stay at one map lookup under an RLock —
+// same order as the blacklist check that already runs there.
+func (s *Store) GetUserStatus(id int64) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if u, ok := s.users[id]; ok {
+		return u.Status
+	}
+	return ""
+}
+
 func (s *Store) GetUser(id int64) *User {
 	s.mu.RLock()
 	u := s.users[id]
