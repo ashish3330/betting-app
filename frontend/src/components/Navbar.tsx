@@ -263,6 +263,9 @@ export default function Navbar({ onToggleSidebar, sidebarOpen = false, liveCount
                         }
                       }}
                       className="flex items-center gap-0.5"
+                      aria-label="View exposure breakdown"
+                      aria-expanded={exposureOpen}
+                      aria-haspopup="true"
                     >
                       <span className="text-[9px] text-gray-500">Exp:</span>
                       <span className={`font-bold text-[11px] font-mono ${balance.exposure > 0 ? "text-loss" : "text-gray-500"}`}>
@@ -361,6 +364,9 @@ export default function Navbar({ onToggleSidebar, sidebarOpen = false, liveCount
               <button
                 onClick={() => setAccountOpen(!accountOpen)}
                 className="flex items-center gap-1 px-1 sm:px-2 py-1 rounded-md hover:bg-white/5 transition"
+                aria-label="Open account menu"
+                aria-expanded={accountOpen}
+                aria-haspopup="true"
               >
                 <div className="w-6 h-6 rounded-full bg-lotus/20 flex items-center justify-center">
                   <span className="text-[10px] font-bold text-lotus">

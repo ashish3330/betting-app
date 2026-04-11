@@ -248,6 +248,8 @@ export default function HomePage() {
               <button
                 key={s.key}
                 onClick={() => setActiveSport(s.key)}
+                aria-label={`Filter by ${s.label}`}
+                aria-pressed={isActive}
                 className={`relative flex items-center gap-1.5 px-3 py-2 text-xs font-medium whitespace-nowrap transition-colors ${
                   isActive
                     ? "text-white"
