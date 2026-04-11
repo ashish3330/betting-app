@@ -298,9 +298,17 @@ func (s *Service) SelfExclude(ctx context.Context, userID int64, req *SelfExclus
 	}
 
 	// Invalidate all active sessions by marking exclusion in Redis
-	// so auth middleware can check this during login/request validation
-	exclusionKey := fmt.Sprintf("self_excluded:%d", userID)
-	s.redis.Set(ctx, exclusionKey, until.Unix(), time.Until(until))
+	// so auth middleware can check this during login/request validation.
+	// Guarded against nil redis so unit tests (and any future no-Redis
+	// deployments) don't panic — the DB row in responsible_gambling is
+	// the source of truth, this Redis key is just a hot-path cache.
+	if s.redis != nil {
+		exclusionKey := fmt.Sprintf("self_excluded:%d", userID)
+		if err := s.redis.Set(ctx, exclusionKey, until.Unix(), time.Until(until)).Err(); err != nil {
+			s.logger.WarnContext(ctx, "self-exclude redis cache write failed",
+				"user_id", userID, "error", err)
+		}
+	}
 
 	s.logger.WarnContext(ctx, "user self-excluded",
 		"user_id", userID, "until", until, "reason", req.Reason)

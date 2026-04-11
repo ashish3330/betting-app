@@ -415,6 +415,10 @@ func TestSelfExclude_SetsExpiry(t *testing.T) {
 	before := time.Now()
 	drv.expect(&scriptedResult{prefix: "UPDATE responsible_gambling SET self_excluded_until", rowsAffected: 1})
 	drv.expect(&scriptedResult{prefix: "UPDATE users SET status", rowsAffected: 1})
+	// SelfExclude voids any open bets so the user can't keep playing through
+	// matched-but-unsettled positions. The fake driver needs a script for
+	// this UPDATE or the call returns "no script for exec".
+	drv.expect(&scriptedResult{prefix: "UPDATE bets SET status = 'voided'", rowsAffected: 0})
 
 	err := svc.SelfExclude(context.Background(), 1, &SelfExclusionRequest{Duration: "24h"})
 	if err != nil {
@@ -431,6 +435,7 @@ func TestSelfExclude_Permanent(t *testing.T) {
 
 	drv.expect(&scriptedResult{prefix: "UPDATE responsible_gambling SET self_excluded_until", rowsAffected: 1})
 	drv.expect(&scriptedResult{prefix: "UPDATE users SET status", rowsAffected: 1})
+	drv.expect(&scriptedResult{prefix: "UPDATE bets SET status = 'voided'", rowsAffected: 0})
 
 	err := svc.SelfExclude(context.Background(), 1, &SelfExclusionRequest{Duration: "permanent"})
 	if err != nil {
