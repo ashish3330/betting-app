@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
@@ -32,6 +33,27 @@ type Service struct {
 	// fix and is especially valuable for the mock/Entity Sports provider
 	// during odds TTL expiry on hot markets.
 	sf singleflight.Group
+
+	// statusMu guards the seed-status counters below. The counters are
+	// written once by SeedMockMarkets at startup and read by GetStatus on
+	// every /api/v1/odds/status request, so a plain RWMutex is enough.
+	statusMu       sync.RWMutex
+	marketsLoaded  int
+	runnersLoaded  int
+	inPlayCount    int
+	lastRefresh    time.Time
+}
+
+// Status is the payload returned by GET /api/v1/odds/status. It summarises
+// the odds-service's current view of the world: which provider is active,
+// how many markets/runners are currently cached, the last time the cache
+// was refreshed, and how many of those markets are in-play right now.
+type Status struct {
+	Provider      string    `json:"provider"`
+	MarketsLoaded int       `json:"markets_loaded"`
+	RunnersLoaded int       `json:"runners_loaded"`
+	LastRefresh   time.Time `json:"last_refresh"`
+	InPlayCount   int       `json:"in_play_count"`
 }
 
 func NewService(provider OddsProvider, rdb *redis.Client, logger *slog.Logger) *Service {
@@ -277,6 +299,114 @@ func (s *Service) GetLatestOdds(ctx context.Context, marketID string) (*models.O
 		return nil, err
 	}
 	return v.(*models.OddsUpdate), nil
+}
+
+// ---------------------------------------------------------------------------
+// Seeding & status
+// ---------------------------------------------------------------------------
+
+// SeedMockMarkets pulls every mock market the configured provider knows about
+// (across all sports) and writes them into Redis under both `market:{id}` and
+// `odds:market:{id}` so that
+//
+//   - GET /api/v1/markets/{id}/odds returns live prices on a cold cache, and
+//   - the matching-engine can immediately accept bets on those markets, and
+//   - GET /api/v1/odds/status reports accurate counts.
+//
+// The TTL is long (5 minutes) so the seeded entries survive across test runs
+// and don't disappear during the brief window between startup and the first
+// live subscription. The entries are refreshed opportunistically as clients
+// hit the normal FetchMarkets / Subscribe paths.
+//
+// This is intentionally idempotent: calling it repeatedly just overwrites
+// the same keys with fresh data. It returns the counts it wrote so callers
+// can log a summary at startup.
+func (s *Service) SeedMockMarkets(ctx context.Context) (markets, runners int, err error) {
+	// Pull every market the provider knows about (sport="" means "all").
+	all, err := s.provider.FetchMarkets(ctx, "")
+	if err != nil {
+		return 0, 0, fmt.Errorf("seed: fetch markets: %w", err)
+	}
+
+	const seedTTL = 5 * time.Minute
+
+	pipe := s.redis.Pipeline()
+	inPlay := 0
+	for _, m := range all {
+		if m == nil {
+			continue
+		}
+
+		// 1. Cache the market document itself so that downstream services
+		//    can look it up by ID without hammering the provider.
+		marketData, mErr := json.Marshal(m)
+		if mErr != nil {
+			s.logger.WarnContext(ctx, "seed: marshal market failed", "market_id", m.ID, "error", mErr)
+			continue
+		}
+		pipe.Set(ctx, fmt.Sprintf("market:%s", m.ID), marketData, seedTTL)
+
+		// 2. Cache an OddsUpdate so GetLatestOdds(marketID) returns prices
+		//    immediately instead of 404'ing on cold starts. We copy the
+		//    runners straight from the market snapshot — the mock provider
+		//    already populates back/lay ladders on every market it returns.
+		update := models.OddsUpdate{
+			MarketID:  m.ID,
+			Runners:   m.Runners,
+			Timestamp: time.Now(),
+		}
+		updateData, uErr := json.Marshal(update)
+		if uErr != nil {
+			s.logger.WarnContext(ctx, "seed: marshal odds update failed", "market_id", m.ID, "error", uErr)
+			continue
+		}
+		pipe.Set(ctx, fmt.Sprintf("odds:market:%s", m.ID), updateData, seedTTL)
+
+		markets++
+		runners += len(m.Runners)
+		if m.InPlay {
+			inPlay++
+		}
+	}
+
+	if _, pErr := pipe.Exec(ctx); pErr != nil {
+		// Redis pipeline failures are logged but not fatal: the service can
+		// still run, clients will fall through to provider fetches on demand.
+		s.logger.WarnContext(ctx, "seed: redis pipeline failed", "error", pErr)
+		return markets, runners, fmt.Errorf("seed: redis pipeline: %w", pErr)
+	}
+
+	s.statusMu.Lock()
+	s.marketsLoaded = markets
+	s.runnersLoaded = runners
+	s.inPlayCount = inPlay
+	s.lastRefresh = time.Now()
+	s.statusMu.Unlock()
+
+	s.logger.InfoContext(ctx, "seeded mock odds cache",
+		"provider", s.provider.Name(),
+		"markets", markets,
+		"runners", runners,
+		"in_play", inPlay,
+	)
+	return markets, runners, nil
+}
+
+// GetStatus returns a snapshot of the odds-service's seed/cache health. It is
+// served by GET /api/v1/odds/status and is intentionally cheap: the counters
+// are already in memory, we just lock briefly to read them. If no seed has
+// run yet the counters will all be zero and LastRefresh will be the zero
+// time, which is still a valid response.
+func (s *Service) GetStatus(_ context.Context) Status {
+	s.statusMu.RLock()
+	defer s.statusMu.RUnlock()
+	return Status{
+		Provider:      s.provider.Name(),
+		MarketsLoaded: s.marketsLoaded,
+		RunnersLoaded: s.runnersLoaded,
+		LastRefresh:   s.lastRefresh,
+		InPlayCount:   s.inPlayCount,
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -35,10 +35,8 @@ var (
 // TODO(microservices): implement each of these in the relevant service and
 // remove its entry from this set as they come online.
 var endpointsMissingInMicroservices = map[string]string{
-	// odds-service
-	"GET /api/v1/odds/status":                     "not ported to odds-service",
-	"GET /api/v1/markets/mock-ipl-match-001/odds": "odds cache not populated in microservices env (depends on provider sync or seed)",
-	"POST /api/v1/bet/place (player back bet)":    "blocked: odds cache not populated",
+	// odds-service — all ported; odds/status + mock market seed live in
+	// cmd/odds-service/main.go and internal/odds/service.go.
 
 	// admin-service
 	"POST /api/v1/seed":                         "seed handler not ported from monolith",

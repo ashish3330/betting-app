@@ -113,6 +113,27 @@ func main() {
 	oddsService.SetNATS(nc) // publish odds updates to NATS once in the service layer
 	marketService := market.NewService(db, log)
 
+	// ── Mock market seed ────────────────────────────────────────
+	//
+	// The integration test suite (scripts/api-test) expects mock markets
+	// like "mock-ipl-match-001" to be queryable immediately after the
+	// odds-service comes up — both their /markets/{id}/odds view and any
+	// /bet/place calls against them. The mock provider already knows the
+	// full catalogue; we just push it into Redis at boot so the HTTP
+	// handlers have something to serve on a cold cache.
+	//
+	// We only seed for the mock provider. entity_sports is a real upstream
+	// and is expected to push real updates via Subscribe.
+	if oddsProvider.Name() == "mock" {
+		seedCtx, seedCancel := context.WithTimeout(ctx, 10*time.Second)
+		if mkts, runners, seedErr := oddsService.SeedMockMarkets(seedCtx); seedErr != nil {
+			log.Warn("mock market seed failed", "error", seedErr)
+		} else {
+			log.Info("mock markets seeded", "markets", mkts, "runners", runners)
+		}
+		seedCancel()
+	}
+
 	// ── WebSocket state ─────────────────────────────────────────
 	wsConns := &sync.Map{}
 	corsOrigins := getStringSliceEnv("CORS_ORIGINS", []string{"http://localhost:3000"})
@@ -201,6 +222,18 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(update)
+	})
+
+	// /odds/status is the cheap health/overview endpoint consumed by the
+	// integration test suite and ops dashboards. It reports which provider
+	// is active, how many markets/runners are currently warm in the Redis
+	// cache and when the cache was last refreshed. The counters are kept
+	// in-memory on the odds Service and updated by SeedMockMarkets at
+	// startup (and, in the future, by any background refresh job).
+	mux.HandleFunc("GET /api/v1/odds/status", func(w http.ResponseWriter, r *http.Request) {
+		status := oddsService.GetStatus(r.Context())
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(status)
 	})
 
 	// wsWrite writes a JSON message to the WebSocket with a 5-second deadline.
