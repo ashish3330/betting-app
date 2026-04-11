@@ -1,3 +1,8 @@
+// Command admin-service runs the Lotus Exchange administrative backend as a
+// standalone microservice. It hosts the /api/v1/admin/* routes (which
+// require an admin role), the /api/v1/panel/* routes (accessible to any
+// non-client user, scoped to their downline), and the dev-only seed
+// bootstrap endpoint used by the integration test suite.
 package main
 
 import (
@@ -13,7 +18,9 @@ import (
 	"github.com/lotus-exchange/lotus-exchange/internal/admin"
 	"github.com/lotus-exchange/lotus-exchange/internal/auth"
 	"github.com/lotus-exchange/lotus-exchange/internal/fraud"
+	"github.com/lotus-exchange/lotus-exchange/internal/hierarchy"
 	"github.com/lotus-exchange/lotus-exchange/internal/market"
+	"github.com/lotus-exchange/lotus-exchange/internal/matching"
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
 	"github.com/lotus-exchange/lotus-exchange/internal/reporting"
@@ -84,8 +91,8 @@ func main() {
 	marketSvc := market.NewService(db, log)
 	reportingSvc := reporting.NewService(clickhouseDB, db, log)
 	fraudSvc := fraud.NewService(db, rdb, log)
-
-	adminHandler := admin.NewHandler(db, marketSvc, settlementSvc, reportingSvc, fraudSvc, log)
+	hierarchySvc := hierarchy.NewService(db, rdb, log)
+	matchingEngine := matching.NewEngine(rdb, log)
 
 	// ── Auth Service for JWT validation ─────────────────────────
 	authService, err := auth.NewService(
@@ -97,6 +104,15 @@ func main() {
 		log.Error("failed to create auth service", "error", err)
 		os.Exit(1)
 	}
+
+	// Admin handler is built once and decorated with the microservice
+	// dependencies it needs to drive the seed bootstrap and panel scoping
+	// (auth, wallet, hierarchy, matching). Without WithMicroserviceDeps
+	// the seed handler would not have access to user creation or credit
+	// transfer.
+	adminHandler := admin.NewHandler(db, marketSvc, settlementSvc, reportingSvc, fraudSvc, log).
+		WithMicroserviceDeps(authService, walletSvc, hierarchySvc, matchingEngine)
+
 	authMw := middleware.AuthMiddleware(authService)
 
 	// ── HTTP Router ─────────────────────────────────────────────
@@ -114,10 +130,22 @@ func main() {
 	// Prometheus scrape endpoint
 	mux.Handle("GET /metrics", service.MetricsHandler())
 
-	// Admin routes — all require auth + admin role
+	// Seed endpoint is PUBLIC (no auth middleware). Access control is
+	// enforced inside the handler via the X-Seed-Secret header. Required
+	// by the integration test bootstrap.
+	adminHandler.RegisterSeedRoute(mux)
+
+	// Admin routes — require auth + admin role.
 	adminMux := http.NewServeMux()
 	adminHandler.RegisterRoutes(adminMux)
 	mux.Handle("/api/v1/admin/", authMw(requireAdmin(adminMux)))
+	mux.Handle("/api/v1/fraud/", authMw(requireAdmin(adminMux)))
+
+	// Panel routes — require auth only. Agents and masters access the
+	// panel scoped to their downline; clients are rejected by the handler.
+	panelMux := http.NewServeMux()
+	adminHandler.RegisterPanelRoutes(panelMux)
+	mux.Handle("/api/v1/panel/", authMw(panelMux))
 
 	// ── Middleware chain ────────────────────────────────────────
 	base := service.DefaultMiddleware("admin-service", log)

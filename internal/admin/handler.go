@@ -9,12 +9,16 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/lotus-exchange/lotus-exchange/internal/auth"
 	"github.com/lotus-exchange/lotus-exchange/internal/fraud"
+	"github.com/lotus-exchange/lotus-exchange/internal/hierarchy"
 	"github.com/lotus-exchange/lotus-exchange/internal/market"
+	"github.com/lotus-exchange/lotus-exchange/internal/matching"
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
 	"github.com/lotus-exchange/lotus-exchange/internal/reporting"
 	"github.com/lotus-exchange/lotus-exchange/internal/settlement"
+	"github.com/lotus-exchange/lotus-exchange/internal/wallet"
 	"github.com/lotus-exchange/lotus-exchange/pkg/httputil"
 )
 
@@ -25,6 +29,14 @@ type Handler struct {
 	reporting  *reporting.Service
 	fraud      *fraud.Service
 	logger     *slog.Logger
+
+	// Optional dependencies used by the admin-service microservice build
+	// (seed + panel routes). May be nil when the handler is constructed
+	// inside the gateway where these services are wired separately.
+	auth      *auth.Service
+	wallet    *wallet.Service
+	hierarchy *hierarchy.Service
+	matching  *matching.Engine
 }
 
 func NewHandler(
@@ -43,6 +55,22 @@ func NewHandler(
 		fraud:      fraudSvc,
 		logger:     logger,
 	}
+}
+
+// WithMicroserviceDeps attaches the extra services that the admin-service
+// binary needs to serve the dev seed bootstrap and panel routes. It is a
+// no-op for callers (such as the gateway) that do not need those endpoints.
+func (h *Handler) WithMicroserviceDeps(
+	authSvc *auth.Service,
+	walletSvc *wallet.Service,
+	hierarchySvc *hierarchy.Service,
+	matchingEngine *matching.Engine,
+) *Handler {
+	h.auth = authSvc
+	h.wallet = walletSvc
+	h.hierarchy = hierarchySvc
+	h.matching = matchingEngine
+	return h
 }
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
@@ -444,6 +472,396 @@ func (h *Handler) VolumeReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.WriteJSON(w, http.StatusOK, points)
+}
+
+// ---------------------------------------------------------------------------
+// Panel routes (scoped to caller's downline — agents and masters may call)
+// ---------------------------------------------------------------------------
+
+// RegisterPanelRoutes wires up the /api/v1/panel/* endpoints onto the given
+// mux. These routes require an authenticated caller but do NOT require an
+// admin role — any non-client user (agent, master, admin, superadmin) can
+// access them and results are scoped to the caller's downline.
+func (h *Handler) RegisterPanelRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/v1/panel/dashboard", h.PanelDashboard)
+	mux.HandleFunc("GET /api/v1/panel/users", h.PanelUsers)
+	mux.HandleFunc("GET /api/v1/panel/audit", h.PanelAudit)
+	mux.HandleFunc("GET /api/v1/panel/reports/pnl", h.PanelPnL)
+	mux.HandleFunc("GET /api/v1/panel/reports/volume", h.PanelVolume)
+}
+
+// PanelDashboard returns an aggregate summary for the calling user:
+// balance, exposure, direct-child count, total downline size, and when
+// the caller is a superadmin, platform-wide stats.
+func (h *Handler) PanelDashboard(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+	role := roleFromCtx(r)
+	if !panelRoleAllowed(role) {
+		httputil.WriteError(w, http.StatusForbidden, "clients cannot access panel")
+		return
+	}
+
+	stats := map[string]interface{}{
+		"user_id": userID,
+		"role":    string(role),
+	}
+
+	var (
+		username string
+		balance  float64
+		exposure float64
+	)
+	err := h.db.QueryRowContext(r.Context(),
+		`SELECT username, balance, exposure FROM users WHERE id = $1`,
+		userID,
+	).Scan(&username, &balance, &exposure)
+	if err != nil {
+		httputil.WriteError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	stats["username"] = username
+	stats["own_balance"] = balance
+	stats["own_exposure"] = exposure
+	stats["available_balance"] = balance - exposure
+
+	// Downline counts via ltree (users.path <@ caller.path, excluding self).
+	var directChildren, downlineTotal int
+	h.db.QueryRowContext(r.Context(),
+		`SELECT COUNT(*) FROM users WHERE parent_id = $1`, userID,
+	).Scan(&directChildren)
+	h.db.QueryRowContext(r.Context(),
+		`SELECT COUNT(*) FROM users
+		 WHERE path <@ (SELECT path FROM users WHERE id = $1) AND id != $1`,
+		userID,
+	).Scan(&downlineTotal)
+	stats["direct_children"] = directChildren
+	stats["downline_total"] = downlineTotal
+
+	// Downline aggregate balance/exposure.
+	var downlineBalance, downlineExposure float64
+	h.db.QueryRowContext(r.Context(),
+		`SELECT COALESCE(SUM(balance), 0), COALESCE(SUM(exposure), 0)
+		 FROM users
+		 WHERE path <@ (SELECT path FROM users WHERE id = $1) AND id != $1`,
+		userID,
+	).Scan(&downlineBalance, &downlineExposure)
+	stats["downline_balance"] = downlineBalance
+	stats["downline_exposure"] = downlineExposure
+
+	// Superadmin gets platform-wide stats.
+	if role == models.RoleSuperAdmin {
+		var totalUsers, totalMarkets, totalBets int
+		var totalVolume float64
+		h.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM users").Scan(&totalUsers)
+		h.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM markets").Scan(&totalMarkets)
+		h.db.QueryRowContext(r.Context(),
+			"SELECT COUNT(*), COALESCE(SUM(stake), 0) FROM bets",
+		).Scan(&totalBets, &totalVolume)
+		stats["platform_total_users"] = totalUsers
+		stats["platform_total_markets"] = totalMarkets
+		stats["platform_total_bets"] = totalBets
+		stats["platform_total_volume"] = totalVolume
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, stats)
+}
+
+// PanelUsers returns every user in the caller's downline. SuperAdmin sees
+// every user in the system. Supports an optional ?role= filter.
+func (h *Handler) PanelUsers(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+	role := roleFromCtx(r)
+	if !panelRoleAllowed(role) {
+		httputil.WriteError(w, http.StatusForbidden, "clients cannot access panel")
+		return
+	}
+
+	filterRole := r.URL.Query().Get("role")
+	limit := parseIntParam(r, "limit", 200)
+	offset := parseIntParam(r, "offset", 0)
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+
+	base := `SELECT id, username, email, role, path, parent_id, balance, exposure,
+	                credit_limit, commission_rate, status, created_at, updated_at
+	         FROM users`
+
+	if role == models.RoleSuperAdmin {
+		if filterRole != "" {
+			rows, err = h.db.QueryContext(r.Context(),
+				base+` WHERE role = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+				filterRole, limit, offset)
+		} else {
+			rows, err = h.db.QueryContext(r.Context(),
+				base+` ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+				limit, offset)
+		}
+	} else {
+		if filterRole != "" {
+			rows, err = h.db.QueryContext(r.Context(),
+				base+` WHERE path <@ (SELECT path FROM users WHERE id = $1)
+				       AND id != $1 AND role = $2
+				       ORDER BY created_at DESC LIMIT $3 OFFSET $4`,
+				userID, filterRole, limit, offset)
+		} else {
+			rows, err = h.db.QueryContext(r.Context(),
+				base+` WHERE path <@ (SELECT path FROM users WHERE id = $1)
+				       AND id != $1
+				       ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+				userID, limit, offset)
+		}
+	}
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	users := []*models.User{}
+	for rows.Next() {
+		u := &models.User{}
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.Role, &u.Path,
+			&u.ParentID, &u.Balance, &u.Exposure, &u.CreditLimit,
+			&u.CommissionRate, &u.Status, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			httputil.WriteError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		users = append(users, u)
+	}
+	httputil.WriteJSON(w, http.StatusOK, users)
+}
+
+// PanelAudit returns audit-log rows for the caller's downline (plus the
+// caller's own entries). SuperAdmin gets the full audit stream.
+func (h *Handler) PanelAudit(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+	role := roleFromCtx(r)
+	if !panelRoleAllowed(role) {
+		httputil.WriteError(w, http.StatusForbidden, "clients cannot access audit log")
+		return
+	}
+
+	limit := parseIntParam(r, "limit", 200)
+	action := r.URL.Query().Get("action")
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+
+	if role == models.RoleSuperAdmin {
+		if action != "" {
+			rows, err = h.db.QueryContext(r.Context(),
+				`SELECT id, actor_id, action, entity_type, entity_id, ip_address::text, created_at
+				 FROM audit_log
+				 WHERE action = $1
+				 ORDER BY created_at DESC LIMIT $2`,
+				action, limit)
+		} else {
+			rows, err = h.db.QueryContext(r.Context(),
+				`SELECT id, actor_id, action, entity_type, entity_id, ip_address::text, created_at
+				 FROM audit_log
+				 ORDER BY created_at DESC LIMIT $1`, limit)
+		}
+	} else {
+		// Restrict to actors within the caller's ltree subtree.
+		if action != "" {
+			rows, err = h.db.QueryContext(r.Context(),
+				`SELECT a.id, a.actor_id, a.action, a.entity_type, a.entity_id,
+				        a.ip_address::text, a.created_at
+				 FROM audit_log a
+				 JOIN users u ON u.id = a.actor_id
+				 WHERE u.path <@ (SELECT path FROM users WHERE id = $1)
+				   AND a.action = $2
+				 ORDER BY a.created_at DESC LIMIT $3`,
+				userID, action, limit)
+		} else {
+			rows, err = h.db.QueryContext(r.Context(),
+				`SELECT a.id, a.actor_id, a.action, a.entity_type, a.entity_id,
+				        a.ip_address::text, a.created_at
+				 FROM audit_log a
+				 JOIN users u ON u.id = a.actor_id
+				 WHERE u.path <@ (SELECT path FROM users WHERE id = $1)
+				 ORDER BY a.created_at DESC LIMIT $2`,
+				userID, limit)
+		}
+	}
+	if err != nil {
+		// If the audit_log table is missing (e.g. in a dev DB without phase2
+		// migrations) return an empty list rather than 500 so the panel UI
+		// keeps working.
+		h.logger.WarnContext(r.Context(), "panel audit query failed", "error", err)
+		httputil.WriteJSON(w, http.StatusOK, []interface{}{})
+		return
+	}
+	defer rows.Close()
+
+	entries := []map[string]interface{}{}
+	for rows.Next() {
+		var id, actorID int64
+		var action, entityType, entityID string
+		var ipAddr sql.NullString
+		var createdAt time.Time
+		if err := rows.Scan(&id, &actorID, &action, &entityType, &entityID, &ipAddr, &createdAt); err != nil {
+			httputil.WriteError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		entry := map[string]interface{}{
+			"id":          id,
+			"actor_id":    actorID,
+			"action":      action,
+			"entity_type": entityType,
+			"entity_id":   entityID,
+			"created_at":  createdAt,
+		}
+		if ipAddr.Valid {
+			entry["ip_address"] = ipAddr.String
+		}
+		entries = append(entries, entry)
+	}
+	httputil.WriteJSON(w, http.StatusOK, entries)
+}
+
+// PanelPnL returns a daily P&L roll-up across the caller's downline.
+func (h *Handler) PanelPnL(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+	role := roleFromCtx(r)
+	if !panelRoleAllowed(role) {
+		httputil.WriteError(w, http.StatusForbidden, "clients cannot access panel")
+		return
+	}
+
+	from, to := parseDateRange(r)
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+
+	if role == models.RoleSuperAdmin {
+		rows, err = h.db.QueryContext(r.Context(),
+			`SELECT to_char(date_trunc('day', b.created_at), 'YYYY-MM-DD') AS day,
+			        COUNT(*), COALESCE(SUM(b.stake), 0),
+			        COALESCE(SUM(CASE WHEN b.status = 'settled' THEN b.profit ELSE 0 END), 0)
+			 FROM bets b
+			 WHERE b.created_at BETWEEN $1 AND $2
+			 GROUP BY day ORDER BY day`,
+			from, to)
+	} else {
+		rows, err = h.db.QueryContext(r.Context(),
+			`SELECT to_char(date_trunc('day', b.created_at), 'YYYY-MM-DD') AS day,
+			        COUNT(*), COALESCE(SUM(b.stake), 0),
+			        COALESCE(SUM(CASE WHEN b.status = 'settled' THEN b.profit ELSE 0 END), 0)
+			 FROM bets b
+			 JOIN users u ON u.id = b.user_id
+			 WHERE u.path <@ (SELECT path FROM users WHERE id = $1)
+			   AND b.created_at BETWEEN $2 AND $3
+			 GROUP BY day ORDER BY day`,
+			userID, from, to)
+	}
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	result := []map[string]interface{}{}
+	for rows.Next() {
+		var day string
+		var bets int
+		var stake, pnl float64
+		if err := rows.Scan(&day, &bets, &stake, &pnl); err != nil {
+			httputil.WriteError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		result = append(result, map[string]interface{}{
+			"date":  day,
+			"bets":  bets,
+			"stake": stake,
+			"pnl":   pnl,
+		})
+	}
+	httputil.WriteJSON(w, http.StatusOK, result)
+}
+
+// PanelVolume returns bet volume grouped by sport across the caller's
+// downline. Useful for quick "where are we taking action" summaries.
+func (h *Handler) PanelVolume(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+	role := roleFromCtx(r)
+	if !panelRoleAllowed(role) {
+		httputil.WriteError(w, http.StatusForbidden, "clients cannot access panel")
+		return
+	}
+
+	from, to := parseDateRange(r)
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+
+	if role == models.RoleSuperAdmin {
+		rows, err = h.db.QueryContext(r.Context(),
+			`SELECT COALESCE(m.sport, 'unknown') AS sport,
+			        COUNT(b.id), COALESCE(SUM(b.stake), 0)
+			 FROM bets b
+			 LEFT JOIN markets m ON m.id = b.market_id
+			 WHERE b.created_at BETWEEN $1 AND $2
+			 GROUP BY sport ORDER BY SUM(b.stake) DESC NULLS LAST`,
+			from, to)
+	} else {
+		rows, err = h.db.QueryContext(r.Context(),
+			`SELECT COALESCE(m.sport, 'unknown') AS sport,
+			        COUNT(b.id), COALESCE(SUM(b.stake), 0)
+			 FROM bets b
+			 JOIN users u ON u.id = b.user_id
+			 LEFT JOIN markets m ON m.id = b.market_id
+			 WHERE u.path <@ (SELECT path FROM users WHERE id = $1)
+			   AND b.created_at BETWEEN $2 AND $3
+			 GROUP BY sport ORDER BY SUM(b.stake) DESC NULLS LAST`,
+			userID, from, to)
+	}
+	if err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	result := []map[string]interface{}{}
+	for rows.Next() {
+		var sport string
+		var bets int
+		var volume float64
+		if err := rows.Scan(&sport, &bets, &volume); err != nil {
+			httputil.WriteError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		result = append(result, map[string]interface{}{
+			"sport":  sport,
+			"bets":   bets,
+			"volume": volume,
+		})
+	}
+	httputil.WriteJSON(w, http.StatusOK, result)
+}
+
+// panelRoleAllowed reports whether the caller role may access panel routes.
+// Clients are explicitly excluded; every other role (agent through
+// superadmin) is allowed and results are scoped to their downline.
+func panelRoleAllowed(role models.Role) bool {
+	switch role {
+	case models.RoleAgent, models.RoleMaster, models.RoleAdmin, models.RoleSuperAdmin:
+		return true
+	}
+	return false
+}
+
+func roleFromCtx(r *http.Request) models.Role {
+	return middleware.RoleFromContext(r.Context())
 }
 
 func (h *Handler) FraudAlerts(w http.ResponseWriter, r *http.Request) {
