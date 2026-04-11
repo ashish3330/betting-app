@@ -34,51 +34,12 @@ var (
 //
 // TODO(microservices): implement each of these in the relevant service and
 // remove its entry from this set as they come online.
-var endpointsMissingInMicroservices = map[string]string{
-	// odds-service — all ported; odds/status + mock market seed live in
-	// cmd/odds-service/main.go and internal/odds/service.go.
-
-	// admin-service
-	"POST /api/v1/seed":                         "seed handler not ported from monolith",
-	"GET /api/v1/panel/dashboard (master)":      "admin-service lacks panel routes",
-	"GET /api/v1/panel/users (master)":          "admin-service lacks panel routes",
-	"GET /api/v1/panel/audit (admin)":           "admin-service lacks panel routes",
-	"GET /api/v1/panel/reports/pnl (master)":    "admin-service lacks panel routes",
-	"GET /api/v1/panel/reports/volume (master)": "admin-service lacks panel routes",
-
-	// auth-service
-	"GET /api/v1/auth/sessions (player)":      "auth-service lacks session listing handler",
-	"GET /api/v1/auth/login-history (player)": "auth-service lacks login-history handler",
-	"POST /api/v1/auth/otp/resend (player)":   "auth-service lacks otp/resend handler",
-
-	// matching-engine
-	"GET /api/v1/bets (player)":                "matching-engine lacks user bet listing (GET /bets)",
-	"GET /api/v1/bets/history (player)":        "matching-engine bet history query is broken",
-	"GET /api/v1/positions/mock-ipl-match-001": "matching-engine lacks positions handler",
-
-	// wallet-service
-	"GET /api/v1/wallet/deposits (player)":    "wallet-service lacks deposits listing alias",
-	"GET /api/v1/wallet/withdrawals (player)": "wallet-service lacks withdrawals listing alias",
-
-	// payment-service
-	"GET /api/v1/payment/transactions (player)": "payment-service list query is broken",
-
-	// hierarchy-service
-	"GET /api/v1/responsible/limits (player)": "hierarchy-service only registers /responsible-gambling/",
-	"GET /api/v1/referral/code (player)":      "hierarchy-service lacks referral handlers",
-	"GET /api/v1/referral/stats (player)":     "hierarchy-service lacks referral handlers",
-
-	// risk-service
-	"GET /api/v1/risk/exposure (player)": "risk-service lacks per-user exposure handler",
-
-	// reporting-service
-	"GET /api/v1/reports/pnl (player)": "reporting-service requires admin role for pnl",
-
-	// E2E flows that depend on the above
-	"E2E: Login → balance → place bet → history":          "depends on odds cache + bet listing",
-	"E2E: Login → markets → event markets → positions":    "depends on positions handler",
-	"E2E: Wallet aliases (statement/deposits/withdrawals)": "depends on wallet deposits handler",
-}
+// All previously skipped endpoints have now been ported to the appropriate
+// microservice. The skip-list is intentionally empty so the integration
+// suite exercises every route in --mode=microservices identically to the
+// monolith run, and any future regression on a ported endpoint shows up
+// as a real failure instead of a silent skip.
+var endpointsMissingInMicroservices = map[string]string{}
 
 var (
 	totalTests int
