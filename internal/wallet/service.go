@@ -117,6 +117,13 @@ func (s *Service) GetBalance(ctx context.Context, userID int64) (*models.WalletS
 // ---------------------------------------------------------------------------
 
 func (s *Service) HoldFunds(ctx context.Context, userID int64, amount float64, betID string) error {
+	// Reject non-positive amounts up front. A zero/negative hold would silently
+	// reduce the user's exposure (since we add `amount` to it below) and could
+	// be abused to free funds without a matching release.
+	if amount <= 0 {
+		return fmt.Errorf("hold funds: amount must be positive, got %.2f", amount)
+	}
+
 	// READ COMMITTED is sufficient: the SELECT ... FOR UPDATE below locks the
 	// user row, which gives us the serialization we need for the balance/exposure
 	// invariant without the 40001 retry storms SERIALIZABLE causes at scale.
@@ -173,11 +180,15 @@ func (s *Service) HoldFunds(ctx context.Context, userID int64, amount float64, b
 		return fmt.Errorf("hold funds: commit: %w", err)
 	}
 
-	// Best-effort Redis update AFTER successful commit.
-	exposureKey := fmt.Sprintf("exposure:user:%d", userID)
-	if redisErr := s.redis.HIncrByFloat(ctx, exposureKey, "total", amount).Err(); redisErr != nil {
-		s.logger.WarnContext(ctx, "hold funds: redis exposure update failed (best-effort)",
-			"user_id", userID, "error", redisErr)
+	// Best-effort Redis update AFTER successful commit. Guard against a nil
+	// redis client so the service stays usable in unit tests and in degraded
+	// modes where Redis is temporarily unconfigured.
+	if s.redis != nil {
+		exposureKey := fmt.Sprintf("exposure:user:%d", userID)
+		if redisErr := s.redis.HIncrByFloat(ctx, exposureKey, "total", amount).Err(); redisErr != nil {
+			s.logger.WarnContext(ctx, "hold funds: redis exposure update failed (best-effort)",
+				"user_id", userID, "error", redisErr)
+		}
 	}
 	s.invalidateBalance(ctx, userID)
 
@@ -249,11 +260,15 @@ func (s *Service) ReleaseFunds(ctx context.Context, userID int64, amount float64
 		return fmt.Errorf("release funds: commit: %w", err)
 	}
 
-	// Best-effort Redis update AFTER successful commit.
-	exposureKey := fmt.Sprintf("exposure:user:%d", userID)
-	if redisErr := s.redis.HIncrByFloat(ctx, exposureKey, "total", -amount).Err(); redisErr != nil {
-		s.logger.WarnContext(ctx, "release funds: redis exposure update failed (best-effort)",
-			"user_id", userID, "error", redisErr)
+	// Best-effort Redis update AFTER successful commit. Guard against a nil
+	// redis client so the service stays usable in unit tests and in degraded
+	// modes where Redis is temporarily unconfigured.
+	if s.redis != nil {
+		exposureKey := fmt.Sprintf("exposure:user:%d", userID)
+		if redisErr := s.redis.HIncrByFloat(ctx, exposureKey, "total", -amount).Err(); redisErr != nil {
+			s.logger.WarnContext(ctx, "release funds: redis exposure update failed (best-effort)",
+				"user_id", userID, "error", redisErr)
+		}
 	}
 	s.invalidateBalance(ctx, userID)
 
