@@ -1,4 +1,4 @@
-import { decryptData, encryptData, encryptLocalStorage, decryptLocalStorage } from "./crypto";
+import { decryptData, encryptData, encryptLocalStorage } from "./crypto";
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "";
 
@@ -16,17 +16,34 @@ function getCacheKey(endpoint: string, method?: string): string {
   return `${method || "GET"}:${endpoint}`;
 }
 
+/**
+ * Read a cookie value by name. Used for the (non-HttpOnly) csrf_token cookie
+ * that the backend sets at login. The access_token / refresh_token cookies
+ * are HttpOnly and intentionally NOT readable from JS.
+ */
+function readCookie(name: string): string | null {
+  if (typeof document === "undefined") return null;
+  const prefix = `${name}=`;
+  const parts = document.cookie ? document.cookie.split(";") : [];
+  for (const raw of parts) {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith(prefix)) {
+      return decodeURIComponent(trimmed.substring(prefix.length));
+    }
+  }
+  return null;
+}
+
 class ApiClient {
   private refreshPromise: Promise<boolean> | null = null;
 
-  private getToken(): string | null {
-    if (typeof window === "undefined") return null;
-    return decryptLocalStorage("access_token");
-  }
-
-  private getRefreshToken(): string | null {
-    if (typeof window === "undefined") return null;
-    return decryptLocalStorage("refresh_token");
+  /**
+   * Returns the CSRF token from the (non-HttpOnly) `csrf_token` cookie set by
+   * the backend at login. Returns `null` when running on the server or when
+   * the cookie hasn't been set yet.
+   */
+  private getCSRFToken(): string | null {
+    return readCookie("csrf_token");
   }
 
   async request<T>(endpoint: string, options: ApiOptions = {}): Promise<T> {
@@ -53,18 +70,19 @@ class ApiClient {
       ...(customHeaders as Record<string, string>),
     };
 
-    if (auth) {
-      const token = this.getToken();
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
-      }
-    }
+    // Authentication is now carried by the HttpOnly `access_token` cookie that
+    // the backend sets at login. We MUST send credentials on every request so
+    // the browser attaches that cookie. The `auth` flag is preserved as a hint
+    // (used to drive the 401 → refresh retry path) but no Authorization header
+    // is added — the cookie is the source of truth.
+    void auth;
 
-    // Send CSRF token for state-changing requests
-    if (method === "POST" || method === "PUT" || method === "DELETE") {
-      const csrfToken = decryptLocalStorage("csrf_token");
-      if (csrfToken) {
-        headers["X-CSRF-Token"] = csrfToken;
+    // Attach CSRF header on mutating requests. Read from the non-HttpOnly
+    // csrf_token cookie that the backend sets at login.
+    if (method === "POST" || method === "PUT" || method === "DELETE" || method === "PATCH") {
+      const csrf = this.getCSRFToken();
+      if (csrf) {
+        headers["X-CSRF-Token"] = csrf;
       }
     }
 
@@ -75,7 +93,11 @@ class ApiClient {
       rest.body = JSON.stringify({ d: encrypted });
     }
 
-    const promise = fetch(`${BASE_URL}${endpoint}`, { headers, ...rest });
+    const promise = fetch(`${BASE_URL}${endpoint}`, {
+      headers,
+      credentials: "include",
+      ...rest,
+    });
 
     // Track inflight GETs
     if (method === "GET") {
@@ -107,9 +129,16 @@ class ApiClient {
     if (response.status === 401 && auth) {
       const refreshed = await this.refreshToken();
       if (refreshed) {
-        headers["Authorization"] = `Bearer ${this.getToken()}`;
+        // Refresh updated the HttpOnly access_token cookie; replay the original
+        // request and let the browser attach the new cookie automatically.
+        // Also refresh the CSRF header from the (possibly rotated) cookie.
+        const csrf = this.getCSRFToken();
+        if (csrf) {
+          headers["X-CSRF-Token"] = csrf;
+        }
         const retryResponse = await fetch(`${BASE_URL}${endpoint}`, {
           headers,
+          credentials: "include",
           ...rest,
         });
         if (!retryResponse.ok) {
@@ -125,11 +154,15 @@ class ApiClient {
         }
         return retryData;
       } else {
-        // Clear tokens but don't redirect — let components decide
+        // Clear local user state. The HttpOnly token cookies are cleared by
+        // the backend's /auth/logout endpoint; we can't touch them from JS.
         if (typeof window !== "undefined") {
+          localStorage.removeItem("user");
+          // Best-effort: also strip any legacy plaintext/obfuscated tokens that
+          // older builds may have left behind.
           localStorage.removeItem("access_token");
           localStorage.removeItem("refresh_token");
-          localStorage.removeItem("user");
+          localStorage.removeItem("csrf_token");
         }
         throw new ApiError(401, "Session expired. Please login again.");
       }
@@ -186,42 +219,32 @@ class ApiClient {
   }
 
   private async _doRefresh(): Promise<boolean> {
-    const refreshToken = this.getRefreshToken();
-    if (!refreshToken) return false;
     try {
+      // The refresh token now lives in an HttpOnly cookie scoped to
+      // /api/v1/auth/refresh. The browser will attach it automatically as
+      // long as we use credentials: "include".
+      const csrf = this.getCSRFToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (csrf) headers["X-CSRF-Token"] = csrf;
+
       const res = await fetch(`${BASE_URL}/api/v1/auth/refresh`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refresh_token: refreshToken }),
+        headers,
+        credentials: "include",
+        body: JSON.stringify({}),
       });
       if (!res.ok) return false;
-      let data = await res.json();
-
-      // Decrypt if response is encrypted
-      if (data && typeof data === "object" && typeof data.d === "string" && Object.keys(data).length === 1) {
-        try {
-          data = await decryptData(data.d);
-        } catch {
-          // decryption failed
-        }
-      }
-
-      encryptLocalStorage("access_token", data.access_token);
-      if (data.refresh_token) {
-        encryptLocalStorage("refresh_token", data.refresh_token);
+      // The new tokens are returned via Set-Cookie; the JSON body is discarded.
+      // We still consume it so the connection can be reused.
+      try {
+        await res.json();
+      } catch {
+        // body may be empty
       }
       return true;
     } catch {
       return false;
     }
-  }
-
-  private logout() {
-    if (typeof window === "undefined") return;
-    localStorage.removeItem("access_token");
-    localStorage.removeItem("refresh_token");
-    localStorage.removeItem("user");
-    window.location.href = "/login";
   }
 
   // Auth
@@ -239,33 +262,26 @@ class ApiClient {
       body: JSON.stringify({ username, password }),
     });
 
-    // If OTP is required, return the data without storing tokens
+    // If OTP is required, return the data without storing anything.
     if (data.requires_otp) {
       return data;
     }
 
-    if (data.access_token) {
-      encryptLocalStorage("access_token", data.access_token);
-    }
-    if (data.refresh_token) {
-      encryptLocalStorage("refresh_token", data.refresh_token);
-    }
+    // Tokens are delivered as HttpOnly cookies by the backend — we deliberately
+    // do NOT mirror access_token / refresh_token / csrf_token into localStorage.
+    // Only the user profile (non-credential) is cached so the client can
+    // hydrate the auth UI synchronously on first paint.
     if (data.user) {
       encryptLocalStorage("user", JSON.stringify(data.user));
-    }
-    if (data.csrf_token) {
-      encryptLocalStorage("csrf_token", data.csrf_token);
     }
     return data;
   }
 
   async completeOTPLogin(userId: number, code: string) {
     const data = await this.verifyOTP(userId, code);
-    encryptLocalStorage("access_token", data.access_token);
-    encryptLocalStorage("refresh_token", data.refresh_token);
-    encryptLocalStorage("user", JSON.stringify(data.user));
-    if (data.csrf_token) {
-      encryptLocalStorage("csrf_token", data.csrf_token);
+    // Tokens come back as HttpOnly cookies; only persist the user profile.
+    if (data.user) {
+      encryptLocalStorage("user", JSON.stringify(data.user));
     }
     return data;
   }
@@ -279,11 +295,24 @@ class ApiClient {
       is_demo: boolean;
     }>("/api/v1/auth/demo", { method: "POST" });
 
-    if (data.access_token) encryptLocalStorage("access_token", data.access_token);
-    if (data.refresh_token) encryptLocalStorage("refresh_token", data.refresh_token);
+    // Tokens come back as HttpOnly cookies; only persist the user profile.
     if (data.user) encryptLocalStorage("user", JSON.stringify(data.user));
-    if (data.csrf_token) encryptLocalStorage("csrf_token", data.csrf_token);
     return data;
+  }
+
+  async logout() {
+    try {
+      await this.request<{ message?: string }>("/api/v1/auth/logout", { method: "POST", auth: true });
+    } catch {
+      // Even if the network call fails, clear local state below.
+    }
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("user");
+      // Clean up any legacy local storage entries from older builds.
+      localStorage.removeItem("access_token");
+      localStorage.removeItem("refresh_token");
+      localStorage.removeItem("csrf_token");
+    }
   }
 
   async register(

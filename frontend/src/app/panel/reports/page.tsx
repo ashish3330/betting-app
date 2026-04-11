@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
-import { decryptLocalStorage } from "@/lib/crypto";
 import Pagination from "@/components/Pagination";
 
 const SETTLEMENTS_PER_PAGE = 20;
@@ -123,10 +122,11 @@ function StatCard({
 // ── CSV Download ────────────────────────────────────────────────────────────
 
 async function downloadCSV() {
-  const token = decryptLocalStorage("access_token");
+  // Auth is carried by the HttpOnly access_token cookie set at login.
+  // We just need to opt in to sending credentials cross-origin.
   const baseUrl = process.env.NEXT_PUBLIC_API_URL || "";
   const res = await fetch(`${baseUrl}/api/v1/panel/reports/csv`, {
-    headers: { Authorization: `Bearer ${token}` },
+    credentials: "include",
   });
   if (!res.ok) throw new Error("Failed to download CSV");
   const blob = await res.blob();

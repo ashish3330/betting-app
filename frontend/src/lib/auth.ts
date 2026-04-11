@@ -9,7 +9,7 @@ import {
   ReactNode,
 } from "react";
 import React from "react";
-import { api, User, WalletBalance } from "./api";
+import { api, ApiError, User, WalletBalance } from "./api";
 import { decryptLocalStorage } from "./crypto";
 
 interface AuthState {
@@ -34,35 +34,65 @@ const AuthContext = createContext<AuthState>({
   refreshBalance: async () => {},
 });
 
+/**
+ * Read the cached user from localStorage. Returns `null` on the server (no
+ * window) or when no cached user exists. Used as a synchronous lazy initialiser
+ * for the AuthProvider state so the first client render already reflects the
+ * logged-in UI and we don't see a logged-out flicker.
+ */
+function readStoredUser(): User | null {
+  if (typeof window === "undefined") return null;
+  const stored = decryptLocalStorage("user");
+  if (!stored) return null;
+  try {
+    return JSON.parse(stored) as User;
+  } catch {
+    try {
+      localStorage.removeItem("user");
+    } catch {
+      // ignore
+    }
+    return null;
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  // Lazy initialiser: synchronously hydrate from localStorage on the first
+  // client render. SSR has no window, so it returns `null` (logged out) — the
+  // first client render will then immediately produce the logged-in UI without
+  // a flicker. The hydration mismatch is suppressed in the Navbar.
+  const [user, setUser] = useState<User | null>(() => readStoredUser());
+  // We're effectively done loading after the synchronous hydration.
+  const [isLoading, setIsLoading] = useState(false);
   const [balance, setBalance] = useState<WalletBalance | null>(null);
 
   useEffect(() => {
-    // Check for stored user on mount
-    const stored = decryptLocalStorage("user");
-    const token = decryptLocalStorage("access_token");
-    if (stored && token) {
-      try {
-        setUser(JSON.parse(stored));
-      } catch {
-        localStorage.removeItem("user");
-      }
+    // Defensive: if for any reason the lazy initialiser missed a stored user
+    // (e.g. value was written between component construction and mount),
+    // pick it up here. Also marks loading complete in either branch.
+    if (!user) {
+      const stored = readStoredUser();
+      if (stored) setUser(stored);
     }
     setIsLoading(false);
+    // We intentionally only run this once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const refreshBalance = useCallback(async () => {
-    if (!decryptLocalStorage("access_token")) return;
+    // Authentication is now carried by an HttpOnly cookie that JS can't read,
+    // so we can't gate on a token presence check. Just attempt the call and
+    // let a 401 reset auth state.
     try {
       const bal = await api.getBalance();
       setBalance(bal);
     } catch (err) {
-      // If session expired (tokens cleared by api.ts), reset auth state
-      if (!decryptLocalStorage("access_token")) {
+      if (err instanceof ApiError && err.status === 401) {
         setUser(null);
         setBalance(null);
+        if (typeof window !== "undefined") {
+          localStorage.removeItem("user");
+        }
       }
     }
   }, []);
@@ -91,31 +121,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return data;
   };
 
-  const logout = async () => {
-    // Invalidate server session before clearing local state
-    const token = decryptLocalStorage("access_token");
-    if (token) {
-      try {
-        await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || ""}/api/v1/auth/logout`,
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json",
-            },
-          }
-        );
-      } catch {
-        // Proceed with local cleanup even if server call fails
-      }
-    }
-    localStorage.removeItem("access_token");
-    localStorage.removeItem("refresh_token");
-    localStorage.removeItem("user");
-    localStorage.removeItem("csrf_token");
+  const logout = async (): Promise<void> => {
+    // Fire-and-forget the backend logout call so the HttpOnly cookies are
+    // cleared by Set-Cookie. Local user cache is wiped immediately.
     setUser(null);
     setBalance(null);
+    try {
+      await api.logout();
+    } catch {
+      // ignore — local state already cleared
+    }
   };
 
   return React.createElement(

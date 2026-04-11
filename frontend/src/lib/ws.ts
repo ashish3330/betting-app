@@ -1,6 +1,19 @@
-import { decryptLocalStorage } from "./crypto";
-
 type MessageHandler = (data: unknown) => void;
+
+/**
+ * Returns true if a user profile is cached in localStorage. Used as a
+ * "logged-in" gate for the WebSocket connection now that the access_token
+ * lives in an HttpOnly cookie that JavaScript cannot read.
+ *
+ * NOTE: WebSocket *authentication* against the gateway still requires the
+ * server to read the access_token from cookies (or from a session derived
+ * from them). That is a backend concern; this client just refrains from
+ * leaking tokens via localStorage.
+ */
+function hasCachedUser(): boolean {
+  if (typeof window === "undefined") return false;
+  return localStorage.getItem("user") !== null;
+}
 
 interface WSMessage {
   type: string;
@@ -32,26 +45,22 @@ class LotusWebSocket {
       return;
     }
 
-    // Don't connect if no token (not logged in) or no subscriptions
-    const token = typeof window !== "undefined" ? decryptLocalStorage("access_token") : null;
-    if (!token && this.subscribedMarkets.length === 0) {
+    // Don't connect when there's nothing to do: no logged-in user AND
+    // no public market subscriptions queued.
+    if (!hasCachedUser() && this.subscribedMarkets.length === 0) {
       return;
     }
 
     this.isConnecting = true;
 
     try {
-      // Auth via query parameter — required by both the gateway proxy
-      // (cmd/gateway/main.go:proxyWebSocket) and the odds-service WS
-      // handler. Browser WebSocket cannot set Authorization headers,
-      // and an in-band auth message is rejected because the server
-      // already validated the token before the upgrade. Without this
-      // every WS connection 401s and we silently fall back to 5s
-      // polling on the markets page.
-      const wsURL = token
-        ? `${this.url}?token=${encodeURIComponent(token)}`
-        : this.url;
-      this.ws = new WebSocket(wsURL);
+      // Auth: the access_token now lives in an HttpOnly cookie that
+      // browser JS cannot read, but the browser DOES send same-origin
+      // cookies on the WebSocket upgrade request automatically. The
+      // gateway's proxyWebSocket reads access_token from the cookie
+      // when no ?token= query param is present (see commit dd2134b).
+      // No client-side auth frame is needed.
+      this.ws = new WebSocket(this.url);
 
       this.ws.onopen = () => {
         this.isConnecting = false;

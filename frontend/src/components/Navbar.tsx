@@ -104,6 +104,7 @@ export default function Navbar({ onToggleSidebar, sidebarOpen = false, liveCount
     <nav
       className="bg-[var(--nav-bg)] border-b border-gray-800/60 sticky top-0 z-50"
       style={{ height: "50px" }}
+      suppressHydrationWarning
     >
       <div className="h-full px-1.5 sm:px-3 flex items-center justify-between gap-1 sm:gap-3">
         {/* Left: Hamburger + Logo */}
