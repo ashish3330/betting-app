@@ -30,6 +30,7 @@ SERVICES=(
   risk-service
   hierarchy-service
   notification-service
+  admin-service
 )
 
 # ---------------------------------------------------------------
@@ -107,6 +108,7 @@ echo "  Reporting Service:    http://localhost:8088"
 echo "  Risk Service:         http://localhost:8089"
 echo "  Hierarchy Service:    http://localhost:8090"
 echo "  Notification Service: http://localhost:8091"
+echo "  Admin Service:        http://localhost:8092"
 echo ""
 
 # Wait for all background processes
