@@ -233,6 +233,11 @@ func runMigrations(log *slog.Logger) error {
 		// audit trail vanishes — same class as the display_side bug.
 		`ALTER TABLE betting.audit_log ADD COLUMN IF NOT EXISTS entity_type TEXT DEFAULT ''`,
 		`ALTER TABLE betting.audit_log ADD COLUMN IF NOT EXISTS entity_id TEXT DEFAULT ''`,
+		// Tamper-evident hash chain. Each new row's hash links to the
+		// previous row's hash (SHA-256 of canonical row data + prev hash).
+		// Lets us detect post-hoc edits or deletions of any row in the
+		// chain by re-walking it via /api/v1/admin/audit/verify.
+		`ALTER TABLE betting.audit_log ADD COLUMN IF NOT EXISTS hash_chain TEXT DEFAULT ''`,
 		// Age verification — required for any regulated market.
 		`ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS date_of_birth DATE`,
 		// KYC status — gates withdrawals.
@@ -676,10 +681,12 @@ func dbMarkAllNotificationsRead(userID int64) int {
 // ── DB-backed Audit Log ───────────────────────────────────────────────────────
 
 func dbAddAudit(userID int64, username, action, details, ip string) {
-	// audit_log has both legacy schema (actor_id, entity_type, entity_id) and new schema (user_id, username, details, ip)
-	// Use new columns added by setup migration; entity fields are optional with safe defaults.
-	if _, err := db.Exec(`INSERT INTO betting.audit_log (user_id, username, action, details, ip, entity_type, entity_id) VALUES ($1,$2,$3,$4,$5,'system','-')`,
-		userID, username, action, details, ip); err != nil {
+	// Compute the next hash chain link before insert. Failure to advance
+	// the chain (e.g. computeChainHash never returns error) is impossible
+	// here, so we can pass it as a column value directly.
+	hash := AuditChainNext(userID, action, details, ip)
+	if _, err := db.Exec(`INSERT INTO betting.audit_log (user_id, username, action, details, ip, entity_type, entity_id, hash_chain) VALUES ($1,$2,$3,$4,$5,'system','-',$6)`,
+		userID, username, action, details, ip, hash); err != nil {
 		logger.Error("dbAddAudit failed", "error", err)
 	}
 }

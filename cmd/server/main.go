@@ -77,6 +77,9 @@ func main() {
 		}
 	}
 
+	// Restore audit chain head from DB so the chain continues across restart.
+	initAuditChain()
+
 	store = NewStore()
 
 	// Wire up bundled internal/* services that share the same DB as the
@@ -271,6 +274,8 @@ func main() {
 	// ── Admin (superadmin / admin only) ─────────────────────────
 	// Reconciliation: admin-only ledger ↔ balance/exposure invariant check.
 	mux.HandleFunc("GET /api/v1/admin/reconcile", requireRole(handleReconcile, "superadmin", "admin"))
+	// Audit chain verification: admin-only tamper detection.
+	mux.HandleFunc("GET /api/v1/admin/audit/verify", requireRole(handleVerifyAuditChain, "superadmin", "admin"))
 	mux.HandleFunc("GET /api/v1/admin/users", requireRole(handleAdminListUsers, "superadmin", "admin"))
 	mux.HandleFunc("GET /api/v1/admin/users/{id}", requireRole(handleAdminGetUser, "superadmin", "admin"))
 	mux.HandleFunc("GET /api/v1/admin/markets", requireRole(handleAdminListMarkets, "superadmin", "admin"))
