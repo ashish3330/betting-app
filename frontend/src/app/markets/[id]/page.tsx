@@ -28,7 +28,11 @@ interface MarketInfo {
 export default function MarketDetailPage() {
   const params = useParams();
   const marketId = params.id as string;
-  const { addSelection: pushToGlobalSlip, selections: slipSelections } = useBetSlip();
+  const {
+    addSelection: pushToGlobalSlip,
+    selections: slipSelections,
+    syncLivePrices,
+  } = useBetSlip();
 
   const [odds, setOdds] = useState<MarketOdds | null>(null);
   const [orderBook, setOrderBook] = useState<OrderBookType>({ back: [], lay: [] });
@@ -153,10 +157,19 @@ export default function MarketDetailPage() {
       }
       setOdds(oddsData);
       setOrderBook(obData);
+      // Sync any open bet slip selections to the latest live prices.
+      if (oddsData?.runners) {
+        const live = oddsData.runners.map((r) => ({
+          selectionId: r.selection_id,
+          backPrice: r.back_prices?.[0]?.price ?? r.back_price ?? 0,
+          layPrice: r.lay_prices?.[0]?.price ?? r.lay_price ?? 0,
+        }));
+        syncLivePrices(activeMarketId, live);
+      }
     } catch {
       // API unavailable
     }
-  }, [activeMarketId, odds?.runners]);
+  }, [activeMarketId, odds?.runners, syncLivePrices]);
 
   useEffect(() => {
     loadData();
@@ -183,6 +196,16 @@ export default function MarketDetailPage() {
           }
           return update;
         });
+        // Push the latest live prices into any bet slip selections that
+        // reference this market — keeps the slip in sync with live odds.
+        if (update.runners) {
+          const live = update.runners.map((r) => ({
+            selectionId: r.selection_id,
+            backPrice: r.back_prices?.[0]?.price ?? r.back_price ?? 0,
+            layPrice: r.lay_prices?.[0]?.price ?? r.lay_price ?? 0,
+          }));
+          syncLivePrices(activeMarketId, live);
+        }
       }
     });
 

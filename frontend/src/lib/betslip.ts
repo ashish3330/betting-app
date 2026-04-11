@@ -29,10 +29,31 @@ export interface BetSlipSelection {
   selectionId: number;
   runnerName: string;
   side: "back" | "lay";
+  /** The committed price the user is willing to bet at. */
   price: number;
   stake: number;
   /** True for session/fancy bets (profit = stake * rate / 100 instead of odds). */
   isSession?: boolean;
+  /**
+   * Live market price as last seen on the markets feed. Updated by the
+   * markets page WS handler via syncLivePrice(). When this differs from
+   * `price`, the slip UI shows a "price moved" indicator.
+   */
+  latestPrice?: number;
+  /**
+   * Direction of the last price movement (relative to `price`).
+   * - "up": latestPrice > price
+   * - "down": latestPrice < price
+   * - undefined: no movement
+   */
+  movement?: "up" | "down";
+}
+
+/** Live runner price snapshot used by syncLivePrice. */
+export interface LiveRunnerPrice {
+  selectionId: number;
+  backPrice?: number;
+  layPrice?: number;
 }
 
 interface BetSlipContextValue {
@@ -47,6 +68,20 @@ interface BetSlipContextValue {
   removeSelection: (id: string) => void;
   updateSelection: (id: string, patch: Partial<BetSlipSelection>) => void;
   clearAll: () => void;
+  /**
+   * Update `latestPrice` for any selections in the slip that match the given
+   * marketId. Called by the markets page WS handler whenever odds change.
+   * Does NOT mutate `price` — that stays as the user's committed value
+   * until they explicitly accept the new odds.
+   */
+  syncLivePrices: (marketId: string, runners: LiveRunnerPrice[]) => void;
+  /**
+   * Accept the latest market price for a selection. Sets `price = latestPrice`
+   * and clears the movement indicator.
+   */
+  acceptLivePrice: (id: string) => void;
+  /** Accept latest market price for every selection that has moved. */
+  acceptAllLivePrices: () => void;
 }
 
 const BetSlipContext = createContext<BetSlipContextValue | null>(null);
@@ -101,6 +136,54 @@ export function BetSlipProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  // Sync `latestPrice` for any matching slip entries when the market feed
+  // pushes new odds. We deliberately do NOT mutate `price` here — the user's
+  // committed price stays put until they accept the move via acceptLivePrice.
+  const syncLivePrices = useCallback(
+    (marketId: string, runners: LiveRunnerPrice[]) => {
+      setSelections((prev) => {
+        let changed = false;
+        const next = prev.map((s) => {
+          if (s.marketId !== marketId) return s;
+          const r = runners.find((x) => x.selectionId === s.selectionId);
+          if (!r) return s;
+          const newLive =
+            s.side === "back" ? r.backPrice : r.layPrice;
+          if (newLive == null || newLive <= 0) return s;
+          if (s.latestPrice === newLive) return s;
+          changed = true;
+          let movement: "up" | "down" | undefined;
+          if (newLive > s.price) movement = "up";
+          else if (newLive < s.price) movement = "down";
+          else movement = undefined;
+          return { ...s, latestPrice: newLive, movement };
+        });
+        return changed ? next : prev;
+      });
+    },
+    [],
+  );
+
+  const acceptLivePrice = useCallback((id: string) => {
+    setSelections((prev) =>
+      prev.map((s) =>
+        s.id === id && s.latestPrice && s.latestPrice > 0
+          ? { ...s, price: s.latestPrice, movement: undefined }
+          : s,
+      ),
+    );
+  }, []);
+
+  const acceptAllLivePrices = useCallback(() => {
+    setSelections((prev) =>
+      prev.map((s) =>
+        s.latestPrice && s.latestPrice > 0 && s.movement
+          ? { ...s, price: s.latestPrice, movement: undefined }
+          : s,
+      ),
+    );
+  }, []);
+
   const clearAll = useCallback(() => setSelections([]), []);
   const open = useCallback(() => setIsOpen(true), []);
   const close = useCallback(() => setIsOpen(false), []);
@@ -126,6 +209,9 @@ export function BetSlipProvider({ children }: { children: ReactNode }) {
       addSelection,
       removeSelection,
       updateSelection,
+      syncLivePrices,
+      acceptLivePrice,
+      acceptAllLivePrices,
       clearAll,
     }),
     [
@@ -137,6 +223,9 @@ export function BetSlipProvider({ children }: { children: ReactNode }) {
       addSelection,
       removeSelection,
       updateSelection,
+      syncLivePrices,
+      acceptLivePrice,
+      acceptAllLivePrices,
       clearAll,
     ],
   );

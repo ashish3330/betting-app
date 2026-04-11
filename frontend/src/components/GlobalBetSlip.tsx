@@ -62,6 +62,8 @@ export default function GlobalBetSlip() {
     close,
     removeSelection,
     updateSelection,
+    acceptLivePrice,
+    acceptAllLivePrices,
     clearAll,
   } = useBetSlip();
   const { isLoggedIn, balance, refreshBalance } = useAuth();
@@ -84,6 +86,20 @@ export default function GlobalBetSlip() {
       addToast({ type: "warning", title: "Enter a stake for at least one selection" });
       return;
     }
+
+    // Refuse to place any bet whose price has moved relative to live odds
+    // unless the user has explicitly accepted (cleared the movement flag).
+    // This prevents accidentally placing bets at stale prices.
+    const moved = valid.filter((s) => s.movement);
+    if (moved.length > 0) {
+      addToast({
+        type: "warning",
+        title: "Prices have moved",
+        message: `Accept the new odds for ${moved.length} selection${moved.length > 1 ? "s" : ""} before placing`,
+      });
+      return;
+    }
+
     setPlacing(true);
     let successes = 0;
     let failures = 0;
@@ -203,6 +219,15 @@ export default function GlobalBetSlip() {
             )}
           </div>
           <div className="flex items-center gap-2">
+            {selections.some((s) => s.movement) && (
+              <button
+                onClick={acceptAllLivePrices}
+                className="text-[10px] font-bold px-2 py-0.5 rounded bg-yellow-500 text-black hover:bg-yellow-400 transition"
+                title="Accept all moved prices"
+              >
+                Accept all
+              </button>
+            )}
             {selections.length > 0 && (
               <button
                 onClick={clearAll}
@@ -253,6 +278,7 @@ export default function GlobalBetSlip() {
                   availableBalance={availableBalance}
                   onRemove={() => removeSelection(sel.id)}
                   onUpdate={(patch) => updateSelection(sel.id, patch)}
+                  onAcceptLive={acceptLivePrice}
                 />
               ))}
             </div>
@@ -305,6 +331,7 @@ interface SelectionRowProps {
   availableBalance: number;
   onRemove: () => void;
   onUpdate: (patch: Partial<BetSlipSelection>) => void;
+  onAcceptLive: (id: string) => void;
 }
 
 function SelectionRow({
@@ -312,12 +339,20 @@ function SelectionRow({
   availableBalance,
   onRemove,
   onUpdate,
+  onAcceptLive,
 }: SelectionRowProps) {
   const isBack = selection.side === "back";
   const { win, loss } = calcProfitLoss(selection);
   const sideClass = isBack
     ? "bg-back/10 border-back/30 text-back"
     : "bg-lay/10 border-lay/30 text-lay";
+  // Determine if the live market price has moved away from the user's
+  // committed price. We do not auto-overwrite — the user must accept.
+  const priceMoved =
+    selection.latestPrice != null &&
+    selection.latestPrice > 0 &&
+    selection.latestPrice !== selection.price;
+  const moveDir = selection.movement;
   const label = selection.isSession
     ? isBack
       ? "YES"
@@ -373,7 +408,12 @@ function SelectionRow({
             min="1.01"
             value={selection.price}
             onChange={(e) =>
-              onUpdate({ price: parseFloat(e.target.value) || 1.01 })
+              onUpdate({
+                price: parseFloat(e.target.value) || 1.01,
+                // Clear the price-moved indicator when the user edits manually.
+                latestPrice: undefined,
+                movement: undefined,
+              })
             }
             className={`mt-0.5 w-full h-8 px-2 text-sm text-center font-bold rounded border bg-[var(--bg-primary)] outline-none ${sideClass}`}
           />
@@ -406,6 +446,52 @@ function SelectionRow({
           {label} @ {selection.price.toFixed(2)}
         </span>
       </div>
+
+      {/* Price-moved banner — appears when the live market price differs
+          from the user's committed price. Click to accept the new odds. */}
+      {priceMoved && (
+        <div
+          className={`flex items-center justify-between gap-2 px-2 py-1.5 rounded border text-[11px] ${
+            moveDir === "up"
+              ? "bg-profit/10 border-profit/30"
+              : moveDir === "down"
+                ? "bg-loss/10 border-loss/30"
+                : "bg-yellow-500/10 border-yellow-500/30"
+          }`}
+        >
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span
+              className={`text-base leading-none ${
+                moveDir === "up"
+                  ? "text-profit"
+                  : moveDir === "down"
+                    ? "text-loss"
+                    : "text-yellow-400"
+              }`}
+            >
+              {moveDir === "up" ? "▲" : moveDir === "down" ? "▼" : "↻"}
+            </span>
+            <span className="text-gray-300 truncate">
+              Price moved to{" "}
+              <span className="font-mono font-bold text-white">
+                {selection.latestPrice?.toFixed(2)}
+              </span>
+            </span>
+          </div>
+          <button
+            onClick={() => onAcceptLive(selection.id)}
+            className={`flex-shrink-0 text-[10px] font-bold px-2 py-0.5 rounded transition ${
+              moveDir === "up"
+                ? "bg-profit text-black hover:bg-profit/80"
+                : moveDir === "down"
+                  ? "bg-loss text-white hover:bg-loss/80"
+                  : "bg-yellow-500 text-black hover:bg-yellow-500/80"
+            }`}
+          >
+            Accept
+          </button>
+        </div>
+      )}
 
       {/* Quick stake buttons */}
       <div className="grid grid-cols-6 gap-1">
