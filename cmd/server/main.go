@@ -1085,6 +1085,20 @@ func handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// REGULATORY: refresh is just another way to extend a session, so it
+	// must re-check both account status AND self-exclusion. Without these
+	// a user who got a refresh token before being suspended/excluded could
+	// keep their session alive indefinitely by refreshing.
+	if u.Status != "active" {
+		writeErr(w, 403, "account is "+u.Status)
+		return
+	}
+	if excluded, until := checkSelfExcludedMonolith(u.ID); excluded {
+		store.AddAudit(u.ID, u.Username, "refresh_blocked", "self-excluded until "+until, r.RemoteAddr)
+		writeErr(w, 403, "account is self-excluded")
+		return
+	}
+
 	access := generateToken(u, 24*time.Hour)
 	refresh := generateToken(u, 7*24*time.Hour)
 
@@ -3147,6 +3161,21 @@ func handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 	u := store.GetUser(req.UserID)
 	if u == nil {
 		writeErr(w, 404, "user not found")
+		return
+	}
+
+	// REGULATORY: must re-check self-exclusion AND active status on every
+	// login path. handleLogin enforces this; OTP verify is a parallel
+	// login path that previously skipped both, allowing an excluded /
+	// suspended user to log in via the OTP flow.
+	if u.Status != "active" {
+		store.AddAudit(u.ID, u.Username, "login_failed", "account is "+u.Status, r.RemoteAddr)
+		writeErr(w, 403, "invalid credentials")
+		return
+	}
+	if excluded, until := checkSelfExcludedMonolith(u.ID); excluded {
+		store.AddAudit(u.ID, u.Username, "login_blocked", "self-excluded until "+until+" (otp)", r.RemoteAddr)
+		writeErr(w, 403, "account is self-excluded")
 		return
 	}
 

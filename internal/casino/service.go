@@ -446,6 +446,19 @@ func (s *Service) CreateSession(ctx context.Context, userID int64, gameType Game
 		return nil, fmt.Errorf("game %s is not available", gameType)
 	}
 
+	// REGULATORY: every entry point that lets a user wager money must
+	// re-check responsible-gambling state. Casino was previously a hole
+	// because launch did not consult responsible_gambling at all.
+	if err := s.checkResponsibleGambling(ctx, userID); err != nil {
+		return nil, err
+	}
+
+	// REGULATORY: KYC must be verified before launching any real-money
+	// game. Fails closed on DB error so an outage can't open a hole.
+	if err := s.checkKYCVerified(ctx, userID); err != nil {
+		return nil, err
+	}
+
 	// Enforce concurrent session limit (max 3 active sessions per user).
 	var activeCount int
 	err := s.db.QueryRowContext(ctx,
@@ -495,6 +508,68 @@ func (s *Service) CreateSession(ctx context.Context, userID int64, gameType Game
 		"session_id", sessionID, "user_id", userID, "game", gameType, "provider", providerID)
 
 	return session, nil
+}
+
+// checkResponsibleGambling blocks casino launch if the user is currently
+// self-excluded or in a cooling-off period. Fails closed: a real DB error
+// (anything except "no row" / "table doesn't exist") rejects the launch
+// rather than silently letting an excluded user in.
+func (s *Service) checkResponsibleGambling(ctx context.Context, userID int64) error {
+	var (
+		excludedUntil   sql.NullTime
+		coolingOffUntil sql.NullTime
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT self_excluded_until, cooling_off_until
+		   FROM responsible_gambling WHERE user_id = $1`, userID,
+	).Scan(&excludedUntil, &coolingOffUntil)
+	if err == sql.ErrNoRows {
+		return nil // no limits set yet — allowed
+	}
+	if err != nil {
+		// Tolerate the table being absent in the monolith schema; otherwise
+		// fail closed on a real query error.
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "does not exist") || strings.Contains(msg, "undefined_table") {
+			return nil
+		}
+		s.logger.WarnContext(ctx, "responsible-gambling check failed", "user_id", userID, "error", err)
+		return fmt.Errorf("could not verify responsible-gambling state")
+	}
+	now := time.Now()
+	if excludedUntil.Valid && excludedUntil.Time.After(now) {
+		return fmt.Errorf("account is self-excluded until %s", excludedUntil.Time.Format(time.RFC3339))
+	}
+	if coolingOffUntil.Valid && coolingOffUntil.Time.After(now) {
+		return fmt.Errorf("account is in cooling-off period until %s", coolingOffUntil.Time.Format(time.RFC3339))
+	}
+	return nil
+}
+
+// checkKYCVerified blocks casino launch unless the user has completed KYC.
+// Fails closed on DB error. Tolerates the column being absent on the
+// monolith's lighter schema (returns nil — KYC enforcement is then handled
+// by the monolith's own withdraw path).
+func (s *Service) checkKYCVerified(ctx context.Context, userID int64) error {
+	var status sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT kyc_status FROM users WHERE id = $1`, userID,
+	).Scan(&status)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("user not found")
+	}
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "does not exist") || strings.Contains(msg, "undefined_column") {
+			return nil
+		}
+		s.logger.WarnContext(ctx, "kyc check failed", "user_id", userID, "error", err)
+		return fmt.Errorf("could not verify KYC status")
+	}
+	if !status.Valid || status.String != "verified" {
+		return fmt.Errorf("KYC verification required to launch casino games")
+	}
+	return nil
 }
 
 func (s *Service) ValidateSession(ctx context.Context, sessionID, token string) (*CasinoSession, error) {
