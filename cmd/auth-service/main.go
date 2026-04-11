@@ -136,16 +136,25 @@ func main() {
 	})
 	mux.HandleFunc("POST /api/v1/auth/refresh", handler.Refresh)
 	mux.HandleFunc("POST /api/v1/auth/otp/verify", handler.OTPVerify)
+	// Public OTP resend — used by the pre-login OTP flow before a session
+	// exists. The handler is deliberately non-enumerating: unknown user_ids
+	// still return 200.
+	mux.HandleFunc("POST /api/v1/auth/otp/resend", handler.OTPResend)
 
 	// Protected routes (require JWT)
 	protectedMux := http.NewServeMux()
 	protectedMux.HandleFunc("POST /api/v1/auth/change-password", handler.ChangePassword)
 	protectedMux.HandleFunc("POST /api/v1/auth/otp/generate", handler.OTPGenerate)
 	protectedMux.HandleFunc("POST /api/v1/auth/otp/enable", handler.OTPEnable)
+	protectedMux.HandleFunc("GET /api/v1/auth/sessions", handler.GetSessions)
+	protectedMux.HandleFunc("DELETE /api/v1/auth/sessions", handler.LogoutAllSessions)
+	protectedMux.HandleFunc("GET /api/v1/auth/login-history", handler.LoginHistory)
 
 	mux.Handle("/api/v1/auth/change-password", authMw(protectedMux))
 	mux.Handle("/api/v1/auth/otp/generate", authMw(protectedMux))
 	mux.Handle("/api/v1/auth/otp/enable", authMw(protectedMux))
+	mux.Handle("/api/v1/auth/sessions", authMw(protectedMux))
+	mux.Handle("/api/v1/auth/login-history", authMw(protectedMux))
 
 	// Prometheus scrape endpoint
 	mux.Handle("GET /metrics", service.MetricsHandler())
