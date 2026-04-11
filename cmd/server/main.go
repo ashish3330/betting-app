@@ -20,7 +20,30 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/lotus-exchange/lotus-exchange/internal/middleware"
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
+	"github.com/lotus-exchange/lotus-exchange/pkg/metrics"
 )
+
+// publishRuntimeGauges periodically refreshes Prometheus gauges that
+// describe internal runtime state (DB pool, active sessions, etc.).
+// Runs forever; cheap to call (15s ticker).
+func publishRuntimeGauges() {
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		if db != nil {
+			st := db.Stats()
+			metrics.DBConnectionPoolStats.WithLabelValues("open").Set(float64(st.OpenConnections))
+			metrics.DBConnectionPoolStats.WithLabelValues("in_use").Set(float64(st.InUse))
+			metrics.DBConnectionPoolStats.WithLabelValues("idle").Set(float64(st.Idle))
+		}
+		if store != nil {
+			store.mu.RLock()
+			n := len(store.users)
+			store.mu.RUnlock()
+			metrics.ActiveUsersGauge.Set(float64(n))
+		}
+	}
+}
 
 var (
 	store       *Store
@@ -122,6 +145,19 @@ func main() {
 		writeJSON(w, 200, map[string]string{"status": "ok", "database": dbStatus, "version": "2.0.0", "odds_mode": oddsMode})
 	})
 
+	// ── Prometheus metrics scrape endpoint ─────────────────────
+	// Mounts the same Prometheus registry the bundled microservices use
+	// (pkg/metrics) so a single Prometheus job can scrape both the
+	// monolith and the broken-out services with one config block.
+	// Previously the monolith had no /metrics endpoint at all — every
+	// histogram and counter defined in pkg/metrics was unobservable.
+	mux.Handle("GET /metrics", metrics.Handler())
+
+	// Background goroutine to publish DB pool stats and runtime gauges
+	// to Prometheus every 15s. Without this the gauge metrics stay at
+	// zero forever even when scraped.
+	go publishRuntimeGauges()
+
 	// ── Auth ────────────────────────────────────────────────────
 	mux.HandleFunc("POST /api/v1/auth/register", handleRegister)
 	mux.HandleFunc("POST /api/v1/auth/login", handleLogin)
@@ -177,7 +213,9 @@ func main() {
 	mux.HandleFunc("GET /api/v1/positions/{marketId}", auth(handleUserPositions))
 
 	// ── Protected: Betting ──────────────────────────────────────
-	mux.HandleFunc("POST /api/v1/bet/place", auth(handlePlaceBet))
+	// Per-user rate limit on bet placement: 5/s burst 10. Stops a
+	// scripted attacker from placing 1k bets/sec on a single account.
+	mux.HandleFunc("POST /api/v1/bet/place", auth(rateLimitUser(betPlaceLimiter, handlePlaceBet)))
 	mux.HandleFunc("DELETE /api/v1/bet/{betId}/cancel", auth(handleCancelBet))
 	mux.HandleFunc("GET /api/v1/bets", auth(handleUserBets))
 	mux.HandleFunc("GET /api/v1/bets/history", auth(handleBetsHistory))
@@ -187,9 +225,9 @@ func main() {
 	mux.HandleFunc("GET /api/v1/wallet/balance", auth(handleGetBalance))
 	mux.HandleFunc("GET /api/v1/wallet/ledger", auth(handleGetLedger))
 	mux.HandleFunc("GET /api/v1/wallet/statement", auth(handleGetLedger))
-	mux.HandleFunc("POST /api/v1/wallet/deposit/upi", auth(handleUPIDeposit))
-	mux.HandleFunc("POST /api/v1/wallet/deposit/crypto", auth(handleCryptoDeposit))
-	mux.HandleFunc("POST /api/v1/wallet/withdraw", auth(handleWithdraw))
+	mux.HandleFunc("POST /api/v1/wallet/deposit/upi", auth(rateLimitUser(depositLimiter, handleUPIDeposit)))
+	mux.HandleFunc("POST /api/v1/wallet/deposit/crypto", auth(rateLimitUser(depositLimiter, handleCryptoDeposit)))
+	mux.HandleFunc("POST /api/v1/wallet/withdraw", auth(rateLimitUser(withdrawLimiter, handleWithdraw)))
 	mux.HandleFunc("GET /api/v1/wallet/deposits", auth(handleWalletDeposits))
 	mux.HandleFunc("GET /api/v1/wallet/withdrawals", auth(handleWalletWithdrawals))
 
@@ -231,6 +269,8 @@ func main() {
 	mux.HandleFunc("GET /api/v1/panel/audit", auth(handlePanelAudit))
 
 	// ── Admin (superadmin / admin only) ─────────────────────────
+	// Reconciliation: admin-only ledger ↔ balance/exposure invariant check.
+	mux.HandleFunc("GET /api/v1/admin/reconcile", requireRole(handleReconcile, "superadmin", "admin"))
 	mux.HandleFunc("GET /api/v1/admin/users", requireRole(handleAdminListUsers, "superadmin", "admin"))
 	mux.HandleFunc("GET /api/v1/admin/users/{id}", requireRole(handleAdminGetUser, "superadmin", "admin"))
 	mux.HandleFunc("GET /api/v1/admin/markets", requireRole(handleAdminListMarkets, "superadmin", "admin"))
@@ -1589,11 +1629,28 @@ func handlePlaceBet(w http.ResponseWriter, r *http.Request) {
 	// all re-validated inside HoldAndPlaceBet to eliminate TOCTOU races.
 	// ═══════════════════════════════════════════════════════════════════════
 
+	matchStart := time.Now()
 	result, err := store.HoldAndPlaceBet(uid, req.MarketID, req.SelectionID, req.Side, req.Price, req.Stake, req.ClientRef, holdAmount)
 	if err != nil {
+		// Wire failure into business metrics so the SLO dashboard
+		// shows the error rate.
+		metrics.BetsPlacedTotal.WithLabelValues(req.Side, "unknown", "rejected").Inc()
 		writeErr(w, 400, err.Error())
 		return
 	}
+	metrics.MatchingEngineDuration.Observe(time.Since(matchStart).Seconds())
+
+	// Look up sport label for the metric. Best-effort: if the market
+	// no longer exists or has no sport tag, fall back to "unknown".
+	sportLabel := "unknown"
+	store.mu.RLock()
+	if m, ok := store.markets[req.MarketID]; ok && m.Sport != "" {
+		sportLabel = m.Sport
+	}
+	store.mu.RUnlock()
+	metrics.BetsPlacedTotal.WithLabelValues(req.Side, sportLabel, result.Status).Inc()
+	metrics.BetStakeTotal.WithLabelValues(req.Side, sportLabel).Add(req.Stake)
+	metrics.WalletOperationsTotal.WithLabelValues("hold").Inc()
 
 	store.AddAudit(uid, r.Header.Get("X-Username"), "bet_placed",
 		fmt.Sprintf("bet=%s market=%s side=%s price=%.2f stake=%.2f", result.BetID, req.MarketID, req.Side, req.Price, req.Stake), r.RemoteAddr)
@@ -1805,11 +1862,34 @@ func handleCancelBet(w http.ResponseWriter, r *http.Request) {
 	betID := r.PathValue("betId")
 	marketID := r.URL.Query().Get("market_id")
 	side := r.URL.Query().Get("side")
+	uid := getUserID(r)
+
+	// IDOR fix: verify the bet belongs to the calling user before
+	// allowing cancellation. Previously CancelOrder accepted any bet ID
+	// from any authenticated user — a trivial direct-object-reference
+	// attack since bet IDs are short hex strings.
+	store.mu.RLock()
+	bet, ok := store.bets[betID]
+	store.mu.RUnlock()
+	if !ok {
+		writeErr(w, 404, "bet not found")
+		return
+	}
+	if bet.UserID != uid {
+		// Don't leak existence — return 404 to a non-owner instead of 403.
+		store.AddAudit(uid, "", "bet_cancel_idor_attempt",
+			fmt.Sprintf("non-owner attempted to cancel bet=%s owner=%d", betID, bet.UserID),
+			r.RemoteAddr)
+		writeErr(w, 404, "bet not found")
+		return
+	}
+
 	if err := store.CancelOrder(marketID, betID, side); err != nil {
 		writeErr(w, 404, err.Error())
 		return
 	}
-	logger.Info("bet cancelled", "bet_id", betID)
+	store.AddAudit(uid, "", "bet_cancelled", "bet_id="+betID, r.RemoteAddr)
+	logger.Info("bet cancelled", "bet_id", betID, "user_id", uid)
 	writeJSON(w, 200, map[string]string{"message": "order cancelled", "bet_id": betID})
 }
 

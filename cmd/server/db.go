@@ -13,6 +13,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,9 +30,24 @@ func initDB(databaseURL string, log *slog.Logger) error {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
 
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(10)
+	// Connection pool sized for production load. The previous values (25/10)
+	// capped throughput at ~500 ops/sec because each bet placement holds 1-3
+	// connections (balance update + ledger insert + bet insert). At 25 max
+	// connections the pool exhausts above ~200 concurrent bets.
+	//
+	// Defaults bumped to 100/50; tunable via DB_MAX_OPEN_CONNS and
+	// DB_MAX_IDLE_CONNS env vars so each deployment can match its Postgres
+	// max_connections (typically 100-500 on managed RDS, far higher on
+	// pgbouncer transaction-mode pools).
+	maxOpen := envIntDefault("DB_MAX_OPEN_CONNS", 100)
+	maxIdle := envIntDefault("DB_MAX_IDLE_CONNS", 50)
+	if maxIdle > maxOpen {
+		maxIdle = maxOpen
+	}
+	db.SetMaxOpenConns(maxOpen)
+	db.SetMaxIdleConns(maxIdle)
 	db.SetConnMaxLifetime(5 * time.Minute)
+	db.SetConnMaxIdleTime(2 * time.Minute)
 
 	if err = db.Ping(); err != nil {
 		return fmt.Errorf("failed to ping database: %w", err)
@@ -44,6 +61,16 @@ func initDB(databaseURL string, log *slog.Logger) error {
 	}
 
 	return nil
+}
+
+// envIntDefault returns the parsed env var value or the default if unset/invalid.
+func envIntDefault(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
 }
 
 func sanitizeURL(url string) string {

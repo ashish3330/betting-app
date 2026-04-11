@@ -341,27 +341,49 @@ func (s *Store) AddNotification(userID int64, typ, title, message string) {
 	s.notifications = append(s.notifications, n)
 	s.notifMu.Unlock()
 
-	// 2. Non-blocking enqueue of the DB write to the background worker pool.
-	//    If the channel is full we drop the DB write (logged) rather than
-	//    block the request handler — the in-memory entry is still visible.
+	// 2. Enqueue the DB write to the background worker pool with bounded
+	//    backpressure. Previously this dropped silently when the channel
+	//    was full (~4096 jobs), losing audit trail under settlement bursts.
+	//    Now we wait up to 250ms for space; if the worker is still
+	//    catching up after that we log at ERROR (not warn) and increment
+	//    a drop counter so the next regression is loudly visible.
 	if !useDB() {
 		return
 	}
-	select {
-	case s.notifChan <- notifJob{
+	job := notifJob{
 		Kind:    "notification",
 		NotifID: nid,
 		UserID:  userID,
 		Type:    typ,
 		Title:   title,
 		Message: message,
-	}:
+	}
+	select {
+	case s.notifChan <- job:
+		return
 	default:
+	}
+	// Slow path: queue is full. Block briefly to apply backpressure
+	// rather than silently dropping.
+	t := time.NewTimer(250 * time.Millisecond)
+	defer t.Stop()
+	select {
+	case s.notifChan <- job:
+		return
+	case <-t.C:
+		notifDropCounter.Add(1)
 		if logger != nil {
-			logger.Warn("notification queue full, dropping DB write", "user_id", userID, "type", typ)
+			logger.Error("notification queue overflow — dropping DB write after 250ms wait",
+				"user_id", userID, "type", typ,
+				"dropped_total", notifDropCounter.Load())
 		}
 	}
 }
+
+// notifDropCounter tracks how many notification DB writes we've dropped
+// due to outbox backpressure timeout. Exported via the metrics endpoint
+// so the next regression is alertable.
+var notifDropCounter atomic.Int64
 
 // NotifyHierarchy sends a notification to all parents up the chain (agent → master → admin → superadmin).
 // Collects all target IDs under the read lock, then sends notifications outside the lock
@@ -629,20 +651,47 @@ func NewStore() *Store {
 
 // notificationWorker drains notifChan and performs the actual DB writes.
 // Runs until notifChan is closed (by Stop), then exits.
+//
+// Each job is processed inside a dedicated function so a panic in one
+// (corrupt row, malformed JSON, momentary DB connectivity hiccup that
+// drops a connection mid-call) is recovered and logged instead of
+// taking down the worker. Without this, a single bad job kills the
+// worker, the queue fills, and every subsequent notification/audit
+// write is silently dropped until the next process restart.
 func (s *Store) notificationWorker() {
 	defer s.notifWG.Done()
 	for job := range s.notifChan {
-		if !useDB() {
-			continue
-		}
-		switch job.Kind {
-		case "notification":
-			dbAddNotification(job.NotifID, job.UserID, job.Type, job.Title, job.Message)
-		case "audit":
-			dbAddAudit(job.UserID, job.Username, job.Action, job.Details, job.IP)
-		}
+		s.processNotifJobSafely(job)
 	}
 }
+
+func (s *Store) processNotifJobSafely(job notifJob) {
+	defer func() {
+		if r := recover(); r != nil {
+			notifWorkerPanicCounter.Add(1)
+			if logger != nil {
+				logger.Error("notification worker panic recovered",
+					"kind", job.Kind,
+					"user_id", job.UserID,
+					"panic", fmt.Sprint(r),
+					"panic_total", notifWorkerPanicCounter.Load())
+			}
+		}
+	}()
+	if !useDB() {
+		return
+	}
+	switch job.Kind {
+	case "notification":
+		dbAddNotification(job.NotifID, job.UserID, job.Type, job.Title, job.Message)
+	case "audit":
+		dbAddAudit(job.UserID, job.Username, job.Action, job.Details, job.IP)
+	}
+}
+
+// notifWorkerPanicCounter tracks recovered panics in the worker so the
+// metrics endpoint can alert on a non-zero rate.
+var notifWorkerPanicCounter atomic.Int64
 
 // Stop closes the notification channel and waits for in-flight jobs to drain.
 // Called from main during graceful shutdown so pending DB writes are not lost.
@@ -1364,14 +1413,18 @@ func (s *Store) HoldAndPlaceBet(userID int64, marketID string, selectionID int64
 }
 
 func (s *Store) PlaceAndMatch(userID int64, marketID string, selectionID int64, side string, price, stake float64, clientRef string) (*MatchResult, error) {
+	// Two-phase: mutate in-memory under s.mu.Lock, then persist to DB
+	// outside the lock. The previous version held s.mu.Lock() through the
+	// dbSaveBet network round-trip, serializing every bet on Postgres
+	// latency. HoldAndPlaceBet already follows this pattern; matching it
+	// here so seed bets, sample order book bets, and the alternative
+	// placement path all get the same throughput.
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	betID := "bet-" + randHex(8)
 	now := time.Now()
 
 	// House model: every bet is immediately fully matched.
-	// The house (operator) takes the other side — no order book, no unmatched/partial.
 	status := "matched"
 
 	// Determine market type and display side
@@ -1380,12 +1433,15 @@ func (s *Store) PlaceAndMatch(userID int64, marketID string, selectionID int64, 
 		mType = m.MarketType
 	}
 	if mType == "fancy" || mType == "session" {
-		if side == "back" { dSide = "yes" } else { dSide = "no" }
+		if side == "back" {
+			dSide = "yes"
+		} else {
+			dSide = "no"
+		}
 	} else {
 		dSide = side
 	}
 
-	// Record the bet as fully matched
 	bet := &Bet{
 		ID: betID, MarketID: marketID, SelectionID: selectionID,
 		UserID: userID, Side: side, DisplaySide: dSide, MarketType: mType,
@@ -1396,14 +1452,16 @@ func (s *Store) PlaceAndMatch(userID int64, marketID string, selectionID int64, 
 	s.bets[betID] = bet
 	s.indexBetLocked(bet)
 
-	// Update market total matched
 	if m, ok := s.markets[marketID]; ok {
 		m.TotalMatched += stake
 	}
 
-	// Persist to DB
+	// Snapshot for use after lock release
+	betSnap := *bet
+	s.mu.Unlock()
+
 	if useDB() {
-		dbSaveBet(s.bets[betID])
+		dbSaveBet(&betSnap)
 	}
 
 	return &MatchResult{
