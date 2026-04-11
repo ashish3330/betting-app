@@ -255,6 +255,43 @@ func runMigrations(log *slog.Logger) error {
 		`CREATE INDEX IF NOT EXISTS idx_audit_user_id_desc ON betting.audit_log(user_id, id DESC)`,
 		// Fraud alerts: created_at ordering for the ops dashboard.
 		`CREATE INDEX IF NOT EXISTS idx_fraud_alerts_created ON betting.fraud_alerts(created_at DESC)`,
+
+		// ── Extend partition rollover horizon ──
+		// Migration 004 originally created partitions only 3 months ahead.
+		// Bump to 12 months so a weekly server restart comfortably keeps the
+		// betting.bets partition tree from running out. CREATE OR REPLACE is
+		// idempotent and only runs when the function exists (partitioned
+		// schema). On the monolith's non-partitioned schema this fails with
+		// "schema betting does not exist" and is silently logged.
+		`CREATE OR REPLACE FUNCTION betting.create_monthly_partition()
+		RETURNS void
+		LANGUAGE plpgsql
+		AS $$
+		DECLARE
+		    partition_date  DATE;
+		    partition_name  TEXT;
+		    start_date      DATE;
+		    end_date        DATE;
+		BEGIN
+		    FOR i IN 0..11 LOOP
+		        partition_date := date_trunc('month', NOW() + (i || ' months')::interval)::date;
+		        start_date     := partition_date;
+		        end_date       := (partition_date + interval '1 month')::date;
+		        partition_name := 'bets_' || to_char(partition_date, 'YYYY_MM');
+		        IF NOT EXISTS (
+		            SELECT 1
+		            FROM pg_catalog.pg_class c
+		            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+		            WHERE n.nspname = 'betting' AND c.relname = partition_name
+		        ) THEN
+		            EXECUTE format(
+		                'CREATE TABLE betting.%I PARTITION OF betting.bets FOR VALUES FROM (%L) TO (%L)',
+		                partition_name, start_date, end_date
+		            );
+		        END IF;
+		    END LOOP;
+		END;
+		$$`,
 	}
 
 	for _, m := range migrations {
@@ -264,6 +301,21 @@ func runMigrations(log *slog.Logger) error {
 				!strings.Contains(err.Error(), "duplicate key") {
 				log.Warn("migration statement failed", "error", err, "sql", m[:minInt(80, len(m))])
 			}
+		}
+	}
+
+	// If betting.bets is partitioned (migration 001 schema), backfill the next
+	// few months of partitions on every startup. The function only exists when
+	// migration 004 has been applied; if it isn't there we silently skip — the
+	// monolith's CREATE TABLE IF NOT EXISTS path uses a non-partitioned table
+	// where this is a no-op anyway.
+	//
+	// Without this, the static partitions in migration 001 run out at the end
+	// of 2026 and bet INSERTs start failing with "no partition of relation
+	// betting.bets found for row" — a hard production outage.
+	if _, err := db.Exec(`SELECT betting.create_monthly_partition()`); err != nil {
+		if !strings.Contains(err.Error(), "does not exist") {
+			log.Warn("partition backfill failed", "error", err)
 		}
 	}
 
