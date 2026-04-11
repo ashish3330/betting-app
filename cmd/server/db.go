@@ -196,6 +196,10 @@ func runMigrations(log *slog.Logger) error {
 		`ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS kyc_rejection_reason TEXT`,
 		// bets table may be missing market_type from legacy schema
 		`ALTER TABLE betting.bets ADD COLUMN IF NOT EXISTS market_type TEXT DEFAULT ''`,
+		// display_side stores "yes"/"no" for fancy/session, "back"/"lay" otherwise.
+		// Without this column dbSaveBet silently fails on INSERT and bets vanish
+		// after the in-memory store cycles.
+		`ALTER TABLE betting.bets ADD COLUMN IF NOT EXISTS display_side TEXT DEFAULT ''`,
 		// notifications check constraint may be too restrictive
 		`ALTER TABLE betting.notifications DROP CONSTRAINT IF EXISTS notifications_type_check`,
 		`ALTER TABLE betting.notifications ADD CONSTRAINT notifications_type_check CHECK (type IN ('bet_matched','bet_placed','bet_settled','bet_won','bet_lost','deposit_complete','deposit','withdrawal_complete','withdrawal','credit','cashout_available','kyc_update','promotion','system','responsible_gambling','login','info','warning','success','error'))`,
@@ -392,10 +396,15 @@ func dbAllUsers() []*User {
 // ── DB-backed Bet operations ──────────────────────────────────────────────────
 
 func dbSaveBet(b *Bet) {
+	// Plain INSERT — no ON CONFLICT clause. The bets table may be partitioned
+	// (migration 001) with composite PK (id, created_at), in which case
+	// ON CONFLICT (id) fails at runtime because there's no unique index on
+	// id alone. Bet IDs are random hex so duplicates are essentially
+	// impossible; if one ever happens the unique violation surfaces as a
+	// real error which dbUpdateBet's UPDATE handles separately.
 	_, err := db.Exec(`
 		INSERT INTO betting.bets (id, market_id, selection_id, user_id, side, price, stake, matched_stake, unmatched_stake, profit, status, client_ref, market_type, display_side, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-		ON CONFLICT (id) DO UPDATE SET matched_stake=$8, unmatched_stake=$9, profit=$10, status=$11`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
 		b.ID, b.MarketID, b.SelectionID, b.UserID, b.Side, b.Price, b.Stake,
 		b.MatchedStake, b.UnmatchedStake, b.Profit, b.Status, b.ClientRef, b.MarketType, b.DisplaySide, b.CreatedAt)
 	if err != nil {
