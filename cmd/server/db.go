@@ -63,6 +63,59 @@ func initDB(databaseURL string, log *slog.Logger) error {
 	return nil
 }
 
+// settlementIdempotencyClaim attempts to claim the settlement key for
+// a given market. Returns:
+//   - claimed=true if this caller is the first to claim it (proceed)
+//   - claimed=false if a previous settlement already happened (look up
+//     the previous result and return it instead)
+// On DB unavailable, falls back to in-memory and returns claimed=true
+// (best-effort; the in-memory bet status check still prevents
+// double-payout in single-instance mode).
+func settlementIdempotencyClaim(key, marketID string, winnerSelectionID int64, settledBy int64) (claimed bool, prevBets int, prevPayout float64) {
+	if !useDB() {
+		return true, 0, 0
+	}
+	// Try to insert a placeholder row. If it fails on unique constraint,
+	// look up the existing row and return its data.
+	res, err := db.Exec(`
+		INSERT INTO betting.settlement_idempotency (key, market_id, winner_selection_id, settled_by)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (key) DO NOTHING
+	`, key, marketID, winnerSelectionID, settledBy)
+	if err != nil {
+		logger.Error("settlementIdempotencyClaim insert failed", "key", key, "error", err)
+		return true, 0, 0
+	}
+	rows, _ := res.RowsAffected()
+	if rows == 1 {
+		return true, 0, 0
+	}
+	// Already claimed — look up the prior result.
+	var bets sql.NullInt64
+	var payout sql.NullFloat64
+	if err := db.QueryRow(
+		`SELECT bets_settled, payout FROM betting.settlement_idempotency WHERE key=$1`,
+		key,
+	).Scan(&bets, &payout); err != nil {
+		return false, 0, 0
+	}
+	return false, int(bets.Int64), payout.Float64
+}
+
+// settlementIdempotencyRecord updates the placeholder row with the
+// final result so an idempotent retry can return the same numbers.
+func settlementIdempotencyRecord(key string, betsSettled int, payout float64) {
+	if !useDB() {
+		return
+	}
+	if _, err := db.Exec(
+		`UPDATE betting.settlement_idempotency SET bets_settled=$1, payout=$2 WHERE key=$3`,
+		betsSettled, payout, key,
+	); err != nil {
+		logger.Error("settlementIdempotencyRecord update failed", "key", key, "error", err)
+	}
+}
+
 // envIntDefault returns the parsed env var value or the default if unset/invalid.
 func envIntDefault(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
@@ -238,6 +291,22 @@ func runMigrations(log *slog.Logger) error {
 		// Lets us detect post-hoc edits or deletions of any row in the
 		// chain by re-walking it via /api/v1/admin/audit/verify.
 		`ALTER TABLE betting.audit_log ADD COLUMN IF NOT EXISTS hash_chain TEXT DEFAULT ''`,
+		// Settlement idempotency table. SettleMarket is gated by an
+		// INSERT into this table; a duplicate (network retry, double
+		// admin click, NATS at-least-once redelivery) hits the unique
+		// constraint and the second settle is a no-op. Without this
+		// the server would re-walk the bet list and double-pay every
+		// settled bet on the second call.
+		`CREATE TABLE IF NOT EXISTS betting.settlement_idempotency (
+			key TEXT PRIMARY KEY,
+			market_id TEXT NOT NULL,
+			winner_selection_id BIGINT NOT NULL,
+			bets_settled INT,
+			payout NUMERIC(20,2),
+			settled_at TIMESTAMPTZ DEFAULT NOW(),
+			settled_by BIGINT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_settlement_idem_market ON betting.settlement_idempotency(market_id)`,
 		// Age verification — required for any regulated market.
 		`ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS date_of_birth DATE`,
 		// KYC status — gates withdrawals.

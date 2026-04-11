@@ -2519,7 +2519,31 @@ func handleSettleMarket(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "winner_selection_id is required")
 		return
 	}
+
+	// Idempotency: claim the settlement key (market+winner) before doing
+	// any work. A duplicate POST (operator double-click, NATS retry,
+	// load balancer replay) is short-circuited and returns the original
+	// outcome instead of re-paying every bet a second time.
+	settleKey := fmt.Sprintf("settle:%s:%d", marketID, req.WinnerSelectionID)
+	claimed, prevBets, prevPayout := settlementIdempotencyClaim(settleKey, marketID, req.WinnerSelectionID, getUserID(r))
+	if !claimed {
+		logger.Warn("settlement idempotency hit — returning prior result",
+			"market", marketID, "winner", req.WinnerSelectionID,
+			"prev_bets", prevBets, "prev_payout", prevPayout)
+		writeJSON(w, 200, map[string]interface{}{
+			"market_id":   marketID,
+			"settled":     prevBets,
+			"paid_out":    prevPayout,
+			"idempotent":  true,
+			"message":     "settlement already applied",
+		})
+		return
+	}
+
+	settleStart := time.Now()
 	settled, paidOut := store.SettleMarket(marketID, req.WinnerSelectionID)
+	metrics.SettlementDuration.Observe(time.Since(settleStart).Seconds())
+	settlementIdempotencyRecord(settleKey, settled, paidOut)
 	store.AddAudit(getUserID(r), r.Header.Get("X-Username"), "settlement",
 		fmt.Sprintf("market=%s winner=%d bets=%d payout=%.2f", marketID, req.WinnerSelectionID, settled, paidOut), r.RemoteAddr)
 	logger.Info("market settled", "market", marketID, "winner", req.WinnerSelectionID, "bets", settled, "payout", paidOut)
