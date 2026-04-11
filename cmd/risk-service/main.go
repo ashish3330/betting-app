@@ -83,12 +83,20 @@ func main() {
 	// Prometheus scrape endpoint
 	mux.Handle("GET /metrics", service.MetricsHandler())
 
+	// ── Middleware chain ────────────────────────────────────────
+	base := service.DefaultMiddleware("risk-service", log)
+	extra := middleware.ChainMiddleware(
+		middleware.MaxBodySize(int64(getIntEnv("MAX_BODY_SIZE_MB", 1))*1024*1024),
+		middleware.PerIPRateLimiter(getIntEnv("RATE_LIMIT_RPS", 100), getIntEnv("RATE_LIMIT_BURST", 200)),
+		middleware.EncryptionMiddleware,
+	)
+
 	runtimeCfg := service.Config{
 		ServiceName: "risk-service",
 		Port:        port,
 		Logger:      log,
 	}
-	if err := service.Run(ctx, runtimeCfg, service.DefaultMiddleware("risk-service", log)(middleware.EncryptionMiddleware(mux))); err != nil {
+	if err := service.Run(ctx, runtimeCfg, base(extra(mux))); err != nil {
 		log.Error("service failed", "err", err)
 		os.Exit(1)
 	}

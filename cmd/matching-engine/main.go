@@ -169,12 +169,19 @@ func main() {
 		Port:        port,
 		Logger:      log,
 	}
-	// Encryption middleware unwraps the AES-GCM envelope on POST/PUT
+	// ── Middleware chain ────────────────────────────────────────
+	// EncryptionMiddleware unwraps the AES-GCM envelope on POST/PUT
 	// bodies. Without it the matching-engine sees opaque ciphertext
 	// when the gateway forwards bet placements from the encryption-aware
 	// frontend, and req.Validate() reports every field missing.
+	// MaxBodySize + PerIPRateLimiter are the same cap every other
+	// canonical service applies on top of DefaultMiddleware.
 	base := service.DefaultMiddleware("matching-engine", log)
-	extra := middleware.EncryptionMiddleware
+	extra := middleware.ChainMiddleware(
+		middleware.MaxBodySize(int64(getIntEnv("MAX_BODY_SIZE_MB", 1))*1024*1024),
+		middleware.PerIPRateLimiter(getIntEnv("RATE_LIMIT_RPS", 100), getIntEnv("RATE_LIMIT_BURST", 200)),
+		middleware.EncryptionMiddleware,
+	)
 	if err := service.Run(ctx, runtimeCfg, base(extra(mux))); err != nil {
 		log.Error("service failed", "err", err)
 		os.Exit(1)

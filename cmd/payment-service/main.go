@@ -74,14 +74,6 @@ func main() {
 	)
 	handler := payment.NewHandler(paymentSvc)
 
-	// ── Router ──────────────────────────────────────────────────
-	mux := http.NewServeMux()
-
-	mux.Handle("GET /health", service.HealthHandler("payment-service", map[string]service.HealthCheck{
-		"db":    func(ctx context.Context) error { return db.PingContext(ctx) },
-		"redis": func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
-	}))
-
 	// Auth middleware wrapper for per-route use
 	authMwFactory := middleware.AuthMiddleware(authService)
 	authMw := func(h http.HandlerFunc) http.HandlerFunc {
@@ -90,19 +82,37 @@ func main() {
 		}
 	}
 
-	// Protected routes
-	mux.HandleFunc("POST /api/v1/payment/deposit/upi", authMw(handler.UPIDeposit))
-	mux.HandleFunc("POST /api/v1/payment/deposit/crypto", authMw(handler.CryptoDeposit))
-	mux.HandleFunc("POST /api/v1/payment/withdraw", authMw(handler.Withdraw))
-	mux.HandleFunc("GET /api/v1/payment/transactions", authMw(handler.GetTransactions))
-	mux.HandleFunc("GET /api/v1/payment/transaction/{id}", authMw(handler.GetTransaction))
+	// ── API router (protected + infra; gets the full extra chain) ──
+	// Everything mounted on apiMux is wrapped in EncryptionMiddleware,
+	// body-size cap and per-IP rate limiting. Webhook endpoints are
+	// deliberately NOT on apiMux so that provider payloads (Razorpay,
+	// crypto processors) are not wrapped in the AES-GCM envelope.
+	apiMux := http.NewServeMux()
 
-	// Public webhook routes (signature verified internally)
-	mux.HandleFunc("POST /api/v1/payment/webhook/razorpay", handler.RazorpayWebhook)
-	mux.HandleFunc("POST /api/v1/payment/webhook/crypto", handler.CryptoWebhook)
+	apiMux.Handle("GET /health", service.HealthHandler("payment-service", map[string]service.HealthCheck{
+		"db":    func(ctx context.Context) error { return db.PingContext(ctx) },
+		"redis": func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
+	}))
 
 	// Prometheus scrape endpoint
-	mux.Handle("GET /metrics", service.MetricsHandler())
+	apiMux.Handle("GET /metrics", service.MetricsHandler())
+
+	// Protected routes
+	apiMux.HandleFunc("POST /api/v1/payment/deposit/upi", authMw(handler.UPIDeposit))
+	apiMux.HandleFunc("POST /api/v1/payment/deposit/crypto", authMw(handler.CryptoDeposit))
+	apiMux.HandleFunc("POST /api/v1/payment/withdraw", authMw(handler.Withdraw))
+	apiMux.HandleFunc("GET /api/v1/payment/transactions", authMw(handler.GetTransactions))
+	apiMux.HandleFunc("GET /api/v1/payment/transaction/{id}", authMw(handler.GetTransaction))
+
+	// ── Webhook router (public; bypasses encryption + auth) ────────
+	// Razorpay and crypto processors POST cleartext JSON signed with an
+	// HMAC over the raw body. Running EncryptionMiddleware on these
+	// would reject every webhook with "invalid ciphertext", and auth is
+	// intentionally skipped because the handler verifies the provider
+	// signature instead.
+	webhookMux := http.NewServeMux()
+	webhookMux.HandleFunc("POST /api/v1/payment/webhook/razorpay", handler.RazorpayWebhook)
+	webhookMux.HandleFunc("POST /api/v1/payment/webhook/crypto", handler.CryptoWebhook)
 
 	// ── Middleware chain ────────────────────────────────────────
 	base := service.DefaultMiddleware("payment-service", log)
@@ -113,12 +123,22 @@ func main() {
 		middleware.EncryptionMiddleware,
 	)
 
+	// Compose: webhooks go through the base chain only (recover, request id,
+	// metrics, logging, security headers) but skip the encryption + rate
+	// limit layer. All other routes go through base + extra.
+	apiHandler := base(extra(apiMux))
+	webhookHandler := base(webhookMux)
+
+	rootMux := http.NewServeMux()
+	rootMux.Handle("/api/v1/payment/webhook/", webhookHandler)
+	rootMux.Handle("/", apiHandler)
+
 	runtimeCfg := service.Config{
 		ServiceName: "payment-service",
 		Port:        port,
 		Logger:      log,
 	}
-	if err := service.Run(ctx, runtimeCfg, base(extra(mux))); err != nil {
+	if err := service.Run(ctx, runtimeCfg, rootMux); err != nil {
 		log.Error("service failed", "err", err)
 		os.Exit(1)
 	}
