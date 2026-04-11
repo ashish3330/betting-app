@@ -22,6 +22,8 @@ class LotusWebSocket {
       typeof window !== "undefined"
         ? window.location.hostname
         : "localhost";
+    // Base URL — the token query parameter is appended at connect() time
+    // so each reconnect uses the freshest token from local storage.
     this.url = `ws://${wsHost}:8080/ws`;
   }
 
@@ -39,20 +41,21 @@ class LotusWebSocket {
     this.isConnecting = true;
 
     try {
-      this.ws = new WebSocket(this.url);
+      // Auth via query parameter — required by both the gateway proxy
+      // (cmd/gateway/main.go:proxyWebSocket) and the odds-service WS
+      // handler. Browser WebSocket cannot set Authorization headers,
+      // and an in-band auth message is rejected because the server
+      // already validated the token before the upgrade. Without this
+      // every WS connection 401s and we silently fall back to 5s
+      // polling on the markets page.
+      const wsURL = token
+        ? `${this.url}?token=${encodeURIComponent(token)}`
+        : this.url;
+      this.ws = new WebSocket(wsURL);
 
       this.ws.onopen = () => {
         this.isConnecting = false;
         this.reconnectAttempts = 0;
-
-        // Authenticate if we have a token
-        const token =
-          typeof window !== "undefined"
-            ? decryptLocalStorage("access_token")
-            : null;
-        if (token) {
-          this.send({ type: "auth", payload: { token } });
-        }
 
         // Re-subscribe to markets
         if (this.subscribedMarkets.length > 0) {
