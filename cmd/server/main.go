@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -695,6 +696,7 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		Username       string  `json:"username"`
 		Email          string  `json:"email"`
 		Password       string  `json:"password"`
+		DateOfBirth    string  `json:"date_of_birth"` // YYYY-MM-DD, required (18+)
 		Role           string  `json:"role"`
 		ParentID       *int64  `json:"parent_id"`
 		CreditLimit    float64 `json:"credit_limit"`
@@ -706,6 +708,32 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Username == "" || req.Password == "" {
 		writeErr(w, 400, "username and password are required")
+		return
+	}
+
+	// REGULATORY: server-side age verification.
+	// Date of birth is required, must parse, and the user must be 18+.
+	// This is the only place age is enforced — never trust the client.
+	if req.DateOfBirth == "" {
+		writeErr(w, 400, "date of birth is required")
+		return
+	}
+	dob, err := time.Parse("2006-01-02", req.DateOfBirth)
+	if err != nil {
+		writeErr(w, 400, "date of birth must be in YYYY-MM-DD format")
+		return
+	}
+	now := time.Now()
+	age := now.Year() - dob.Year()
+	if now.YearDay() < dob.YearDay() {
+		age-- // birthday hasn't happened yet this year
+	}
+	if age < 18 {
+		writeErr(w, 403, "you must be 18 or older to register")
+		return
+	}
+	if age > 120 {
+		writeErr(w, 400, "invalid date of birth")
 		return
 	}
 
@@ -730,8 +758,81 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, err.Error())
 		return
 	}
-	logger.Info("user registered", "id", u.ID, "username", u.Username, "role", u.Role)
+
+	// Persist DOB to the users table. Best-effort; if the column doesn't
+	// exist yet (legacy schema), log and continue — the age check above
+	// already prevented under-18 from getting this far.
+	if useDB() {
+		if _, dberr := db.Exec(`UPDATE auth.users SET date_of_birth=$1 WHERE id=$2`, dob, u.ID); dberr != nil {
+			logger.Warn("failed to persist date_of_birth", "user_id", u.ID, "error", dberr)
+		}
+	}
+
+	logger.Info("user registered", "id", u.ID, "username", u.Username, "role", u.Role, "age", age)
 	writeJSON(w, 201, u)
+}
+
+// checkSelfExcludedMonolith queries the betting.responsible_gambling table
+// for an active self-exclusion. Returns (excluded, until-string).
+//
+// Fails CLOSED on DB errors: if we cannot determine exclusion status, we
+// pessimistically deny login. This prevents a regulatory hole where a
+// self-excluded user could log in any time the responsible_gambling table
+// was unavailable.
+//
+// Handles two schema variants:
+//   - migration 004: self_excluded_until TIMESTAMPTZ
+//   - monolith db.go: self_excluded BOOLEAN + excluded_until TIMESTAMPTZ
+func checkSelfExcludedMonolith(userID int64) (bool, string) {
+	if !useDB() {
+		// In-memory store path: check the cached limits map.
+		store.mu.RLock()
+		limits := store.responsibleLimits[userID]
+		store.mu.RUnlock()
+		if limits != nil && limits.SelfExcluded {
+			return true, limits.ExcludedUntil
+		}
+		return false, ""
+	}
+
+	// Try the canonical column first (migration 004 schema).
+	var until sql.NullTime
+	err := db.QueryRow(
+		`SELECT self_excluded_until FROM betting.responsible_gambling WHERE user_id=$1`,
+		userID,
+	).Scan(&until)
+	if err == nil {
+		if until.Valid && until.Time.After(time.Now()) {
+			return true, until.Time.Format(time.RFC3339)
+		}
+		return false, ""
+	}
+	if err == sql.ErrNoRows {
+		return false, ""
+	}
+	// Column might not exist (legacy schema) — try the alternate columns.
+	if strings.Contains(err.Error(), "self_excluded_until") || strings.Contains(err.Error(), "42703") {
+		var legacyExcluded sql.NullBool
+		var legacyUntil sql.NullTime
+		err2 := db.QueryRow(
+			`SELECT self_excluded, excluded_until FROM betting.responsible_gambling WHERE user_id=$1`,
+			userID,
+		).Scan(&legacyExcluded, &legacyUntil)
+		if err2 == sql.ErrNoRows {
+			return false, ""
+		}
+		if err2 != nil {
+			logger.Error("self-exclusion check failed (legacy schema)", "user_id", userID, "error", err2)
+			return true, "system error" // fail closed
+		}
+		if legacyExcluded.Bool && legacyUntil.Valid && legacyUntil.Time.After(time.Now()) {
+			return true, legacyUntil.Time.Format(time.RFC3339)
+		}
+		return false, ""
+	}
+	// Real DB error — fail closed.
+	logger.Error("self-exclusion check failed", "user_id", userID, "error", err)
+	return true, "system error"
 }
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -795,6 +896,16 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		store.AddAudit(u.ID, u.Username, "login_failed", "account is "+u.Status, clientIP)
 		logger.Warn("login attempt on non-active account", "user_id", u.ID, "status", u.Status)
 		writeErr(w, 403, "invalid credentials")
+		return
+	}
+
+	// REGULATORY: block login for self-excluded users.
+	// Fails CLOSED — if the responsible_gambling table is unavailable we
+	// reject the login rather than silently letting an excluded user in.
+	if excluded, until := checkSelfExcludedMonolith(u.ID); excluded {
+		store.AddAudit(u.ID, u.Username, "login_blocked", "self-excluded until "+until, clientIP)
+		logger.Warn("blocking login: self-excluded", "user_id", u.ID, "until", until)
+		writeErr(w, 403, "account is self-excluded")
 		return
 	}
 
@@ -1942,6 +2053,53 @@ func handleCryptoDeposit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// isKYCVerified returns true only if the user's auth.users.kyc_status is
+// 'verified'. Fails CLOSED — any DB error or missing column is treated as
+// "not verified" so that no money can leave the platform without explicit
+// human approval of the user's KYC documents.
+func isKYCVerified(userID int64) bool {
+	if !useDB() {
+		// In-memory store has no KYC concept; allow withdrawal in dev mode
+		// only. Production must use the DB-backed path.
+		return true
+	}
+	var status sql.NullString
+	err := db.QueryRow(`SELECT kyc_status FROM auth.users WHERE id=$1`, userID).Scan(&status)
+	if err != nil {
+		// Column missing or other error — fail closed.
+		logger.Warn("kyc status check failed", "user_id", userID, "error", err)
+		return false
+	}
+	return status.Valid && status.String == "verified"
+}
+
+// isWithdrawalMethodAllowed enforces that a user can only withdraw via a
+// payment method they have previously deposited with. This is a critical
+// AML rule: it prevents the "deposit via UPI, withdraw via crypto" layering
+// pattern that money launderers use.
+//
+// Allows the withdrawal if the user has at least one COMPLETED deposit via
+// the same method. If they have no completed deposits at all, blocks.
+func isWithdrawalMethodAllowed(userID int64, method string) bool {
+	if !useDB() {
+		return true // dev mode only
+	}
+	if method == "" {
+		return false
+	}
+	var count int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM betting.payment_transactions
+		  WHERE user_id=$1 AND direction='deposit' AND method=$2 AND status='completed'`,
+		userID, method,
+	).Scan(&count)
+	if err != nil {
+		logger.Warn("withdrawal method check failed", "user_id", userID, "method", method, "error", err)
+		return false // fail closed
+	}
+	return count > 0
+}
+
 func handleWithdraw(w http.ResponseWriter, r *http.Request) {
 	uid := getUserID(r)
 	var req struct {
@@ -1956,6 +2114,35 @@ func handleWithdraw(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "insufficient balance")
 		return
 	}
+
+	// REGULATORY: KYC must be verified before any withdrawal.
+	// This is a backend enforcement — the frontend KYC gate is bypassable
+	// (anyone can curl this endpoint directly).
+	if !isKYCVerified(uid) {
+		store.AddAudit(uid, u.Username, "withdrawal_blocked", "KYC not verified", extractClientIP(r))
+		writeErr(w, 403, "KYC verification required before withdrawal")
+		return
+	}
+
+	// Withdrawal amount validation
+	if req.Amount < 100 {
+		writeErr(w, 400, "minimum withdrawal is ₹100")
+		return
+	}
+	if req.Amount > 500000 {
+		writeErr(w, 400, "maximum withdrawal per transaction is ₹5,00,000")
+		return
+	}
+
+	// AML: withdrawal method must match the user's last successful deposit method.
+	// Prevents the classic "deposit via UPI, withdraw via crypto" layering pattern.
+	if !isWithdrawalMethodAllowed(uid, req.Method) {
+		store.AddAudit(uid, u.Username, "withdrawal_blocked",
+			fmt.Sprintf("method %s does not match deposit history", req.Method), extractClientIP(r))
+		writeErr(w, 403, "withdrawal method must match your deposit method")
+		return
+	}
+
 	tx := store.CreatePaymentTx(uid, "withdrawal", req.Method, req.Amount, "INR", req.UPIID, req.Wallet)
 	if useDB() {
 		dbSavePaymentTx(tx)

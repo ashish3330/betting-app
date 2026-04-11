@@ -286,10 +286,22 @@ class ApiClient {
     return data;
   }
 
-  async register(username: string, email: string, password: string, role = "user") {
+  async register(
+    username: string,
+    email: string,
+    password: string,
+    role = "user",
+    dateOfBirth?: string,
+  ) {
     return this.request("/api/v1/auth/register", {
       method: "POST",
-      body: JSON.stringify({ username, email, password, role }),
+      body: JSON.stringify({
+        username,
+        email,
+        password,
+        role,
+        date_of_birth: dateOfBirth,
+      }),
     });
   }
 

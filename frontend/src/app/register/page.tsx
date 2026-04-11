@@ -76,7 +76,7 @@ export default function RegisterPage() {
     setError("");
 
     try {
-      await api.register(username, email, password, "user");
+      await api.register(username, email, password, "user", dob);
       router.push("/login?registered=1");
     } catch (err) {
       setError(

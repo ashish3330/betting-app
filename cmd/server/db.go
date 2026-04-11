@@ -188,6 +188,12 @@ func runMigrations(log *slog.Logger) error {
 		`ALTER TABLE betting.audit_log ADD COLUMN IF NOT EXISTS username TEXT DEFAULT ''`,
 		`ALTER TABLE betting.audit_log ADD COLUMN IF NOT EXISTS details TEXT DEFAULT ''`,
 		`ALTER TABLE betting.audit_log ADD COLUMN IF NOT EXISTS ip TEXT DEFAULT ''`,
+		// Age verification — required for any regulated market.
+		`ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS date_of_birth DATE`,
+		// KYC status — gates withdrawals.
+		`ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS kyc_status TEXT DEFAULT 'pending'`,
+		`ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS kyc_verified_at TIMESTAMPTZ`,
+		`ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS kyc_rejection_reason TEXT`,
 		// bets table may be missing market_type from legacy schema
 		`ALTER TABLE betting.bets ADD COLUMN IF NOT EXISTS market_type TEXT DEFAULT ''`,
 		// notifications check constraint may be too restrictive

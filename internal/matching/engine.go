@@ -673,13 +673,15 @@ func (e *Engine) ExpireOrders(ctx context.Context, marketID string, before time.
 func (e *Engine) PersistOrder(ctx context.Context, db *sql.DB, req *models.PlaceBetRequest, userID int64, matchResult *models.MatchResult) error {
 	now := time.Now()
 
+	// Plain INSERT — no ON CONFLICT clause. The bets table is partitioned
+	// with composite PK (id, created_at) in migrations/001_initial.sql, so
+	// "ON CONFLICT (id)" would fail at runtime — there's no unique index on
+	// id alone in a partitioned table. Bet IDs are randomly generated hex
+	// strings so a duplicate is essentially impossible; if it ever happens
+	// the unique violation will surface as a real error to the caller.
 	const insertBetSQL = `INSERT INTO bets (id, market_id, selection_id, user_id, side, price, stake,
 		                    matched_stake, unmatched_stake, status, client_ref, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		 ON CONFLICT (id) DO UPDATE SET
-		     matched_stake = EXCLUDED.matched_stake,
-		     unmatched_stake = EXCLUDED.unmatched_stake,
-		     status = EXCLUDED.status`
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
 
 	// No-fill fast path: skip the transaction entirely.
 	if len(matchResult.Fills) == 0 {

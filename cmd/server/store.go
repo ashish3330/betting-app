@@ -1500,8 +1500,15 @@ func (s *Store) SettleMarket(marketID string, winnerSelectionID int64) (int, flo
 			s.platformRevenue.TotalCommission = roundMoney(s.platformRevenue.TotalCommission + commission)
 		}
 
-		// Release exposure
-		u.Exposure = roundMoney(math.Max(u.Exposure-bet.MatchedStake, 0))
+		// Release exposure. CRITICAL: must use the same liability formula
+		// as betLiability() — for lay bets that's stake*(price-1), NOT just
+		// matched_stake. Releasing only matched_stake leaks the difference
+		// permanently and shrinks the user's available balance every time.
+		exposureToRelease := bet.MatchedStake
+		if bet.Side == "lay" {
+			exposureToRelease = roundMoney(bet.MatchedStake * (bet.Price - 1))
+		}
+		u.Exposure = roundMoney(math.Max(u.Exposure-exposureToRelease, 0))
 		// Apply P&L to user (after commission deduction)
 		u.Balance = roundMoney(u.Balance + pnl - commission)
 
@@ -1552,9 +1559,12 @@ func (s *Store) VoidMarket(marketID string) int {
 		voided++
 
 		if u, ok := s.users[bet.UserID]; ok {
-			u.Exposure = math.Max(u.Exposure-bet.Stake, 0)
+			// Release the FULL liability (which is what was held) — not
+			// just the stake. For lays this is stake*(price-1).
+			exposureToRelease := betLiability(bet)
+			u.Exposure = math.Max(u.Exposure-exposureToRelease, 0)
 			now := time.Now().Format(time.RFC3339)
-			s.addLedger(bet.UserID, bet.Stake, "release", "void:"+bet.ID, bet.ID, now)
+			s.addLedger(bet.UserID, exposureToRelease, "release", "void:"+bet.ID, bet.ID, now)
 			if useDB() {
 				dbUpdateBalance(bet.UserID, u.Balance, u.Exposure)
 			}

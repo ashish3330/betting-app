@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 	"unicode"
 
@@ -357,29 +358,72 @@ func (s *Service) IsBlacklisted(ctx context.Context, token string) bool {
 
 // CheckSelfExclusion queries the responsible_gambling table to see if the
 // user has an active self-exclusion that has not yet expired.
+//
+// IMPORTANT: This function fails CLOSED. If the DB lookup errors out (table
+// missing, network blip, etc) we deny login rather than silently allow a
+// self-excluded user through. The previous behavior of returning nil on error
+// was a regulatory compliance hole — a self-excluded user could log in any
+// time the responsible_gambling table was unavailable.
+//
+// The query handles both schema variants that exist in this codebase:
+//   - migrations/004_production_hardening.sql: self_excluded_until TIMESTAMPTZ
+//   - cmd/server/db.go inline migration: self_excluded BOOLEAN + excluded_until TIMESTAMPTZ
 func (s *Service) CheckSelfExclusion(ctx context.Context, userID int64) error {
-	var expiresAt time.Time
+	// Try the canonical column first (from migration 004).
+	var until sql.NullTime
 	err := s.db.QueryRowContext(ctx,
-		`SELECT expires_at FROM responsible_gambling
-		 WHERE user_id = $1
-		   AND exclusion_type = 'self_exclusion'
-		   AND expires_at > NOW()
-		 ORDER BY expires_at DESC
-		 LIMIT 1`,
+		`SELECT self_excluded_until
+		   FROM betting.responsible_gambling
+		  WHERE user_id = $1`,
 		userID,
-	).Scan(&expiresAt)
+	).Scan(&until)
+
+	if err != nil && err != sql.ErrNoRows {
+		// Column might not exist on legacy schema — try the alternate columns.
+		// pq error code 42703 is "undefined_column".
+		if strings.Contains(err.Error(), "self_excluded_until") || strings.Contains(err.Error(), "42703") {
+			var legacyExcluded sql.NullBool
+			var legacyUntil sql.NullTime
+			err = s.db.QueryRowContext(ctx,
+				`SELECT self_excluded, excluded_until
+				   FROM betting.responsible_gambling
+				  WHERE user_id = $1`,
+				userID,
+			).Scan(&legacyExcluded, &legacyUntil)
+			if err == sql.ErrNoRows {
+				return nil
+			}
+			if err != nil {
+				s.logger.ErrorContext(ctx, "self-exclusion check failed (legacy schema)",
+					"user_id", userID, "error", err)
+				return fmt.Errorf("self-exclusion check failed")
+			}
+			if legacyExcluded.Bool && legacyUntil.Valid && legacyUntil.Time.After(time.Now()) {
+				s.logger.WarnContext(ctx, "blocking login: user self-excluded",
+					"user_id", userID, "until", legacyUntil.Time.Format(time.RFC3339))
+				return fmt.Errorf("account is self-excluded until %s", legacyUntil.Time.Format(time.RFC3339))
+			}
+			return nil
+		}
+		// Real DB error (timeout, connection refused, etc) — fail closed.
+		s.logger.ErrorContext(ctx, "self-exclusion check failed",
+			"user_id", userID, "error", err)
+		return fmt.Errorf("self-exclusion check failed")
+	}
 
 	if err == sql.ErrNoRows {
-		return nil // no active exclusion
+		return nil // no responsible_gambling row → no exclusion
 	}
-	if err != nil {
-		// If the table doesn't exist or another DB error occurs, log and
-		// allow login so we don't brick accounts when the table is missing.
-		s.logger.WarnContext(ctx, "self-exclusion check failed", "user_id", userID, "error", err)
-		return nil
+	if !until.Valid {
+		return nil // column exists but value is NULL
+	}
+	if until.Time.Before(time.Now()) || until.Time.Equal(time.Now()) {
+		return nil // exclusion has expired
 	}
 
-	return fmt.Errorf("account is self-excluded until %s", expiresAt.Format(time.RFC3339))
+	s.logger.WarnContext(ctx, "blocking login: user self-excluded",
+		"user_id", userID, "until", until.Time.Format(time.RFC3339))
+	return fmt.Errorf("account is self-excluded until %s", until.Time.Format(time.RFC3339))
 }
 
 // RecordLoginSession inserts a row into user_sessions for responsible
