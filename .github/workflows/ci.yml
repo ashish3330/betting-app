@@ -1,0 +1,241 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - main
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.24"
+  NODE_VERSION: "22"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Go build + unit tests with race detector and coverage upload
+  # ---------------------------------------------------------------------------
+  go-build-test:
+    name: Go Build & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test (race + coverage)
+        run: go test -race -timeout 5m -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage
+          path: coverage.out
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Go lint via golangci-lint
+  # ---------------------------------------------------------------------------
+  go-lint:
+    name: Go Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --config .golangci.yml --timeout 10m
+
+  # ---------------------------------------------------------------------------
+  # Frontend build (Next.js 15)
+  # ---------------------------------------------------------------------------
+  frontend-build:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Next build
+        env:
+          NEXT_TELEMETRY_DISABLED: "1"
+          NEXT_PUBLIC_API_URL: http://localhost:8080
+          NEXT_PUBLIC_WS_URL: ws://localhost:8081
+        run: npx next build
+
+  # ---------------------------------------------------------------------------
+  # Integration test: spin Postgres, boot the API, seed, run scripted suite
+  # ---------------------------------------------------------------------------
+  integration-test:
+    name: Integration Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs:
+      - go-build-test
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: bettingdb
+          POSTGRES_USER: lotus
+          POSTGRES_PASSWORD: ci-placeholder-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lotus -d bettingdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Server
+      HTTP_PORT: "8080"
+      WS_PORT: "8081"
+      ENVIRONMENT: development
+      LOG_LEVEL: info
+      SHUTDOWN_TIMEOUT: 15s
+      # Postgres
+      POSTGRES_DB: bettingdb
+      POSTGRES_USER: lotus
+      POSTGRES_PASSWORD: ci-placeholder-password
+      POSTGRES_PORT: "5432"
+      DATABASE_URL: postgres://lotus:ci-placeholder-password@localhost:5432/bettingdb?sslmode=disable&search_path=betting,auth,public
+      DB_MAX_OPEN_CONNS: "50"
+      DB_MAX_IDLE_CONNS: "10"
+      DB_CONN_MAX_LIFETIME: 30m
+      DB_CONN_MAX_IDLE_TIME: 5m
+      # Redis (not provisioned in CI; server should fall back gracefully or be mocked)
+      REDIS_URL: localhost:6379
+      REDIS_PASSWORD: ci-placeholder-redis
+      # JWT
+      JWT_SECRET: ci-placeholder-jwt-secret
+      ACCESS_TOKEN_EXPIRY: 15m
+      REFRESH_TOKEN_EXPIRY: 168h
+      # Misc
+      CORS_ALLOWED_ORIGINS: http://localhost:3000,http://localhost:8080
+      ODDS_PROVIDER: mock
+      RATE_LIMIT_RPS: "100"
+      RATE_LIMIT_BURST: "200"
+      # Test secret used by the seed endpoint
+      SEED_SECRET: ci-placeholder-seed-secret
+      TEST_SEED_SECRET: ci-placeholder-seed-secret
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Build server binary
+        run: go build -o ./bin/server ./cmd/server
+
+      - name: Run server in background
+        run: |
+          ./bin/server > server.log 2>&1 &
+          echo $! > server.pid
+
+      - name: Wait for server to be ready
+        run: sleep 5
+
+      - name: Seed test data
+        run: |
+          curl -fsS -X POST \
+            -H "X-Seed-Secret: ${TEST_SEED_SECRET}" \
+            "http://localhost:8080/api/v1/seed"
+
+      - name: Run API test suite
+        run: go run scripts/api-test/main.go
+
+      - name: Dump server log on failure
+        if: failure()
+        run: |
+          echo "==== server.log ===="
+          cat server.log || true
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f server.pid ]; then
+            kill "$(cat server.pid)" 2>/dev/null || true
+          fi

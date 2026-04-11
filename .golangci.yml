@@ -1,0 +1,101 @@
+# golangci-lint configuration for Lotus Exchange
+# https://golangci-lint.run/usage/configuration/
+
+run:
+  timeout: 10m
+  tests: true
+  allow-parallel-runners: true
+
+output:
+  formats:
+    - format: colored-line-number
+  sort-results: true
+  sort-order:
+    - severity
+    - file
+    - linter
+  print-issued-lines: true
+  print-linter-name: true
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gosec
+    - gocyclo
+    - goconst
+    - misspell
+    - unparam
+    - unconvert
+    - prealloc
+    - nilerr
+    - bodyclose
+    - sqlclosecheck
+
+linters-settings:
+  gocyclo:
+    min-complexity: 15
+  goconst:
+    min-len: 3
+    min-occurrences: 4
+  misspell:
+    locale: US
+  gosec:
+    excludes:
+      # Allow use of math/rand for non-crypto purposes (mock data, jitter)
+      - G404
+  govet:
+    enable-all: true
+    disable:
+      - fieldalignment
+      - shadow
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-dirs:
+    - vendor
+    - node_modules
+    - frontend
+    - bin
+    - dist
+    - deployments
+  exclude-files:
+    - ".*_generated\\.go$"
+    - ".*\\.pb\\.go$"
+    - ".*_mock\\.go$"
+  exclude-rules:
+    # Legacy monolith - exempt from cyclomatic complexity checks.
+    - path: cmd/server/main\.go
+      linters:
+        - gocyclo
+
+    # Tests routinely use `defer rows.Close()` etc. without checking the error.
+    - path: _test\.go
+      text: "Error return value of .*Close.* is not checked"
+      linters:
+        - errcheck
+
+    # Loosen a few strict checks inside test files.
+    - path: _test\.go
+      linters:
+        - gosec
+        - gocyclo
+        - goconst
+        - unparam
+
+    # Auto-generated files.
+    - path: ".*\\.gen\\.go$"
+      linters:
+        - errcheck
+        - gosec
+        - gocyclo
+        - unused
+        - unparam
+        - goconst
+        - staticcheck

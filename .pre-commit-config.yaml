@@ -1,0 +1,56 @@
+# Pre-commit hooks for Lotus Exchange.
+# Install with:  pre-commit install
+# Run manually:  pre-commit run --all-files
+#
+# Requires:
+#   - go (with `gofmt` + `goimports`)
+#   - golangci-lint
+#   - npx (Node.js) for prettier
+repos:
+  - repo: local
+    hooks:
+      # ----- Go formatting (gofmt + goimports) ------------------------------
+      - id: gofmt-goimports
+        name: gofmt + goimports
+        description: Format staged Go files with gofmt and goimports.
+        entry: bash -c '
+          set -euo pipefail;
+          if [ "$#" -eq 0 ]; then exit 0; fi;
+          gofmt -w -s "$@";
+          if ! command -v goimports >/dev/null 2>&1; then
+            GO111MODULE=on go install golang.org/x/tools/cmd/goimports@latest;
+          fi;
+          goimports -w "$@";
+          ' --
+        language: system
+        types: [go]
+        pass_filenames: true
+
+      # ----- golangci-lint on staged packages -------------------------------
+      - id: golangci-lint
+        name: golangci-lint (new issues only)
+        description: Run golangci-lint against staged packages.
+        entry: bash -c '
+          set -euo pipefail;
+          if ! command -v golangci-lint >/dev/null 2>&1; then
+            echo "golangci-lint not installed, skipping"; exit 0;
+          fi;
+          golangci-lint run --config .golangci.yml --new-from-rev=HEAD ./...;
+          '
+        language: system
+        types: [go]
+        pass_filenames: false
+        require_serial: true
+
+      # ----- Prettier on frontend staged files ------------------------------
+      - id: prettier-frontend
+        name: prettier (frontend/)
+        description: Format staged frontend files with prettier.
+        entry: bash -c '
+          set -euo pipefail;
+          if [ "$#" -eq 0 ]; then exit 0; fi;
+          (cd frontend && npx --yes prettier --write "$@");
+          ' --
+        language: system
+        files: ^frontend/.*\.(js|jsx|ts|tsx|json|css|scss|md|mdx|html|yaml|yml)$
+        pass_filenames: true
