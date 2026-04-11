@@ -159,6 +159,19 @@ func runMigrations(log *slog.Logger) error {
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		)`,
 
+		// ── Casino Sessions ──
+		`CREATE TABLE IF NOT EXISTS betting.casino_sessions (
+			id TEXT PRIMARY KEY,
+			user_id BIGINT NOT NULL REFERENCES auth.users(id),
+			game_type TEXT NOT NULL,
+			provider_id TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'active',
+			stream_url TEXT DEFAULT '',
+			token TEXT DEFAULT '',
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			expires_at TIMESTAMPTZ
+		)`,
+
 		// ── Responsible Gambling ──
 		`CREATE TABLE IF NOT EXISTS betting.responsible_gambling (
 			user_id BIGINT PRIMARY KEY REFERENCES auth.users(id),
@@ -199,6 +212,15 @@ func runMigrations(log *slog.Logger) error {
 		`ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS kyc_status TEXT DEFAULT 'pending'`,
 		`ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS kyc_verified_at TIMESTAMPTZ`,
 		`ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS kyc_rejection_reason TEXT`,
+		// Columns dbCreateUser INSERTs and dbAllUsers SELECTs but that
+		// migration 001 doesn't create. Without these every dbCreateUser
+		// fails silently with 42703 (so registrations only ever live in
+		// memory) and dbAllUsers fails on startup (so loadUsersFromDB
+		// returns nil and the in-memory cache is never primed from DB
+		// after a restart). Defaults are set so existing rows backfill.
+		`ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS referral_code TEXT DEFAULT ''`,
+		`ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS otp_enabled BOOLEAN DEFAULT FALSE`,
+		`ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS is_demo BOOLEAN DEFAULT FALSE`,
 		// bets table may be missing market_type from legacy schema
 		`ALTER TABLE betting.bets ADD COLUMN IF NOT EXISTS market_type TEXT DEFAULT ''`,
 		// display_side stores "yes"/"no" for fancy/session, "back"/"lay" otherwise.
@@ -369,13 +391,20 @@ func dbGetUserByUsername(username string) *User {
 	var parentID sql.NullInt64
 	err := db.QueryRow(`
 		SELECT id, username, email, password_hash, role, path, parent_id, balance, exposure,
-		       credit_limit, commission_rate, status, referral_code, otp_enabled, is_demo, created_at, updated_at
+		       credit_limit, commission_rate, status,
+		       COALESCE(referral_code, ''),
+		       COALESCE(otp_enabled, FALSE),
+		       COALESCE(is_demo, FALSE),
+		       created_at, updated_at
 		FROM auth.users WHERE username=$1`, username).Scan(
 		&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.Path, &parentID,
 		&u.Balance, &u.Exposure, &u.CreditLimit, &u.CommissionRate, &u.Status,
 		&u.ReferralCode, &u.OTPEnabled, &u.IsDemo, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if err != nil {
+		if err != sql.ErrNoRows {
+			logger.Error("dbGetUserByUsername query failed", "username", username, "error", err)
+		}
 		return nil
 	}
 	if parentID.Valid {
@@ -390,13 +419,20 @@ func dbGetUser(id int64) *User {
 	var parentID sql.NullInt64
 	err := db.QueryRow(`
 		SELECT id, username, email, password_hash, role, path, parent_id, balance, exposure,
-		       credit_limit, commission_rate, status, referral_code, otp_enabled, is_demo, created_at, updated_at
+		       credit_limit, commission_rate, status,
+		       COALESCE(referral_code, ''),
+		       COALESCE(otp_enabled, FALSE),
+		       COALESCE(is_demo, FALSE),
+		       created_at, updated_at
 		FROM auth.users WHERE id=$1`, id).Scan(
 		&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.Path, &parentID,
 		&u.Balance, &u.Exposure, &u.CreditLimit, &u.CommissionRate, &u.Status,
 		&u.ReferralCode, &u.OTPEnabled, &u.IsDemo, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if err != nil {
+		if err != sql.ErrNoRows {
+			logger.Error("dbGetUser query failed", "user_id", id, "error", err)
+		}
 		return nil
 	}
 	if parentID.Valid {
@@ -421,9 +457,16 @@ func dbUpdateBalance(userID int64, balance, exposure float64) {
 func dbAllUsers() []*User {
 	rows, err := db.Query(`
 		SELECT id, username, email, password_hash, role, path, parent_id, balance, exposure,
-		       credit_limit, commission_rate, status, referral_code, otp_enabled, is_demo, created_at
+		       credit_limit, commission_rate, status,
+		       COALESCE(referral_code, ''),
+		       COALESCE(otp_enabled, FALSE),
+		       COALESCE(is_demo, FALSE),
+		       created_at
 		FROM auth.users ORDER BY id`)
 	if err != nil {
+		// Log loudly — silently returning nil means loadUsersFromDB drops
+		// the entire user cache on every restart and we'd never know.
+		logger.Error("dbAllUsers query failed", "error", err)
 		return nil
 	}
 	defer rows.Close()
@@ -669,6 +712,65 @@ func dbAllBets() []*Bet {
 		logger.Error("dbAllBets rows iteration error", "error", err)
 	}
 	return bets
+}
+
+// ── DB-backed Casino Sessions ─────────────────────────────────────────────────
+
+func dbSaveCasinoSession(s *CasinoSession) {
+	expires, _ := time.Parse(time.RFC3339, s.ExpiresAt)
+	created, _ := time.Parse(time.RFC3339, s.CreatedAt)
+	if _, err := db.Exec(`
+		INSERT INTO betting.casino_sessions
+			(id, user_id, game_type, provider_id, status, stream_url, token, created_at, expires_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		s.ID, s.UserID, s.GameType, s.ProviderID, s.Status, s.StreamURL, s.Token, created, expires); err != nil {
+		logger.Error("dbSaveCasinoSession failed", "session_id", s.ID, "error", err)
+	}
+}
+
+func dbUpdateCasinoSessionStatus(id, status string) {
+	if _, err := db.Exec(`UPDATE betting.casino_sessions SET status=$1 WHERE id=$2`, status, id); err != nil {
+		logger.Error("dbUpdateCasinoSessionStatus failed", "session_id", id, "error", err)
+	}
+}
+
+func dbGetCasinoSession(id string) *CasinoSession {
+	row := db.QueryRow(`
+		SELECT id, user_id, game_type, provider_id, status, stream_url, token, created_at, expires_at
+		FROM betting.casino_sessions WHERE id=$1`, id)
+	s := &CasinoSession{}
+	var created, expires time.Time
+	if err := row.Scan(&s.ID, &s.UserID, &s.GameType, &s.ProviderID, &s.Status,
+		&s.StreamURL, &s.Token, &created, &expires); err != nil {
+		return nil
+	}
+	s.CreatedAt = created.Format(time.RFC3339)
+	s.ExpiresAt = expires.Format(time.RFC3339)
+	return s
+}
+
+func dbGetUserCasinoSessions(userID int64) []*CasinoSession {
+	rows, err := db.Query(`
+		SELECT id, user_id, game_type, provider_id, status, stream_url, token, created_at, expires_at
+		FROM betting.casino_sessions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 100`, userID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []*CasinoSession
+	for rows.Next() {
+		s := &CasinoSession{}
+		var created, expires time.Time
+		if err := rows.Scan(&s.ID, &s.UserID, &s.GameType, &s.ProviderID, &s.Status,
+			&s.StreamURL, &s.Token, &created, &expires); err != nil {
+			logger.Error("dbGetUserCasinoSessions scan", "error", err)
+			continue
+		}
+		s.CreatedAt = created.Format(time.RFC3339)
+		s.ExpiresAt = expires.Format(time.RFC3339)
+		out = append(out, s)
+	}
+	return out
 }
 
 // ── DB-backed Audit reads ─────────────────────────────────────────────────────

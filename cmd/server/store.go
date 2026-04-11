@@ -810,18 +810,9 @@ func (s *Store) CreateUser(username, email, password, role string, parentID *int
 		return nil, fmt.Errorf("username already taken")
 	}
 
-	id := s.nextUserID.Add(1)
-	path := fmt.Sprintf("%d", id)
-	if parentID != nil {
-		if p, ok := s.users[*parentID]; ok {
-			path = p.Path + "." + fmt.Sprintf("%d", id)
-		}
-	}
-
-	now := time.Now().Format(time.RFC3339)
-	// Determine initial balance:
-	// - SuperAdmin: credit_limit is platform seed (created from nothing)
-	// - Others: credit_limit is transferred from parent's balance
+	// Determine initial balance and validate parent BEFORE allocating IDs
+	// or persisting anything, so a failed parent check leaves no orphaned
+	// state in either store.
 	initialBalance := 0.0
 	if role == "superadmin" {
 		initialBalance = creditLimit
@@ -833,43 +824,104 @@ func (s *Store) CreateUser(username, email, password, role string, parentID *int
 		if parent.Available() < creditLimit {
 			return nil, fmt.Errorf("parent has insufficient balance (available: %.2f, requested: %.2f)", parent.Available(), creditLimit)
 		}
-		// Deduct from parent, give to child
-		parent.Balance = roundMoney(parent.Balance - creditLimit)
 		initialBalance = creditLimit
 	}
 
-	// Generate referral code: REF-{username}-{random4}
-	refCode := fmt.Sprintf("REF-%s-%s", strings.ToUpper(username), randHex(2))
+	now := time.Now().Format(time.RFC3339)
+	passwordHash := hashPassword(password)
 
-	u = &User{
-		ID: id, Username: username, Email: email,
-		PasswordHash: hashPassword(password),
-		Role: role, Path: path, ParentID: parentID,
-		Balance: initialBalance, Exposure: 0,
-		CreditLimit: creditLimit, CommissionRate: commRate,
-		Status: "active", ReferralCode: refCode,
-		CreatedAt: now, UpdatedAt: now,
-	}
-	s.users[id] = u
-	s.usersByName[username] = u
-	s.referralCodes[refCode] = id
-
-	// Persist to DB
+	// DB-first when persistence is on. The database owns the user ID via
+	// SERIAL, so we use the returned ID as the source of truth and align
+	// nextUserID to it. Without this the in-memory auto-increment and the
+	// DB sequence drift apart on every restart, and bets recorded in DB
+	// against user_id=N may point at a totally different user after a
+	// reseed. Path is computed from the DB ID so the hierarchy string
+	// also matches what loadUsersFromDB will see on the next boot.
+	var id int64
 	if useDB() {
-		dbCreateUser(username, email, u.PasswordHash, role, path, parentID, initialBalance, creditLimit, commRate, false)
-		if parentID != nil && creditLimit > 0 {
-			// Update parent balance in DB
-			if parent, ok := s.users[*parentID]; ok {
+		// Provisional path so the row is insertable; will be updated to
+		// "<parent.path>.<id>" once we know the real ID.
+		dbu, dberr := dbCreateUser(username, email, passwordHash, role, "", parentID, initialBalance, creditLimit, commRate, false)
+		if dberr != nil {
+			return nil, fmt.Errorf("create user (db): %w", dberr)
+		}
+		id = dbu.ID
+		// Compute final path now that we have the DB-assigned ID.
+		var finalPath string
+		if parentID != nil {
+			if p, ok := s.users[*parentID]; ok {
+				finalPath = p.Path + "." + fmt.Sprintf("%d", id)
+			} else {
+				finalPath = fmt.Sprintf("%d", id)
+			}
+		} else {
+			finalPath = fmt.Sprintf("%d", id)
+		}
+		// Persist the final path back to DB so loadUsersFromDB rebuilds
+		// the same hierarchy string after restart.
+		if _, perr := db.Exec(`UPDATE auth.users SET path=$1 WHERE id=$2`, finalPath, id); perr != nil {
+			logger.Error("CreateUser: path update failed", "user_id", id, "error", perr)
+		}
+		// Keep the in-memory counter ahead of any DB-assigned ID so
+		// in-memory-only fallback IDs (when useDB later goes false in
+		// tests) never collide.
+		for {
+			cur := s.nextUserID.Load()
+			if id <= cur || s.nextUserID.CompareAndSwap(cur, id) {
+				break
+			}
+		}
+		u = &User{
+			ID: id, Username: username, Email: email,
+			PasswordHash: passwordHash,
+			Role: role, Path: finalPath, ParentID: parentID,
+			Balance: initialBalance, Exposure: 0,
+			CreditLimit: creditLimit, CommissionRate: commRate,
+			Status: "active", ReferralCode: dbu.ReferralCode,
+			CreatedAt: now, UpdatedAt: now,
+		}
+	} else {
+		// In-memory-only fallback (no DATABASE_URL)
+		id = s.nextUserID.Add(1)
+		path := fmt.Sprintf("%d", id)
+		if parentID != nil {
+			if p, ok := s.users[*parentID]; ok {
+				path = p.Path + "." + fmt.Sprintf("%d", id)
+			}
+		}
+		refCode := fmt.Sprintf("REF-%s-%s", strings.ToUpper(username), randHex(2))
+		u = &User{
+			ID: id, Username: username, Email: email,
+			PasswordHash: passwordHash,
+			Role: role, Path: path, ParentID: parentID,
+			Balance: initialBalance, Exposure: 0,
+			CreditLimit: creditLimit, CommissionRate: commRate,
+			Status: "active", ReferralCode: refCode,
+			CreatedAt: now, UpdatedAt: now,
+		}
+	}
+
+	// Apply parent debit AFTER successful child creation. Order matters:
+	// if dbCreateUser failed above we returned early with no parent
+	// mutation, leaving funds intact.
+	if parentID != nil && creditLimit > 0 && role != "superadmin" {
+		if parent, ok := s.users[*parentID]; ok {
+			parent.Balance = roundMoney(parent.Balance - creditLimit)
+			if useDB() {
 				dbUpdateBalance(parent.ID, parent.Balance, parent.Exposure)
 			}
 		}
 	}
 
-	// Defer path will refresh the cached superadmin list after we release s.mu.
+	s.users[id] = u
+	s.usersByName[username] = u
+	if u.ReferralCode != "" {
+		s.referralCodes[u.ReferralCode] = id
+	}
+
 	if role == "superadmin" {
 		needSuperadminRefresh = true
 	}
-
 	return u, nil
 }
 
@@ -1611,8 +1663,6 @@ func (s *Store) GetGameByID(id string) *CasinoGame {
 
 func (s *Store) CreateCasinoSession(userID int64, gameType, providerID string) *CasinoSession {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	id := "cs-" + randHex(8)
 	token := randHex(32)
 	now := time.Now()
@@ -1626,6 +1676,15 @@ func (s *Store) CreateCasinoSession(userID int64, gameType, providerID string) *
 		ExpiresAt: now.Add(4 * time.Hour).Format(time.RFC3339),
 	}
 	s.casinoSessions[id] = sess
+	s.mu.Unlock()
+
+	// Persist outside the lock so the DB call doesn't block other writers.
+	// Without this the session vanishes on restart and the in-memory cache
+	// drifts from the betting.casino_sessions table that other services
+	// query.
+	if useDB() {
+		dbSaveCasinoSession(sess)
+	}
 	return sess
 }
 

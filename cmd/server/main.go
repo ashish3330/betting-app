@@ -2000,9 +2000,21 @@ func handleCreateCasinoSession(w http.ResponseWriter, r *http.Request) {
 
 func handleGetCasinoSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// Try in-memory cache first (hot path), fall through to DB so the
+	// session is recoverable after a server restart.
 	store.mu.RLock()
 	sess, ok := store.casinoSessions[id]
 	store.mu.RUnlock()
+	if !ok && useDB() {
+		sess = dbGetCasinoSession(id)
+		if sess != nil {
+			ok = true
+			// Re-populate cache for subsequent requests.
+			store.mu.Lock()
+			store.casinoSessions[id] = sess
+			store.mu.Unlock()
+		}
+	}
 	if !ok {
 		writeErr(w, 404, "session not found")
 		return
@@ -2017,11 +2029,22 @@ func handleCloseCasinoSession(w http.ResponseWriter, r *http.Request) {
 		sess.Status = "closed"
 	}
 	store.mu.Unlock()
+	if useDB() {
+		dbUpdateCasinoSessionStatus(id, "closed")
+	}
 	writeJSON(w, 200, map[string]string{"message": "session closed", "id": id})
 }
 
 func handleCasinoHistory(w http.ResponseWriter, r *http.Request) {
 	uid := getUserID(r)
+	if useDB() {
+		out := dbGetUserCasinoSessions(uid)
+		if out == nil {
+			out = []*CasinoSession{}
+		}
+		writeJSON(w, 200, out)
+		return
+	}
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	var out []*CasinoSession
@@ -2280,9 +2303,32 @@ func handleWalletWithdrawals(w http.ResponseWriter, r *http.Request) {
 
 func handleGetPayment(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// Cache hit first; on miss fall through to DB so the transaction is
+	// retrievable after a server restart even if it isn't in the in-memory
+	// map (which only holds payments created since boot).
 	store.mu.RLock()
 	tx, ok := store.paymentTxns[id]
 	store.mu.RUnlock()
+	if !ok && useDB() {
+		// We only have a per-user query helper, so look it up via the
+		// payments table directly. The in-memory cache is repopulated
+		// on hit so subsequent reads stay fast.
+		row := db.QueryRow(`
+			SELECT id, user_id, direction, method, amount, currency, status, upi_id, wallet_address, created_at
+			FROM betting.payment_transactions WHERE id=$1`, id)
+		t := &PaymentTx{}
+		var upiID, wallet sql.NullString
+		if err := row.Scan(&t.ID, &t.UserID, &t.Direction, &t.Method, &t.Amount, &t.Currency,
+			&t.Status, &upiID, &wallet, &t.CreatedAt); err == nil {
+			t.UPIID = upiID.String
+			t.Wallet = wallet.String
+			tx = t
+			ok = true
+			store.mu.Lock()
+			store.paymentTxns[id] = t
+			store.mu.Unlock()
+		}
+	}
 	if !ok {
 		writeErr(w, 404, "transaction not found")
 		return
