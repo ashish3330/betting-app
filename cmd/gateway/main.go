@@ -457,13 +457,26 @@ func extractBearerToken(r *http.Request) string {
 }
 
 // proxyWebSocket proxies a WebSocket connection to the odds service.
-// It validates the JWT from the query parameter before establishing the
-// connection, then bidirectionally copies frames between client and backend.
+// It validates the JWT before establishing the connection, then
+// bidirectionally copies frames between client and backend.
+//
+// Token resolution order:
+//  1. ?token=... query parameter (legacy / explicit)
+//  2. access_token HttpOnly cookie (preferred — set by /api/v1/auth/login)
+//
+// The browser WebSocket API can't set Authorization headers and JS
+// cannot read HttpOnly cookies, so the cookie path is the only way
+// the new frontend (which moved tokens out of localStorage) can
+// authenticate WS connections.
 func proxyWebSocket(w http.ResponseWriter, r *http.Request, oddsServiceURL string, authService *auth.Service, corsOrigins []string, log *slog.Logger) {
-	// Validate auth token before accepting the WebSocket
 	token := r.URL.Query().Get("token")
 	if token == "" {
-		http.Error(w, `{"error":"missing token query parameter"}`, http.StatusUnauthorized)
+		if c, err := r.Cookie("access_token"); err == nil {
+			token = c.Value
+		}
+	}
+	if token == "" {
+		http.Error(w, `{"error":"missing token (query or access_token cookie)"}`, http.StatusUnauthorized)
 		return
 	}
 
