@@ -400,14 +400,10 @@ function KYCUploadSection() {
       formData.append("file", file);
       formData.append("document_type", docKey);
 
-      const { decryptLocalStorage } = await import("@/lib/crypto");
-      const accessToken = decryptLocalStorage("access_token");
-
+      // Auth is carried by the HttpOnly access_token cookie set at login.
       const res = await fetch("/api/v1/kyc/upload", {
         method: "POST",
-        headers: {
-          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-        },
+        credentials: "include",
         body: formData,
       });
 

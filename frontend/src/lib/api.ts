@@ -158,11 +158,6 @@ class ApiClient {
         // the backend's /auth/logout endpoint; we can't touch them from JS.
         if (typeof window !== "undefined") {
           localStorage.removeItem("user");
-          // Best-effort: also strip any legacy plaintext/obfuscated tokens that
-          // older builds may have left behind.
-          localStorage.removeItem("access_token");
-          localStorage.removeItem("refresh_token");
-          localStorage.removeItem("csrf_token");
         }
         throw new ApiError(401, "Session expired. Please login again.");
       }
@@ -308,10 +303,6 @@ class ApiClient {
     }
     if (typeof window !== "undefined") {
       localStorage.removeItem("user");
-      // Clean up any legacy local storage entries from older builds.
-      localStorage.removeItem("access_token");
-      localStorage.removeItem("refresh_token");
-      localStorage.removeItem("csrf_token");
     }
   }
 

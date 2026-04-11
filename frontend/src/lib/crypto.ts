@@ -87,7 +87,11 @@ export async function decryptData<T>(encrypted: string): Promise<T> {
   return JSON.parse(decoder.decode(plaintext));
 }
 
-// Encrypt data for localStorage (sync XOR obfuscation)
+// Lightweight XOR obfuscation for non-credential data stored in localStorage
+// (currently only the cached user profile, used for synchronous auth hydration).
+// This is NOT encryption and provides NO security against XSS — it only keeps
+// casual devtools inspection from showing plaintext. Do NOT use for secrets:
+// access/refresh/csrf tokens now live in HttpOnly cookies set by the backend.
 export function encryptLocalStorage(key: string, value: string): void {
   if (typeof window === "undefined") return;
   try {
@@ -105,6 +109,9 @@ export function encryptLocalStorage(key: string, value: string): void {
   }
 }
 
+// Reverse of encryptLocalStorage. Same caveats apply — obfuscation, not
+// encryption. Returns the raw localStorage value as a fallback to stay
+// compatible with older builds that wrote plaintext.
 export function decryptLocalStorage(key: string): string | null {
   if (typeof window === "undefined") return null;
   const stored = localStorage.getItem(key);

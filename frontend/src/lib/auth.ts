@@ -12,12 +12,19 @@ import React from "react";
 import { api, ApiError, User, WalletBalance } from "./api";
 import { decryptLocalStorage } from "./crypto";
 
+interface LoginResult {
+  user: User;
+  requires_otp?: boolean;
+  user_id?: number;
+  otp_code?: string;
+}
+
 interface AuthState {
   user: User | null;
   isLoggedIn: boolean;
   isLoading: boolean;
   balance: WalletBalance | null;
-  login: (username: string, password: string) => Promise<{ user: User; access_token: string; refresh_token: string }>;
+  login: (username: string, password: string) => Promise<LoginResult>;
   demoLogin: () => Promise<{ user: User }>;
   logout: () => Promise<void>;
   refreshBalance: () => Promise<void>;
@@ -28,7 +35,7 @@ const AuthContext = createContext<AuthState>({
   isLoggedIn: false,
   isLoading: true,
   balance: null,
-  login: async () => ({ user: {} as User, access_token: "", refresh_token: "" }),
+  login: async () => ({ user: {} as User }),
   demoLogin: async () => ({ user: {} as User }),
   logout: async () => {},
   refreshBalance: async () => {},
@@ -105,12 +112,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [user, refreshBalance]);
 
-  const login = async (username: string, password: string) => {
+  const login = async (username: string, password: string): Promise<LoginResult> => {
     const data = await api.login(username, password);
     if (data.user) {
       setUser(data.user);
     }
-    return data as { user: User; access_token: string; refresh_token: string; requires_otp?: boolean; user_id?: number; otp_code?: string };
+    return {
+      user: (data.user ?? ({} as User)) as User,
+      requires_otp: data.requires_otp,
+      user_id: data.user_id,
+      otp_code: data.otp_code,
+    };
   };
 
   const demoLogin = async () => {
