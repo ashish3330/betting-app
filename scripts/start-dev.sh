@@ -1,5 +1,8 @@
 #!/bin/bash
-# Start the Lotus Exchange server with all required env vars for local development
+# Start the Lotus Exchange API gateway with all required env vars for local
+# development. The gateway proxies to the 12 microservices, which must be
+# started separately (use scripts/start-all.sh to bring them all up at once).
+#
 # Usage: ./scripts/start-dev.sh
 
 set -e
@@ -13,10 +16,10 @@ if [ -f .env ]; then
   set +a
 fi
 
-# Build if needed
-if [ ! -f bin/server ] || [ cmd/server/main.go -nt bin/server ]; then
-  echo "Building server..."
-  go build -o bin/server ./cmd/server
+# Build the gateway if needed
+if [ ! -f bin/gateway ] || [ cmd/gateway/main.go -nt bin/gateway ]; then
+  echo "Building gateway..."
+  go build -o bin/gateway ./cmd/gateway
 fi
 
 # Persistent signing key — tokens survive restarts
@@ -43,10 +46,13 @@ if [ -z "$DATABASE_URL" ]; then
 fi
 export DATABASE_URL
 
-# Server
-export PORT="${PORT:-8080}"
+export HTTP_PORT="${HTTP_PORT:-8080}"
 
-echo "Starting Lotus Exchange backend on :${PORT}"
-echo "  DB: connected"
+echo "Starting Lotus Exchange gateway on :${HTTP_PORT}"
+echo "  DB:   connected"
 echo "  Keys: persistent"
-exec ./bin/server
+echo ""
+echo "NOTE: The gateway expects the 12 microservices to be running on"
+echo "      :8081-:8092. Use ./scripts/start-all.sh to start everything,"
+echo "      or run each cmd/<service>/main.go individually."
+exec ./bin/gateway

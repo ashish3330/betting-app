@@ -132,6 +132,28 @@ func main() {
 			log.Info("mock markets seeded", "markets", mkts, "runners", runners)
 		}
 		seedCancel()
+
+		// Background re-seed loop. The mock cache uses a 5-minute Redis
+		// TTL so the entries don't pile up forever, but in dev / CI
+		// that means the catalogue disappears between an integration
+		// suite restart and the next run. Re-seed every 60s — well
+		// below the TTL — so the cache is always populated.
+		go func() {
+			tick := time.NewTicker(60 * time.Second)
+			defer tick.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tick.C:
+					rsCtx, rsCancel := context.WithTimeout(ctx, 10*time.Second)
+					if _, _, err := oddsService.SeedMockMarkets(rsCtx); err != nil {
+						log.Warn("mock market re-seed failed", "error", err)
+					}
+					rsCancel()
+				}
+			}
+		}()
 	}
 
 	// ── WebSocket state ─────────────────────────────────────────

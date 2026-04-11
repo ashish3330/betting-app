@@ -1,13 +1,14 @@
 # Binaries (anchor patterns to repo root with leading slash so we don't match
-# cmd/<service>-service/ directories)
+# cmd/<service>-service/ directories). The bin/ directory is the canonical
+# build output for scripts/start-all.sh; everything in this list is what
+# `go build ./cmd/<svc>` would drop in the repo root if invoked without -o.
 bin/
-/server
-/mockserver
-/gateway
-cmd/server/mockserver
+/api-test
+/admin-service
 /auth-service
 /casino-service
 /fraud-service
+/gateway
 /hierarchy-service
 /matching-engine
 /notification-service
@@ -16,7 +17,10 @@ cmd/server/mockserver
 /reporting-service
 /risk-service
 /wallet-service
-/admin-service
+# Legacy monolith binary names — kept so an older clone with stale
+# checkouts doesn't accidentally commit them.
+/server
+/mockserver
 *.exe
 *.out
 
