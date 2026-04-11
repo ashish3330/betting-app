@@ -119,6 +119,9 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
+      - name: Unit tests (vitest)
+        run: npm test
+
       - name: Next build
         env:
           NEXT_TELEMETRY_DISABLED: "1"
