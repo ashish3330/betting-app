@@ -179,9 +179,10 @@ endpoint has been ported to the appropriate microservice — any future
 regression on a ported route shows up as a real failure instead of a
 silent skip.
 
-`--mode=microservices` is the only supported mode today. The
-`--mode=monolith` flag still exists in the source for historical reasons
-but targets a binary (`cmd/server`) that no longer exists.
+`--mode=microservices` is the default and the only supported runtime
+today. The `--mode=` flag itself is kept for forward compatibility but
+any other value just disables the (currently empty) skip-list and
+otherwise behaves identically.
 
 ---
 

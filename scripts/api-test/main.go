@@ -25,17 +25,20 @@ import (
 var (
 	baseURL = flag.String("base", "http://localhost:8080", "API base URL")
 	verbose = flag.Bool("v", false, "verbose output")
-	mode    = flag.String("mode", "monolith", "target mode: 'monolith' or 'microservices' (skips tests for endpoints not yet implemented in microservices)")
+	// `monolith` was the legacy default; it pointed at a single binary at
+	// cmd/server which has been deleted. The microservices stack (gateway
+	// + 12 services) is the only supported runtime today, so the default
+	// is now `microservices`. The flag itself is kept for forward
+	// compatibility — anything other than "microservices" disables the
+	// skip-list entirely (which is now empty anyway).
+	mode = flag.String("mode", "microservices", "target mode: 'microservices' (default) or any other value for legacy behaviour")
 )
 
 // endpointsMissingInMicroservices lists test names that hit endpoints not
-// yet implemented in microservices mode. When running with
-// --mode=microservices, entries in this map are recorded as skipped
-// instead of failed so the run is actionable.
-//
-// The skip-list is intentionally empty: every route is exercised in
-// --mode=microservices, so any regression on a previously-skipped
-// endpoint shows up as a real failure instead of a silent skip.
+// yet implemented in microservices mode. The skip-list is intentionally
+// empty: every route is exercised against the gateway, so any regression
+// on a previously-skipped endpoint shows up as a real failure instead of
+// a silent skip.
 var endpointsMissingInMicroservices = map[string]string{}
 
 var (
