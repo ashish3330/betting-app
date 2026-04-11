@@ -20,7 +20,17 @@ import (
 // ─── In-memory store (replaces Postgres + Redis) ────────────────────────────
 
 type Store struct {
-	mu sync.RWMutex // primary lock for all data
+	mu sync.RWMutex // primary lock for in-memory bet/user/market state
+
+	// NEW: dedicated mutexes for independent concerns. Splitting these off
+	// from the global s.mu lets authenticated requests (blacklist check) and
+	// notification writes run in parallel with bet placement.
+	notifMu     sync.Mutex   // notifications + audit log + login history
+	blacklistMu sync.RWMutex // JWT blacklist
+	refreshMu   sync.RWMutex // refresh tokens + refreshTokenTimes
+	csrfMu      sync.RWMutex // CSRF tokens + csrfTokenTimes
+	otpMu       sync.RWMutex // OTP store
+	loginMu     sync.RWMutex // loginAttempts (brute force)
 
 	users          map[int64]*User
 	usersByName    map[string]*User
@@ -41,6 +51,14 @@ type Store struct {
 	fraudAlerts    []*FraudAlert
 	settlementEvts []*SettlementEvent
 	liveScores     map[string]*LiveScoreData
+
+	// Per-user/per-market bet indexes for O(1) lookups. Populated alongside
+	// every write to s.bets under s.mu so readers can avoid linear scans of
+	// the entire bet map from HoldAndPlaceBet / SettleMarket / VoidMarket.
+	betsByUser           map[int64]map[string]*Bet   // user_id -> bet_id -> bet
+	betsByMarket         map[string]map[string]*Bet  // market_id -> bet_id -> bet
+	clientRefs           map[int64]map[string]string // user_id -> client_ref -> bet_id
+	exposureByUserMarket map[int64]map[string]float64 // user_id -> market_id -> open exposure
 
 	// Platform revenue tracking
 	platformRevenue struct {
@@ -83,6 +101,35 @@ type Store struct {
 
 	// Login history
 	loginHistory []*LoginRecord
+
+	// Async notification outbox: bet placement enqueues DB writes here so the
+	// request hot path never blocks on 5–8 synchronous notification/audit
+	// inserts. A small background worker pool drains the channel and performs
+	// the actual dbAddNotification / dbAddAudit calls.
+	notifChan chan notifJob
+	notifWG   sync.WaitGroup
+
+	// Cached superadmin user IDs so NotifyHierarchy does not have to scan the
+	// entire user map under RLock on every bet. Refreshed when a superadmin
+	// is created or has their status changed.
+	superadminIDsMu sync.RWMutex
+	superadminIDs   []int64
+}
+
+// notifJob is the unit of work for the background notification/audit worker.
+// Kind is either "notification" or "audit". Only the fields relevant to that
+// kind are populated.
+type notifJob struct {
+	Kind     string // "notification" or "audit"
+	NotifID  string
+	UserID   int64
+	Username string
+	Action   string
+	Type     string
+	Title    string
+	Message  string
+	Details  string
+	IP       string
 }
 
 // ─── Models ─────────────────────────────────────────────────────────────────
@@ -288,11 +335,31 @@ func (s *Store) AddNotification(userID int64, typ, title, message string) {
 		Read:    false,
 		Created: time.Now().Format(time.RFC3339),
 	}
-	s.mu.Lock()
+	// 1. Append to the in-memory slice synchronously so the current request's
+	//    GET /api/v1/notifications view still observes the new entry.
+	s.notifMu.Lock()
 	s.notifications = append(s.notifications, n)
-	s.mu.Unlock()
-	if useDB() {
-		dbAddNotification(nid, userID, typ, title, message)
+	s.notifMu.Unlock()
+
+	// 2. Non-blocking enqueue of the DB write to the background worker pool.
+	//    If the channel is full we drop the DB write (logged) rather than
+	//    block the request handler — the in-memory entry is still visible.
+	if !useDB() {
+		return
+	}
+	select {
+	case s.notifChan <- notifJob{
+		Kind:    "notification",
+		NotifID: nid,
+		UserID:  userID,
+		Type:    typ,
+		Title:   title,
+		Message: message,
+	}:
+	default:
+		if logger != nil {
+			logger.Warn("notification queue full, dropping DB write", "user_id", userID, "type", typ)
+		}
 	}
 }
 
@@ -310,12 +377,12 @@ func (s *Store) NotifyHierarchy(childID int64, typ, title, message string) {
 }
 
 // collectHierarchyIDs returns parent + superadmin user IDs for the given child, under a read lock.
+// Superadmin lookup uses the cached list so we avoid an O(N) scan of all users on every bet.
 func (s *Store) collectHierarchyIDs(childID int64) []int64 {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	child := s.users[childID]
 	if child == nil {
+		s.mu.RUnlock()
 		return nil
 	}
 	// Walk up the parent chain
@@ -329,19 +396,19 @@ func (s *Store) collectHierarchyIDs(childID int64) []int64 {
 		parentIDs = append(parentIDs, parent.ID)
 		current = parent
 	}
-	// Also notify all superadmins
-	for _, u := range s.users {
-		if u.Role == "superadmin" {
-			found := false
-			for _, pid := range parentIDs {
-				if pid == u.ID {
-					found = true
-					break
-				}
+	s.mu.RUnlock()
+
+	// Merge in cached superadmin IDs (dedup against parent chain).
+	for _, saID := range s.getSuperadminIDs() {
+		found := false
+		for _, pid := range parentIDs {
+			if pid == saID {
+				found = true
+				break
 			}
-			if !found {
-				parentIDs = append(parentIDs, u.ID)
-			}
+		}
+		if !found {
+			parentIDs = append(parentIDs, saID)
 		}
 	}
 	return parentIDs
@@ -351,8 +418,8 @@ func (s *Store) GetNotifications(userID int64, unreadOnly bool, limit, offset in
 	if useDB() {
 		return dbGetNotifications(userID, unreadOnly, limit, offset)
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.notifMu.Lock()
+	defer s.notifMu.Unlock()
 
 	var out []*Notification
 	// Reverse order (newest first)
@@ -380,8 +447,8 @@ func (s *Store) GetUnreadCount(userID int64) int {
 	if useDB() {
 		return dbGetUnreadCount(userID)
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.notifMu.Lock()
+	defer s.notifMu.Unlock()
 	count := 0
 	for _, n := range s.notifications {
 		if n.UserID == userID && !n.Read {
@@ -395,8 +462,8 @@ func (s *Store) MarkNotificationRead(userID int64, notifID string) bool {
 	if useDB() {
 		return dbMarkNotificationRead(userID, notifID)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.notifMu.Lock()
+	defer s.notifMu.Unlock()
 	for _, n := range s.notifications {
 		if n.ID == notifID && n.UserID == userID {
 			n.Read = true
@@ -410,8 +477,8 @@ func (s *Store) MarkAllNotificationsRead(userID int64) int {
 	if useDB() {
 		return dbMarkAllNotificationsRead(userID)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.notifMu.Lock()
+	defer s.notifMu.Unlock()
 	count := 0
 	for _, n := range s.notifications {
 		if n.UserID == userID && !n.Read {
@@ -524,8 +591,15 @@ func NewStore() *Store {
 		csrfTokenTimes:    make(map[string]time.Time),
 		refreshTokenTimes: make(map[string]time.Time),
 		loginAttempts:     make(map[string]*LoginAttempt),
-		PrivateKey:     priv,
-		PublicKey:       pub,
+		betsByUser:           make(map[int64]map[string]*Bet),
+		betsByMarket:         make(map[string]map[string]*Bet),
+		clientRefs:           make(map[int64]map[string]string),
+		exposureByUserMarket: make(map[int64]map[string]float64),
+		// Buffered to absorb bursts of hierarchy fan-out (up to ~8 jobs per bet).
+		// If full, writers drop the DB write rather than block the request handler.
+		notifChan: make(chan notifJob, 4096),
+		PrivateKey: priv,
+		PublicKey:  pub,
 	}
 	s.nextUserID.Store(0)
 	s.nextLedgerID.Store(0)
@@ -537,10 +611,70 @@ func NewStore() *Store {
 
 	s.seedData()
 
+	// Prime the superadmin ID cache now that seedData (and any DB load) is done.
+	s.refreshSuperadminCache()
+
+	// Start background notification/audit workers. Two workers give us enough
+	// parallelism to absorb bursts without serializing DB writes end-to-end.
+	for i := 0; i < 2; i++ {
+		s.notifWG.Add(1)
+		go s.notificationWorker()
+	}
+
 	// Background cleanup: expired blacklist tokens, OTPs, old audit logs
 	go s.startCleanupLoop()
 
 	return s
+}
+
+// notificationWorker drains notifChan and performs the actual DB writes.
+// Runs until notifChan is closed (by Stop), then exits.
+func (s *Store) notificationWorker() {
+	defer s.notifWG.Done()
+	for job := range s.notifChan {
+		if !useDB() {
+			continue
+		}
+		switch job.Kind {
+		case "notification":
+			dbAddNotification(job.NotifID, job.UserID, job.Type, job.Title, job.Message)
+		case "audit":
+			dbAddAudit(job.UserID, job.Username, job.Action, job.Details, job.IP)
+		}
+	}
+}
+
+// Stop closes the notification channel and waits for in-flight jobs to drain.
+// Called from main during graceful shutdown so pending DB writes are not lost.
+func (s *Store) Stop() {
+	close(s.notifChan)
+	s.notifWG.Wait()
+}
+
+// refreshSuperadminCache rebuilds the cached list of superadmin user IDs.
+// Called after CreateUser for superadmin roles, status changes that might
+// affect a superadmin, and at startup once seeding / DB load is finished.
+func (s *Store) refreshSuperadminCache() {
+	s.mu.RLock()
+	var ids []int64
+	for id, u := range s.users {
+		if u.Role == "superadmin" {
+			ids = append(ids, id)
+		}
+	}
+	s.mu.RUnlock()
+
+	s.superadminIDsMu.Lock()
+	s.superadminIDs = ids
+	s.superadminIDsMu.Unlock()
+}
+
+// getSuperadminIDs returns a snapshot of the cached superadmin IDs.
+// Callers must not mutate the returned slice.
+func (s *Store) getSuperadminIDs() []int64 {
+	s.superadminIDsMu.RLock()
+	defer s.superadminIDsMu.RUnlock()
+	return s.superadminIDs
 }
 
 // loadUsersFromDB populates in-memory cache from PostgreSQL
@@ -565,53 +699,59 @@ func (s *Store) startCleanupLoop() {
 	ticker := time.NewTicker(10 * time.Minute)
 	for range ticker.C {
 		now := time.Now()
-		s.mu.Lock()
 
-		// Purge expired blacklisted tokens
+		// Each of these now uses its dedicated mutex so cleanup doesn't
+		// block bet placement or user reads.
+		s.blacklistMu.Lock()
 		for token, exp := range s.blacklist {
 			if now.After(exp) {
 				delete(s.blacklist, token)
 			}
 		}
-		// Purge expired OTPs
+		s.blacklistMu.Unlock()
+
+		s.otpMu.Lock()
 		for uid, entry := range s.otpStore {
 			if now.After(entry.Expiry) {
 				delete(s.otpStore, uid)
 			}
 		}
-		// Prune audit log to last 10000 entries
+		s.otpMu.Unlock()
+
+		s.notifMu.Lock()
 		if len(s.auditLog) > 10000 {
 			s.auditLog = s.auditLog[len(s.auditLog)-10000:]
 		}
-		// Prune login history to last 5000
 		if len(s.loginHistory) > 5000 {
 			s.loginHistory = s.loginHistory[len(s.loginHistory)-5000:]
 		}
+		s.notifMu.Unlock()
 
-		// Purge expired CSRF tokens (older than 24 hours)
+		s.csrfMu.Lock()
 		for token, created := range s.csrfTokenTimes {
 			if now.Sub(created) > 24*time.Hour {
 				delete(s.csrfTokens, token)
 				delete(s.csrfTokenTimes, token)
 			}
 		}
+		s.csrfMu.Unlock()
 
-		// Purge expired refresh tokens (older than 7 days)
+		s.refreshMu.Lock()
 		for token, created := range s.refreshTokenTimes {
 			if now.Sub(created) > 7*24*time.Hour {
 				delete(s.refreshTokens, token)
 				delete(s.refreshTokenTimes, token)
 			}
 		}
+		s.refreshMu.Unlock()
 
-		// Purge stale login attempts older than 30 minutes
+		s.loginMu.Lock()
 		for username, attempt := range s.loginAttempts {
 			if now.Sub(attempt.LastTry) > 30*time.Minute {
 				delete(s.loginAttempts, username)
 			}
 		}
-
-		s.mu.Unlock()
+		s.loginMu.Unlock()
 	}
 }
 
@@ -656,9 +796,15 @@ func roundMoney(amount float64) float64 {
 
 // ─── CRUD ───────────────────────────────────────────────────────────────────
 
-func (s *Store) CreateUser(username, email, password, role string, parentID *int64, creditLimit, commRate float64) (*User, error) {
+func (s *Store) CreateUser(username, email, password, role string, parentID *int64, creditLimit, commRate float64) (u *User, err error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	needSuperadminRefresh := false
+	defer func() {
+		s.mu.Unlock()
+		if needSuperadminRefresh {
+			s.refreshSuperadminCache()
+		}
+	}()
 
 	if _, exists := s.usersByName[username]; exists {
 		return nil, fmt.Errorf("username already taken")
@@ -695,7 +841,7 @@ func (s *Store) CreateUser(username, email, password, role string, parentID *int
 	// Generate referral code: REF-{username}-{random4}
 	refCode := fmt.Sprintf("REF-%s-%s", strings.ToUpper(username), randHex(2))
 
-	u := &User{
+	u = &User{
 		ID: id, Username: username, Email: email,
 		PasswordHash: hashPassword(password),
 		Role: role, Path: path, ParentID: parentID,
@@ -717,6 +863,11 @@ func (s *Store) CreateUser(username, email, password, role string, parentID *int
 				dbUpdateBalance(parent.ID, parent.Balance, parent.Exposure)
 			}
 		}
+	}
+
+	// Defer path will refresh the cached superadmin list after we release s.mu.
+	if role == "superadmin" {
+		needSuperadminRefresh = true
 	}
 
 	return u, nil
@@ -962,6 +1113,64 @@ func (s *Store) SettleBet(userID int64, betID string, pnl, commission float64) {
 	}
 }
 
+// ─── Bet index helpers ──────────────────────────────────────────────────────
+//
+// These helpers keep the per-user / per-market bet indexes consistent with
+// s.bets. Callers MUST hold s.mu.Lock() before invoking them.
+
+// betLiability returns the amount of exposure a bet contributes while it's
+// still open (unmatched/matched/partial). Mirrors the calculation in the old
+// O(N) scan inside HoldAndPlaceBet so the exposure index matches byte-for-byte.
+func betLiability(b *Bet) float64 {
+	if b.Side == "back" {
+		return b.Stake
+	}
+	return b.Stake * (b.Price - 1)
+}
+
+// indexBetLocked inserts a newly-created bet into all secondary indexes.
+// Must be called under s.mu.Lock().
+func (s *Store) indexBetLocked(b *Bet) {
+	if _, ok := s.betsByUser[b.UserID]; !ok {
+		s.betsByUser[b.UserID] = make(map[string]*Bet)
+	}
+	s.betsByUser[b.UserID][b.ID] = b
+
+	if _, ok := s.betsByMarket[b.MarketID]; !ok {
+		s.betsByMarket[b.MarketID] = make(map[string]*Bet)
+	}
+	s.betsByMarket[b.MarketID][b.ID] = b
+
+	if b.ClientRef != "" {
+		if _, ok := s.clientRefs[b.UserID]; !ok {
+			s.clientRefs[b.UserID] = make(map[string]string)
+		}
+		s.clientRefs[b.UserID][b.ClientRef] = b.ID
+	}
+
+	if b.Status == "unmatched" || b.Status == "matched" || b.Status == "partial" {
+		if _, ok := s.exposureByUserMarket[b.UserID]; !ok {
+			s.exposureByUserMarket[b.UserID] = make(map[string]float64)
+		}
+		s.exposureByUserMarket[b.UserID][b.MarketID] += betLiability(b)
+	}
+}
+
+// releaseExposureLocked deducts a bet's open exposure from the per-user /
+// per-market index. Called when a bet transitions out of an "open" state
+// (settled, cancelled, void). Must hold s.mu.Lock().
+func (s *Store) releaseExposureLocked(b *Bet) {
+	if byMkt, ok := s.exposureByUserMarket[b.UserID]; ok {
+		byMkt[b.MarketID] -= betLiability(b)
+		if byMkt[b.MarketID] <= 0 {
+			delete(byMkt, b.MarketID)
+		}
+		if len(byMkt) == 0 {
+			delete(s.exposureByUserMarket, b.UserID)
+		}
+	}
+}
+
 // ─── Matching Engine ────────────────────────────────────────────────────────
 
 type MatchResult struct {
@@ -981,94 +1190,110 @@ type Fill struct {
 // HoldAndPlaceBet atomically validates balance, exposure limits, duplicate
 // client_ref, holds funds, and places the bet — all under a single lock.
 // This eliminates the TOCTOU race between validation and execution.
+//
+// Performance: the validation phase uses O(1) index lookups instead of
+// scanning s.bets, and DB writes are lifted out of the critical section.
 func (s *Store) HoldAndPlaceBet(userID int64, marketID string, selectionID int64, side string, price, stake float64, clientRef string, holdAmount float64) (*MatchResult, error) {
+	// ── Phase 1: validate + reserve in memory under lock (no DB calls) ──
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	// Re-validate under lock: balance
 	u, ok := s.users[userID]
 	if !ok {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("user not found")
 	}
 	if u.Available() < holdAmount {
-		return nil, fmt.Errorf("insufficient balance: available %.2f, required %.2f", u.Available(), holdAmount)
+		avail := u.Available()
+		s.mu.Unlock()
+		return nil, fmt.Errorf("insufficient balance: available %.2f, required %.2f", avail, holdAmount)
 	}
 
-	// Re-validate under lock: market status
 	m, marketExists := s.markets[marketID]
 	if !marketExists {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("market not found")
 	}
 	if m.Status != "open" {
-		return nil, fmt.Errorf("market is %s, cannot place bets", m.Status)
+		status := m.Status
+		s.mu.Unlock()
+		return nil, fmt.Errorf("market is %s, cannot place bets", status)
 	}
 
-	// Re-validate under lock: per-market exposure limit
+	// O(1) per-market exposure check via the index (replaces scan of s.bets).
 	existingExposure := 0.0
-	for _, b := range s.bets {
-		if b.UserID == userID && b.MarketID == marketID && (b.Status == "unmatched" || b.Status == "matched" || b.Status == "partial") {
-			if b.Side == "back" {
-				existingExposure += b.Stake
-			} else {
-				existingExposure += b.Stake * (b.Price - 1)
-			}
-		}
+	if byMkt, hasIdx := s.exposureByUserMarket[userID]; hasIdx {
+		existingExposure = byMkt[marketID]
 	}
 	maxMarketExposure := u.Balance * 0.5
 	if existingExposure+holdAmount > maxMarketExposure && maxMarketExposure > 0 {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("market exposure limit exceeded: existing %.0f + new %.0f > limit %.0f (50%% of balance)", existingExposure, holdAmount, maxMarketExposure)
 	}
 
-	// Re-validate under lock: duplicate client_ref
+	// O(1) duplicate client_ref check via the index.
 	if clientRef != "" {
-		for _, b := range s.bets {
-			if b.ClientRef == clientRef && b.UserID == userID {
+		if refs, hasRefs := s.clientRefs[userID]; hasRefs {
+			if _, dup := refs[clientRef]; dup {
+				s.mu.Unlock()
 				return nil, fmt.Errorf("duplicate bet: client_ref already used")
 			}
 		}
 	}
 
-	// Hold funds FIRST — before placing the bet
+	// Reserve exposure and build the bet record in memory.
 	u.Exposure = roundMoney(u.Exposure + holdAmount)
 	now := time.Now()
+	nowStr := now.Format(time.RFC3339)
 	betID := "bet-" + randHex(8)
-	s.addLedger(userID, -holdAmount, "hold", "hold:"+betID, betID, now.Format(time.RFC3339))
-	if useDB() {
-		dbUpdateBalance(userID, u.Balance, u.Exposure)
-	}
 
-	// House model: every bet is immediately fully matched.
-	status := "matched"
-
-	// Determine market type and display side
-	var mType, dSide string
-	mType = m.MarketType
+	// Determine market type and display side (market is held under the lock).
+	mType := m.MarketType
+	var dSide string
 	if mType == "fancy" || mType == "session" {
-		if side == "back" { dSide = "yes" } else { dSide = "no" }
+		if side == "back" {
+			dSide = "yes"
+		} else {
+			dSide = "no"
+		}
 	} else {
 		dSide = side
 	}
 
-	// Record the bet as fully matched
-	s.bets[betID] = &Bet{
+	// House model: every bet is immediately fully matched.
+	bet := &Bet{
 		ID: betID, MarketID: marketID, SelectionID: selectionID,
 		UserID: userID, Side: side, DisplaySide: dSide, MarketType: mType,
 		Price: price, Stake: stake,
 		MatchedStake: stake, UnmatchedStake: 0,
-		Status: status, ClientRef: clientRef, CreatedAt: now.Format(time.RFC3339),
+		Status: "matched", ClientRef: clientRef, CreatedAt: nowStr,
 	}
-
-	// Update market total matched
+	s.bets[betID] = bet
+	s.indexBetLocked(bet)
 	m.TotalMatched += stake
 
-	// Persist to DB
+	// Append the in-memory ledger entry (no DB call yet — we'll batch below).
+	ledgerID := s.nextLedgerID.Add(1)
+	s.ledger = append(s.ledger, &LedgerEntry{
+		ID: ledgerID, UserID: userID, Amount: -holdAmount,
+		Type: "hold", Reference: "hold:" + betID, BetID: betID, CreatedAt: nowStr,
+	})
+
+	// Snapshot the fields we need for DB writes before releasing the lock.
+	userBal := u.Balance
+	userExp := u.Exposure
+	betSnap := *bet
+	s.mu.Unlock()
+
+	// ── Phase 2: persist outside the critical section ──
 	if useDB() {
-		dbSaveBet(s.bets[betID])
+		dbUpdateBalance(userID, userBal, userExp)
+		dbAddLedger(userID, -holdAmount, "hold", "hold:"+betID, betID)
+		dbSaveBet(&betSnap)
 	}
 
 	return &MatchResult{
 		BetID: betID, MatchedStake: stake,
-		UnmatchedStake: 0, Status: status, Fills: nil,
+		UnmatchedStake: 0, Status: "matched", Fills: nil,
 	}, nil
 }
 
@@ -1095,13 +1320,15 @@ func (s *Store) PlaceAndMatch(userID int64, marketID string, selectionID int64, 
 	}
 
 	// Record the bet as fully matched
-	s.bets[betID] = &Bet{
+	bet := &Bet{
 		ID: betID, MarketID: marketID, SelectionID: selectionID,
 		UserID: userID, Side: side, DisplaySide: dSide, MarketType: mType,
 		Price: price, Stake: stake,
 		MatchedStake: stake, UnmatchedStake: 0,
 		Status: status, ClientRef: clientRef, CreatedAt: now.Format(time.RFC3339),
 	}
+	s.bets[betID] = bet
+	s.indexBetLocked(bet)
 
 	// Update market total matched
 	if m, ok := s.markets[marketID]; ok {
@@ -1153,10 +1380,14 @@ func (s *Store) CancelOrder(marketID, betID, side string) error {
 				}
 			}
 			s.orderBooks[key] = append(orders[:i], orders[i+1:]...)
-			if bet.MatchedStake > 0 {
-				bet.Status = "partial" // keep matched portion alive
-			} else {
+			// If the bet is being fully cancelled, remove its exposure
+			// contribution from the index. Partial cancels keep the
+			// matched portion live so we leave the index entry alone.
+			if bet.MatchedStake == 0 {
+				s.releaseExposureLocked(bet)
 				bet.Status = "cancelled"
+			} else {
+				bet.Status = "partial"
 			}
 			bet.UnmatchedStake = 0
 			if useDB() {
@@ -1245,6 +1476,8 @@ func (s *Store) SettleMarket(marketID string, winnerSelectionID int64) (int, flo
 			}
 		}
 
+		// Release this bet's contribution from the per-user exposure index.
+		s.releaseExposureLocked(bet)
 		bet.Profit = pnl
 		bet.Status = "settled"
 
@@ -1314,6 +1547,7 @@ func (s *Store) VoidMarket(marketID string) int {
 		if bet.Status == "settled" || bet.Status == "void" || bet.Status == "cancelled" {
 			continue
 		}
+		s.releaseExposureLocked(bet)
 		bet.Status = "void"
 		voided++
 
@@ -1640,23 +1874,23 @@ func (s *Store) GetUserByReferralCode(code string) *User {
 
 func (s *Store) GenerateOTP(userID int64) string {
 	code := fmt.Sprintf("%06d", mrand.Intn(1000000))
-	s.mu.Lock()
+	s.otpMu.Lock()
 	s.otpStore[userID] = &OTPEntry{Code: code, Expiry: time.Now().Add(5 * time.Minute)}
-	s.mu.Unlock()
+	s.otpMu.Unlock()
 	return code
 }
 
 func (s *Store) VerifyOTP(userID int64, code string) bool {
 	// Use a single write lock for atomic read+delete to prevent two concurrent
 	// requests from verifying the same OTP (TOCTOU).
-	s.mu.Lock()
+	s.otpMu.Lock()
 	entry, ok := s.otpStore[userID]
 	if !ok || time.Now().After(entry.Expiry) || entry.Code != code {
-		s.mu.Unlock()
+		s.otpMu.Unlock()
 		return false
 	}
 	delete(s.otpStore, userID)
-	s.mu.Unlock()
+	s.otpMu.Unlock()
 	return true
 }
 
@@ -1664,26 +1898,26 @@ func (s *Store) VerifyOTP(userID int64, code string) bool {
 
 func (s *Store) GenerateCSRF(userID int64) string {
 	token := randHex(16)
-	s.mu.Lock()
+	s.csrfMu.Lock()
 	s.csrfTokens[token] = userID
 	s.csrfTokenTimes[token] = time.Now()
-	s.mu.Unlock()
+	s.csrfMu.Unlock()
 	return token
 }
 
 func (s *Store) ValidateCSRF(token string) bool {
-	s.mu.RLock()
+	s.csrfMu.RLock()
 	_, ok := s.csrfTokens[token]
-	s.mu.RUnlock()
+	s.csrfMu.RUnlock()
 	return ok
 }
 
 // ─── Brute Force Protection ─────────────────────────────────────────────────
 
 func (s *Store) CheckLoginAttempt(username string) (bool, time.Time) {
-	s.mu.RLock()
+	s.loginMu.RLock()
 	attempt, ok := s.loginAttempts[username]
-	s.mu.RUnlock()
+	s.loginMu.RUnlock()
 	if !ok {
 		return true, time.Time{} // allowed
 	}
@@ -1694,8 +1928,8 @@ func (s *Store) CheckLoginAttempt(username string) (bool, time.Time) {
 }
 
 func (s *Store) RecordFailedLogin(username string) (bool, time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
 
 	attempt, ok := s.loginAttempts[username]
 	if !ok {
@@ -1719,9 +1953,9 @@ func (s *Store) RecordFailedLogin(username string) (bool, time.Time) {
 }
 
 func (s *Store) ClearLoginAttempts(username string) {
-	s.mu.Lock()
+	s.loginMu.Lock()
 	delete(s.loginAttempts, username)
-	s.mu.Unlock()
+	s.loginMu.Unlock()
 }
 
 // ─── Audit Log ──────────────────────────────────────────────────────────────
@@ -1737,11 +1971,29 @@ func (s *Store) AddAudit(userID int64, username, action, details, ip string) {
 		IP:        ip,
 		Timestamp: time.Now().Format(time.RFC3339),
 	}
-	s.mu.Lock()
+	s.notifMu.Lock()
 	s.auditLog = append(s.auditLog, entry)
-	s.mu.Unlock()
-	if useDB() {
-		dbAddAudit(userID, username, action, details, ip)
+	s.notifMu.Unlock()
+
+	// Off-load the DB insert to the background worker so the request hot path
+	// is not blocked. Drop with a warning if the channel is full rather than
+	// back-pressure the request handler.
+	if !useDB() {
+		return
+	}
+	select {
+	case s.notifChan <- notifJob{
+		Kind:     "audit",
+		UserID:   userID,
+		Username: username,
+		Action:   action,
+		Details:  details,
+		IP:       ip,
+	}:
+	default:
+		if logger != nil {
+			logger.Warn("audit queue full, dropping DB write", "user_id", userID, "action", action)
+		}
 	}
 }
 
@@ -1752,12 +2004,12 @@ func (s *Store) GetAuditLog(userID int64, role string) []*AuditEntry {
 		}
 		return dbGetAuditLogForUser(userID, 500)
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 
 	if role == "superadmin" {
+		s.notifMu.Lock()
 		out := make([]*AuditEntry, len(s.auditLog))
 		copy(out, s.auditLog)
+		s.notifMu.Unlock()
 		for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 			out[i], out[j] = out[j], out[i]
 		}
@@ -1767,8 +2019,12 @@ func (s *Store) GetAuditLog(userID int64, role string) []*AuditEntry {
 		return out
 	}
 
+	// Snapshot downline IDs under s.mu (users map), then scan auditLog
+	// under notifMu. Avoids holding two locks simultaneously.
+	s.mu.RLock()
 	u := s.users[userID]
 	if u == nil {
+		s.mu.RUnlock()
 		return nil
 	}
 	prefix := u.Path + "."
@@ -1778,7 +2034,10 @@ func (s *Store) GetAuditLog(userID int64, role string) []*AuditEntry {
 			downlineIDs[child.ID] = true
 		}
 	}
+	s.mu.RUnlock()
 
+	s.notifMu.Lock()
+	defer s.notifMu.Unlock()
 	var out []*AuditEntry
 	for i := len(s.auditLog) - 1; i >= 0; i-- {
 		if downlineIDs[s.auditLog[i].UserID] {
@@ -1801,9 +2060,9 @@ func (s *Store) RecordLogin(userID int64, ip, userAgent string, success bool) {
 		LoginAt:   time.Now().Format(time.RFC3339),
 		Success:   success,
 	}
-	s.mu.Lock()
+	s.notifMu.Lock()
 	s.loginHistory = append(s.loginHistory, record)
-	s.mu.Unlock()
+	s.notifMu.Unlock()
 	if useDB() {
 		dbRecordLogin(userID, ip, userAgent, success)
 	}
@@ -1813,8 +2072,8 @@ func (s *Store) GetLoginHistory(userID int64, limit int) []*LoginRecord {
 	if useDB() {
 		return dbGetLoginHistory(userID, limit)
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.notifMu.Lock()
+	defer s.notifMu.Unlock()
 
 	var out []*LoginRecord
 	for i := len(s.loginHistory) - 1; i >= 0; i-- {

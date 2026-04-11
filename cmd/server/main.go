@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -446,6 +447,12 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		logger.Error("forced shutdown", "error", err)
 	}
+
+	// Drain the async notification/audit outbox so any pending DB writes
+	// queued during the final requests are flushed before exit.
+	if store != nil {
+		store.Stop()
+	}
 	logger.Info("server stopped")
 }
 
@@ -488,6 +495,77 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// cmdServerAuthCtx bundles per-request identity into a single struct so the
+// auth() middleware pays for exactly one context.WithValue call per request
+// instead of four. Each WithValue allocates a new context node, so collapsing
+// the four Stores into one materially reduces allocation on the hot path.
+type cmdServerAuthCtx struct {
+	UserID   int64
+	Username string
+	Role     string
+	Path     string
+}
+
+type cmdServerAuthCtxKeyType struct{}
+
+var cmdServerAuthCtxKey = cmdServerAuthCtxKeyType{}
+
+// jwtCache memoizes JWT validation for cmd/server's auth() helper. Parsing
+// an EdDSA signed token is ~20-30µs per call; caching collapses that to a
+// constant-time map lookup for clients that reuse the same token for many
+// requests within its TTL. The cache is capped to avoid unbounded growth
+// from token rotation.
+var jwtCache = struct {
+	mu    sync.RWMutex
+	items map[string]*Claims
+}{items: make(map[string]*Claims, 1024)}
+
+const jwtCacheCap = 10000
+
+// cachedParseJWT returns claims for tokenStr, either from the cache or by
+// re-parsing. The read lock is released before the (potentially expensive)
+// parse call so that a crowd of cache-missing requests doesn't serialize on
+// a write lock held during JWT parsing.
+func cachedParseJWT(tokenStr string) (*Claims, error) {
+	jwtCache.mu.RLock()
+	cached, ok := jwtCache.items[tokenStr]
+	jwtCache.mu.RUnlock()
+	if ok {
+		if cached.ExpiresAt != nil && time.Now().Before(cached.ExpiresAt.Time) {
+			return cached, nil
+		}
+		// Expired — fall through and re-parse. jwt.ParseWithClaims
+		// will also reject the token, so the stale entry is evicted
+		// below when we overwrite or evict.
+	}
+
+	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (interface{}, error) {
+		return store.PublicKey, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	claims := token.Claims.(*Claims)
+
+	jwtCache.mu.Lock()
+	if len(jwtCache.items) >= jwtCacheCap {
+		// Simple bounded eviction: drop about half of the entries to
+		// amortize the cost rather than doing it on every insert.
+		n := 0
+		for k := range jwtCache.items {
+			delete(jwtCache.items, k)
+			n++
+			if n >= jwtCacheCap/2 {
+				break
+			}
+		}
+	}
+	jwtCache.items[tokenStr] = claims
+	jwtCache.mu.Unlock()
+
+	return claims, nil
+}
+
 func auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Extract token: prefer Authorization header, fallback to HttpOnly cookie
@@ -503,30 +581,44 @@ func auth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		store.mu.RLock()
+		// Blacklist lives on its own RWMutex so authenticated requests
+		// no longer contend with bet writers on the global s.mu.
+		store.blacklistMu.RLock()
 		if exp, ok := store.blacklist[tokenStr]; ok && time.Now().Before(exp) {
-			store.mu.RUnlock()
+			store.blacklistMu.RUnlock()
 			writeErr(w, 401, "token has been revoked")
 			return
 		}
-		store.mu.RUnlock()
+		store.blacklistMu.RUnlock()
 
-		token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (interface{}, error) {
-			return store.PublicKey, nil
-		})
+		claims, err := cachedParseJWT(tokenStr)
 		if err != nil {
 			writeErr(w, 401, "invalid token")
 			return
 		}
-		claims := token.Claims.(*Claims)
-		r.Header.Set("X-User-ID", fmt.Sprintf("%d", claims.UserID))
+		// Legacy headers preserved so existing handlers that still read
+		// X-Username / X-User-ID / X-Role keep working during the
+		// migration to the typed context value below.
+		r.Header.Set("X-User-ID", strconv.FormatInt(claims.UserID, 10))
 		r.Header.Set("X-Username", claims.Username)
 		r.Header.Set("X-Role", claims.Role)
-		// Inject claims into context so handlers can access via r.Context().Value("claims")
-		//nolint:staticcheck // string key for backwards compat with handlers
+
+		// Bundle all per-request identity into one context value. This
+		// replaces the four-WithValue chain that used to allocate a
+		// new context.valueCtx node for each of UserID, Username,
+		// Role and Path.
+		ac := &cmdServerAuthCtx{
+			UserID:   claims.UserID,
+			Username: claims.Username,
+			Role:     claims.Role,
+			Path:     claims.Path,
+		}
+		//nolint:staticcheck // "claims" string key kept for backwards compat
 		ctx := context.WithValue(r.Context(), "claims", claims)
-		// Also inject the context keys that internal/middleware handlers expect,
-		// so bundled services can share code with cmd/*-service binaries.
+		ctx = context.WithValue(ctx, cmdServerAuthCtxKey, ac)
+		// Also seed the internal/middleware context keys so bundled
+		// services (which read via middleware.UserIDFromContext et al.)
+		// keep working when called through cmd/server's auth chain.
 		ctx = context.WithValue(ctx, middleware.UserIDKey, claims.UserID)
 		ctx = context.WithValue(ctx, middleware.UsernameKey, claims.Username)
 		ctx = context.WithValue(ctx, middleware.RoleKey, models.Role(claims.Role))
@@ -535,12 +627,34 @@ func auth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// cmdServerAuthCtxFromRequest pulls the bundled auth context out of the
+// request, or returns nil if the request didn't come through auth().
+func cmdServerAuthCtxFromRequest(r *http.Request) *cmdServerAuthCtx {
+	if v, ok := r.Context().Value(cmdServerAuthCtxKey).(*cmdServerAuthCtx); ok {
+		return v
+	}
+	return nil
+}
+
 func getUserID(r *http.Request) int64 {
+	if ac := cmdServerAuthCtxFromRequest(r); ac != nil {
+		return ac.UserID
+	}
 	id, _ := strconv.ParseInt(r.Header.Get("X-User-ID"), 10, 64)
 	return id
 }
 
+func getUsername(r *http.Request) string {
+	if ac := cmdServerAuthCtxFromRequest(r); ac != nil {
+		return ac.Username
+	}
+	return r.Header.Get("X-Username")
+}
+
 func getRole(r *http.Request) string {
+	if ac := cmdServerAuthCtxFromRequest(r); ac != nil {
+		return ac.Role
+	}
 	return r.Header.Get("X-Role")
 }
 
@@ -704,10 +818,10 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	refresh := generateToken(u, 7*24*time.Hour)
 	csrf := store.GenerateCSRF(u.ID)
 
-	store.mu.Lock()
+	store.refreshMu.Lock()
 	store.refreshTokens[refresh] = u.ID
 	store.refreshTokenTimes[refresh] = time.Now()
-	store.mu.Unlock()
+	store.refreshMu.Unlock()
 
 	// Determine if connection is secure (direct TLS or behind TLS-terminating proxy)
 	isSecure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
@@ -765,10 +879,10 @@ func handleDemoLogin(w http.ResponseWriter, r *http.Request) {
 	refresh := generateToken(u, 7*24*time.Hour)
 	csrf := store.GenerateCSRF(u.ID)
 
-	store.mu.Lock()
+	store.refreshMu.Lock()
 	store.refreshTokens[refresh] = u.ID
 	store.refreshTokenTimes[refresh] = time.Now()
-	store.mu.Unlock()
+	store.refreshMu.Unlock()
 
 	clientIP := extractClientIP(r)
 	userAgent := r.Header.Get("User-Agent")
@@ -813,9 +927,9 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if tokenStr != "" {
-		store.mu.Lock()
+		store.blacklistMu.Lock()
 		store.blacklist[tokenStr] = time.Now().Add(24 * time.Hour)
-		store.mu.Unlock()
+		store.blacklistMu.Unlock()
 
 		parsed, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (interface{}, error) {
 			return store.PublicKey, nil
@@ -840,12 +954,13 @@ func handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 
-	store.mu.Lock()
+	store.refreshMu.Lock()
 	userID, ok := store.refreshTokens[req.RefreshToken]
 	if ok {
 		delete(store.refreshTokens, req.RefreshToken)
+		delete(store.refreshTokenTimes, req.RefreshToken)
 	}
-	store.mu.Unlock()
+	store.refreshMu.Unlock()
 
 	if !ok {
 		writeErr(w, 401, "invalid refresh token")
@@ -861,10 +976,10 @@ func handleRefresh(w http.ResponseWriter, r *http.Request) {
 	access := generateToken(u, 24*time.Hour)
 	refresh := generateToken(u, 7*24*time.Hour)
 
-	store.mu.Lock()
+	store.refreshMu.Lock()
 	store.refreshTokens[refresh] = u.ID
 	store.refreshTokenTimes[refresh] = time.Now()
-	store.mu.Unlock()
+	store.refreshMu.Unlock()
 
 	writeJSON(w, 200, map[string]interface{}{
 		"access_token":  access,
@@ -1203,61 +1318,25 @@ func handlePlaceBet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── 5. Responsible gambling limits ──
+	// ── 5-8. Snapshot responsible-gambling limits, market status, selection
+	// validity, and the current best price in a single RLock pass. Previously
+	// this handler acquired store.mu.RLock() four separate times; collapsing
+	// to one pass eliminates three lock round-trips per bet.
 	store.mu.RLock()
 	limits := store.responsibleLimits[uid]
-	store.mu.RUnlock()
-	if limits != nil {
-		if limits.SelfExcluded {
-			writeErr(w, 403, "self-excluded: betting is disabled")
-			return
-		}
-		if limits.MaxStake > 0 && req.Stake > limits.MaxStake {
-			writeErr(w, 400, fmt.Sprintf("stake ₹%.0f exceeds your max stake limit of ₹%.0f", req.Stake, limits.MaxStake))
-			return
-		}
-	}
-
-	// ── 6. Market status check ──
-	store.mu.RLock()
 	m, marketExists := store.markets[req.MarketID]
-	store.mu.RUnlock()
-	if !marketExists {
-		writeErr(w, 404, "market not found")
-		return
+	var marketStatus, marketType string
+	if m != nil {
+		marketStatus = m.Status
+		marketType = m.MarketType
 	}
-	if m.Status != "open" {
-		writeErr(w, 400, "market is "+m.Status+", cannot place bets")
-		return
-	}
-
-	// ── 7. Selection validation — verify the selection exists in this market ──
-	store.mu.RLock()
 	marketRunners := store.runners[req.MarketID]
+	isSessionMarket := marketType == "fancy" || marketType == "session"
 	var selectionValid bool
+	var currentBestPrice float64
 	for _, runner := range marketRunners {
 		if runner.SelectionID == req.SelectionID {
 			selectionValid = true
-			break
-		}
-	}
-	store.mu.RUnlock()
-	if !selectionValid {
-		writeErr(w, 400, fmt.Sprintf("selection %d does not exist in market %s", req.SelectionID, req.MarketID))
-		return
-	}
-
-	// ── 8. STALE ODDS PROTECTION ──
-	// Match odds / Bookmaker: reject if price moved more than 0.02 from requested
-	// Fancy / Session: reject if price is not an exact match (rates must be exact)
-	store.mu.RLock()
-	var currentBestPrice float64
-	var isSessionMarket bool
-	if m, ok := store.markets[req.MarketID]; ok {
-		isSessionMarket = m.MarketType == "fancy" || m.MarketType == "session"
-	}
-	for _, runner := range marketRunners {
-		if runner.SelectionID == req.SelectionID {
 			if isSessionMarket {
 				if req.Side == "back" {
 					currentBestPrice = runner.YesRate
@@ -1277,6 +1356,38 @@ func handlePlaceBet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	store.mu.RUnlock()
+
+	// Responsible gambling limits (evaluated outside the lock using the snapshot).
+	if limits != nil {
+		if limits.SelfExcluded {
+			writeErr(w, 403, "self-excluded: betting is disabled")
+			return
+		}
+		if limits.MaxStake > 0 && req.Stake > limits.MaxStake {
+			writeErr(w, 400, fmt.Sprintf("stake ₹%.0f exceeds your max stake limit of ₹%.0f", req.Stake, limits.MaxStake))
+			return
+		}
+	}
+
+	// Market status check.
+	if !marketExists {
+		writeErr(w, 404, "market not found")
+		return
+	}
+	if marketStatus != "open" {
+		writeErr(w, 400, "market is "+marketStatus+", cannot place bets")
+		return
+	}
+
+	// Selection validation — verify the selection exists in this market.
+	if !selectionValid {
+		writeErr(w, 400, fmt.Sprintf("selection %d does not exist in market %s", req.SelectionID, req.MarketID))
+		return
+	}
+
+	// ── Stale odds protection ──
+	// Match odds / Bookmaker: reject if price moved more than 0.02 from requested
+	// Fancy / Session: reject if price is not an exact match (rates must be exact)
 
 	if currentBestPrice > 0 {
 		absDrift := req.Price - currentBestPrice
@@ -2277,14 +2388,24 @@ func handlePanelUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	wasSuperadmin := false
 	store.mu.Lock()
 	if u, ok := store.users[targetID]; ok {
+		if u.Role == "superadmin" {
+			wasSuperadmin = true
+		}
 		u.Status = req.Status
 	}
 	store.mu.Unlock()
 
 	if useDB() {
 		dbUpdateUserStatus(targetID, req.Status)
+	}
+
+	// If a superadmin's state changed, refresh the cached superadmin list
+	// that NotifyHierarchy uses for fan-out.
+	if wasSuperadmin {
+		store.refreshSuperadminCache()
 	}
 
 	store.AddAudit(uid, r.Header.Get("X-Username"), "status_change",
@@ -2825,10 +2946,10 @@ func handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 	refresh := generateToken(u, 7*24*time.Hour)
 	csrf := store.GenerateCSRF(u.ID)
 
-	store.mu.Lock()
+	store.refreshMu.Lock()
 	store.refreshTokens[refresh] = u.ID
 	store.refreshTokenTimes[refresh] = time.Now()
-	store.mu.Unlock()
+	store.refreshMu.Unlock()
 
 	w.Header().Set("X-CSRF-Token", csrf)
 	logger.Info("user logged in via OTP", "id", u.ID, "username", u.Username)
@@ -3090,13 +3211,14 @@ func handleGetSessions(w http.ResponseWriter, r *http.Request) {
 func handleLogoutAllSessions(w http.ResponseWriter, r *http.Request) {
 	uid := getUserID(r)
 	// Revoke all refresh tokens for this user
-	store.mu.Lock()
+	store.refreshMu.Lock()
 	for token, id := range store.refreshTokens {
 		if id == uid {
 			delete(store.refreshTokens, token)
+			delete(store.refreshTokenTimes, token)
 		}
 	}
-	store.mu.Unlock()
+	store.refreshMu.Unlock()
 
 	store.AddAudit(uid, r.Header.Get("X-Username"), "logout_all", "all sessions terminated", r.RemoteAddr)
 	writeJSON(w, 200, map[string]string{"message": "all sessions terminated"})

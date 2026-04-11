@@ -76,8 +76,20 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
-	db.SetMaxOpenConns(cfg.DBMaxOpenConns)
-	db.SetMaxIdleConns(cfg.DBMaxIdleConns)
+	// Gateway only talks to the DB for auth token validation and session
+	// lookups — everything else is proxied to downstream services. A
+	// small pool avoids wasting connection slots that the wallet and
+	// matching services need. Env-provided DB_MAX_*_CONNS still wins.
+	gwMaxOpen := cfg.DBMaxOpenConns
+	if os.Getenv("DB_MAX_OPEN_CONNS") == "" {
+		gwMaxOpen = 10
+	}
+	gwMaxIdle := cfg.DBMaxIdleConns
+	if os.Getenv("DB_MAX_IDLE_CONNS") == "" {
+		gwMaxIdle = 5
+	}
+	db.SetMaxOpenConns(gwMaxOpen)
+	db.SetMaxIdleConns(gwMaxIdle)
 	db.SetConnMaxLifetime(cfg.DBConnMaxLifetime)
 
 	rdb := redis.NewClient(&redis.Options{

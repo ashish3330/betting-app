@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"hash/fnv"
 	"log/slog"
 	"net"
 	"net/http"
@@ -215,17 +216,30 @@ func RateLimiter(rps int, burst int) func(http.Handler) http.Handler {
 	return PerIPRateLimiter(rps, burst)
 }
 
-// IPRateLimiter implements per-key rate limiting (keyed by IP or user ID).
-type IPRateLimiter struct {
-	mu       sync.Mutex
-	limiters map[string]*rateLimiterEntry
-	rps      rate.Limit
-	burst    int
-}
+// numRateLimiterShards controls how many independent mutex-guarded buckets
+// the IP rate limiter splits its map across. At 32 shards, the probability
+// of two random keys colliding on the same mutex is ~3%, which effectively
+// eliminates the single-mutex contention we saw under load.
+const numRateLimiterShards = 32
 
 type rateLimiterEntry struct {
 	limiter  *rate.Limiter
 	lastSeen time.Time
+}
+
+type rateLimiterShard struct {
+	mu       sync.Mutex
+	limiters map[string]*rateLimiterEntry
+}
+
+// IPRateLimiter implements per-key rate limiting (keyed by IP or user ID).
+// The map of per-key rate.Limiter instances is sharded across multiple
+// mutex-guarded buckets so that concurrent GetLimiter calls for unrelated
+// keys rarely contend on the same lock.
+type IPRateLimiter struct {
+	shards [numRateLimiterShards]rateLimiterShard
+	rps    rate.Limit
+	burst  int
 }
 
 // NewIPRateLimiter creates a rate limiter with a background cleanup goroutine
@@ -233,9 +247,11 @@ type rateLimiterEntry struct {
 // cleanup goroutine exits, preventing goroutine leaks.
 func NewIPRateLimiter(ctx context.Context, rps int, burst int) *IPRateLimiter {
 	rl := &IPRateLimiter{
-		limiters: make(map[string]*rateLimiterEntry),
-		rps:      rate.Limit(rps),
-		burst:    burst,
+		rps:   rate.Limit(rps),
+		burst: burst,
+	}
+	for i := 0; i < numRateLimiterShards; i++ {
+		rl.shards[i].limiters = make(map[string]*rateLimiterEntry)
 	}
 	// Cleanup stale entries every 3 minutes; stops when ctx is cancelled.
 	go func() {
@@ -253,16 +269,26 @@ func NewIPRateLimiter(ctx context.Context, rps int, burst int) *IPRateLimiter {
 	return rl
 }
 
-func (rl *IPRateLimiter) getLimiter(ip string) *rate.Limiter {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	entry, exists := rl.limiters[ip]
+// shardFor picks the shard that owns the given key via an FNV-1a hash.
+// FNV is fast, allocation-free, and gives us good distribution for
+// IPv4/IPv6 strings and "user:<id>" keys.
+func (rl *IPRateLimiter) shardFor(key string) *rateLimiterShard {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	return &rl.shards[h.Sum32()%numRateLimiterShards]
+}
+
+func (rl *IPRateLimiter) getLimiter(key string) *rate.Limiter {
+	shard := rl.shardFor(key)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	entry, exists := shard.limiters[key]
 	if !exists {
 		entry = &rateLimiterEntry{
 			limiter:  rate.NewLimiter(rl.rps, rl.burst),
 			lastSeen: time.Now(),
 		}
-		rl.limiters[ip] = entry
+		shard.limiters[key] = entry
 		return entry.limiter
 	}
 	entry.lastSeen = time.Now()
@@ -270,13 +296,18 @@ func (rl *IPRateLimiter) getLimiter(ip string) *rate.Limiter {
 }
 
 func (rl *IPRateLimiter) cleanup() {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
 	cutoff := time.Now().Add(-5 * time.Minute)
-	for ip, entry := range rl.limiters {
-		if entry.lastSeen.Before(cutoff) {
-			delete(rl.limiters, ip)
+	// Iterate shards one at a time so we never hold more than one shard
+	// lock simultaneously — ruling out any lock-ordering deadlocks.
+	for i := 0; i < numRateLimiterShards; i++ {
+		shard := &rl.shards[i]
+		shard.mu.Lock()
+		for k, entry := range shard.limiters {
+			if entry.lastSeen.Before(cutoff) {
+				delete(shard.limiters, k)
+			}
 		}
+		shard.mu.Unlock()
 	}
 }
 

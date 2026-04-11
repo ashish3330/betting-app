@@ -9,6 +9,7 @@ import (
 
 	"github.com/lotus-exchange/lotus-exchange/internal/models"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/sync/singleflight"
 )
 
 // NATSPublisher is the interface for publishing messages to NATS.
@@ -23,6 +24,14 @@ type Service struct {
 	redis    *redis.Client
 	logger   *slog.Logger
 	nats     NATSPublisher // optional; when set, publishes each update to NATS once
+
+	// sf coalesces concurrent upstream fetches for the same key so that
+	// only one request reaches the provider during a cache-miss stampede.
+	// The rest of the callers block on the in-flight request and share
+	// the result. This is the classic cache-stampede / thundering-herd
+	// fix and is especially valuable for the mock/Entity Sports provider
+	// during odds TTL expiry on hot markets.
+	sf singleflight.Group
 }
 
 func NewService(provider OddsProvider, rdb *redis.Client, logger *slog.Logger) *Service {
@@ -46,18 +55,34 @@ func (s *Service) Provider() OddsProvider { return s.provider }
 // ---------------------------------------------------------------------------
 
 func (s *Service) FetchMarkets(ctx context.Context, sport string) ([]*models.Market, error) {
-	markets, err := s.provider.FetchMarkets(ctx, sport)
+	// Singleflight coalesces concurrent cache-miss fetches for the same
+	// sport so we only hit the upstream provider once per wave.
+	v, err, _ := s.sf.Do("markets:"+sport, func() (interface{}, error) {
+		markets, err := s.provider.FetchMarkets(ctx, sport)
+		if err != nil {
+			return nil, fmt.Errorf("fetch markets from %s: %w", s.provider.Name(), err)
+		}
+
+		// Cache each market in Redis with a single pipelined round-trip
+		// instead of N separate SET RPCs.
+		if len(markets) > 0 {
+			pipe := s.redis.Pipeline()
+			for _, m := range markets {
+				data, _ := json.Marshal(m)
+				pipe.Set(ctx, fmt.Sprintf("market:%s", m.ID), data, 60*time.Second)
+			}
+			if _, perr := pipe.Exec(ctx); perr != nil {
+				s.logger.WarnContext(ctx, "odds redis pipeline failed",
+					"op", "FetchMarkets", "sport", sport, "error", perr)
+			}
+		}
+
+		return markets, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("fetch markets from %s: %w", s.provider.Name(), err)
+		return nil, err
 	}
-
-	// Cache each market in Redis
-	for _, m := range markets {
-		data, _ := json.Marshal(m)
-		s.redis.Set(ctx, fmt.Sprintf("market:%s", m.ID), data, 60*time.Second)
-	}
-
-	return markets, nil
+	return v.([]*models.Market), nil
 }
 
 func (s *Service) GetCachedMarket(ctx context.Context, marketID string) (*models.Market, error) {
@@ -78,48 +103,87 @@ func (s *Service) GetCachedMarket(ctx context.Context, marketID string) (*models
 // ---------------------------------------------------------------------------
 
 func (s *Service) FetchCompetitions(ctx context.Context, sport string) ([]*models.Competition, error) {
-	comps, err := s.provider.FetchCompetitions(ctx, sport)
+	v, err, _ := s.sf.Do("competitions:"+sport, func() (interface{}, error) {
+		comps, err := s.provider.FetchCompetitions(ctx, sport)
+		if err != nil {
+			return nil, fmt.Errorf("fetch competitions from %s: %w", s.provider.Name(), err)
+		}
+
+		// Pipelined cache writes — one round-trip instead of N.
+		if len(comps) > 0 {
+			pipe := s.redis.Pipeline()
+			for _, c := range comps {
+				data, _ := json.Marshal(c)
+				pipe.Set(ctx, fmt.Sprintf("competition:%s", c.ID), data, 5*time.Minute)
+			}
+			if _, perr := pipe.Exec(ctx); perr != nil {
+				s.logger.WarnContext(ctx, "odds redis pipeline failed",
+					"op", "FetchCompetitions", "sport", sport, "error", perr)
+			}
+		}
+
+		return comps, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("fetch competitions from %s: %w", s.provider.Name(), err)
+		return nil, err
 	}
-
-	// Cache competitions
-	for _, c := range comps {
-		data, _ := json.Marshal(c)
-		s.redis.Set(ctx, fmt.Sprintf("competition:%s", c.ID), data, 5*time.Minute)
-	}
-
-	return comps, nil
+	return v.([]*models.Competition), nil
 }
 
 func (s *Service) FetchEvents(ctx context.Context, competitionID string) ([]*models.Event, error) {
-	events, err := s.provider.FetchEvents(ctx, competitionID)
+	v, err, _ := s.sf.Do("events:"+competitionID, func() (interface{}, error) {
+		events, err := s.provider.FetchEvents(ctx, competitionID)
+		if err != nil {
+			return nil, fmt.Errorf("fetch events from %s: %w", s.provider.Name(), err)
+		}
+
+		// Pipelined cache writes — one round-trip instead of N.
+		if len(events) > 0 {
+			pipe := s.redis.Pipeline()
+			for _, e := range events {
+				data, _ := json.Marshal(e)
+				pipe.Set(ctx, fmt.Sprintf("event:%s", e.ID), data, 2*time.Minute)
+			}
+			if _, perr := pipe.Exec(ctx); perr != nil {
+				s.logger.WarnContext(ctx, "odds redis pipeline failed",
+					"op", "FetchEvents", "competition", competitionID, "error", perr)
+			}
+		}
+
+		return events, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("fetch events from %s: %w", s.provider.Name(), err)
+		return nil, err
 	}
-
-	// Cache events
-	for _, e := range events {
-		data, _ := json.Marshal(e)
-		s.redis.Set(ctx, fmt.Sprintf("event:%s", e.ID), data, 2*time.Minute)
-	}
-
-	return events, nil
+	return v.([]*models.Event), nil
 }
 
 func (s *Service) FetchMarketsByEvent(ctx context.Context, eventID string) ([]*models.Market, error) {
-	markets, err := s.provider.FetchMarketsByEvent(ctx, eventID)
+	v, err, _ := s.sf.Do("markets-by-event:"+eventID, func() (interface{}, error) {
+		markets, err := s.provider.FetchMarketsByEvent(ctx, eventID)
+		if err != nil {
+			return nil, fmt.Errorf("fetch markets by event from %s: %w", s.provider.Name(), err)
+		}
+
+		// Pipelined cache writes — one round-trip instead of N.
+		if len(markets) > 0 {
+			pipe := s.redis.Pipeline()
+			for _, m := range markets {
+				data, _ := json.Marshal(m)
+				pipe.Set(ctx, fmt.Sprintf("market:%s", m.ID), data, 60*time.Second)
+			}
+			if _, perr := pipe.Exec(ctx); perr != nil {
+				s.logger.WarnContext(ctx, "odds redis pipeline failed",
+					"op", "FetchMarketsByEvent", "event", eventID, "error", perr)
+			}
+		}
+
+		return markets, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("fetch markets by event from %s: %w", s.provider.Name(), err)
+		return nil, err
 	}
-
-	// Cache each market
-	for _, m := range markets {
-		data, _ := json.Marshal(m)
-		s.redis.Set(ctx, fmt.Sprintf("market:%s", m.ID), data, 60*time.Second)
-	}
-
-	return markets, nil
+	return v.([]*models.Market), nil
 }
 
 func (s *Service) GetCachedEvent(ctx context.Context, eventID string) (*models.Event, error) {
@@ -194,16 +258,25 @@ func (s *Service) StartSubscription(ctx context.Context, marketIDs []string) (<-
 }
 
 func (s *Service) GetLatestOdds(ctx context.Context, marketID string) (*models.OddsUpdate, error) {
-	data, err := s.redis.Get(ctx, fmt.Sprintf("odds:market:%s", marketID)).Bytes()
-	if err != nil {
-		return nil, fmt.Errorf("no cached odds: %w", err)
-	}
+	// Singleflight guards against concurrent Redis lookups for the same
+	// market during a cache miss: a storm of clients all hitting the
+	// same hot market will collapse onto one Redis GET + Unmarshal.
+	v, err, _ := s.sf.Do("odds:"+marketID, func() (interface{}, error) {
+		data, err := s.redis.Get(ctx, fmt.Sprintf("odds:market:%s", marketID)).Bytes()
+		if err != nil {
+			return nil, fmt.Errorf("no cached odds: %w", err)
+		}
 
-	var update models.OddsUpdate
-	if err := json.Unmarshal(data, &update); err != nil {
-		return nil, fmt.Errorf("unmarshal odds: %w", err)
+		var update models.OddsUpdate
+		if err := json.Unmarshal(data, &update); err != nil {
+			return nil, fmt.Errorf("unmarshal odds: %w", err)
+		}
+		return &update, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return &update, nil
+	return v.(*models.OddsUpdate), nil
 }
 
 // ---------------------------------------------------------------------------

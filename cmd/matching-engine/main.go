@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -32,7 +33,12 @@ func main() {
 	port := getEnv("MATCHING_SERVICE_PORT", "8083")
 	log.Info("starting matching-engine service", "port", port, "env", env)
 
-	db, err := service.OpenPostgres(ctx, getEnv("DATABASE_URL", ""), 25, 10, 5*time.Minute)
+	// Matching engine drives the busiest DB workload in the platform
+	// (bet placement, settlement, ledger writes) so the pool defaults
+	// are bumped unless DB_MAX_*_CONNS is explicitly set in the env.
+	maxOpen := getIntEnv("DB_MAX_OPEN_CONNS", 50)
+	maxIdle := getIntEnv("DB_MAX_IDLE_CONNS", 20)
+	db, err := service.OpenPostgres(ctx, getEnv("DATABASE_URL", ""), maxOpen, maxIdle, 5*time.Minute)
 	if err != nil {
 		log.Error("db", "err", err)
 		os.Exit(1)
@@ -206,6 +212,15 @@ func main() {
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func getIntEnv(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return fallback
 }

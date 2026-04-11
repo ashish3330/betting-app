@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -103,6 +104,15 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+func getIntEnv(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
 func errStr(err error) string {
 	if err != nil {
 		return err.Error()
@@ -154,7 +164,12 @@ func main() {
 	port := getEnv("WALLET_SERVICE_PORT", "8082")
 	log.Info("starting wallet service", "port", port, "env", env)
 
-	db, err := service.OpenPostgres(ctx, getEnv("DATABASE_URL", ""), 25, 10, 5*time.Minute)
+	// Wallet service handles the money-path: ledger reads/writes, balance
+	// checks and exposure updates. Bump the pool defaults to match the
+	// real concurrency; DB_MAX_*_CONNS in the environment still wins.
+	walletMaxOpen := getIntEnv("DB_MAX_OPEN_CONNS", 50)
+	walletMaxIdle := getIntEnv("DB_MAX_IDLE_CONNS", 20)
+	db, err := service.OpenPostgres(ctx, getEnv("DATABASE_URL", ""), walletMaxOpen, walletMaxIdle, 5*time.Minute)
 	if err != nil {
 		log.Error("db", "err", err)
 		os.Exit(1)

@@ -36,7 +36,19 @@ func main() {
 	port := getEnv("NOTIFICATION_SERVICE_PORT", "8091")
 	log.Info("starting notification service", "port", port, "env", cfg.Environment)
 
-	db, err := service.OpenPostgres(ctx, cfg.DatabaseURL, cfg.DBMaxOpenConns, cfg.DBMaxIdleConns, cfg.DBConnMaxLifetime)
+	// Notification service mostly reads outbox rows and writes a small
+	// amount of delivery state — it does not need a big pool. Shrink the
+	// defaults so wallet/matching get the headroom. Env-provided
+	// DB_MAX_*_CONNS still wins.
+	notifMaxOpen := cfg.DBMaxOpenConns
+	if os.Getenv("DB_MAX_OPEN_CONNS") == "" {
+		notifMaxOpen = 10
+	}
+	notifMaxIdle := cfg.DBMaxIdleConns
+	if os.Getenv("DB_MAX_IDLE_CONNS") == "" {
+		notifMaxIdle = 5
+	}
+	db, err := service.OpenPostgres(ctx, cfg.DatabaseURL, notifMaxOpen, notifMaxIdle, cfg.DBConnMaxLifetime)
 	if err != nil {
 		log.Error("db", "err", err)
 		os.Exit(1)
