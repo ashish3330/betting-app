@@ -748,6 +748,70 @@ func (s *Service) GetStatements(ctx context.Context, userID int64, from, to time
 }
 
 // ---------------------------------------------------------------------------
+// GetPaymentHistory
+// ---------------------------------------------------------------------------
+
+// PaymentHistoryEntry is a lightweight view of a payment_transactions row
+// returned by the wallet service's deposit/withdrawal listing aliases. It
+// intentionally lives in the wallet package to avoid an import cycle with
+// the payment package.
+type PaymentHistoryEntry struct {
+	ID            string     `json:"id"`
+	UserID        int64      `json:"user_id"`
+	Direction     string     `json:"direction"`
+	Method        string     `json:"method"`
+	Amount        float64    `json:"amount"`
+	Currency      string     `json:"currency"`
+	Status        string     `json:"status"`
+	ProviderRef   string     `json:"provider_ref,omitempty"`
+	UPIID         string     `json:"upi_id,omitempty"`
+	WalletAddress string     `json:"wallet_address,omitempty"`
+	TxHash        string     `json:"tx_hash,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	CompletedAt   *time.Time `json:"completed_at,omitempty"`
+}
+
+// GetPaymentHistory returns the payment_transactions rows for a user filtered
+// by direction ("deposit" or "withdrawal"), newest first. NULL text columns
+// are COALESCED to empty strings so the scan is safe into plain `string`.
+func (s *Service) GetPaymentHistory(ctx context.Context, userID int64, direction string, limit, offset int) ([]*PaymentHistoryEntry, error) {
+	if direction != "deposit" && direction != "withdrawal" {
+		return nil, fmt.Errorf("get payment history: invalid direction %q", direction)
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, user_id, direction, method, amount, currency, status,
+		        COALESCE(provider_ref, ''), COALESCE(upi_id, ''),
+		        COALESCE(wallet_address, ''), COALESCE(tx_hash, ''),
+		        created_at, completed_at
+		 FROM payment_transactions
+		 WHERE user_id = $1 AND direction = $2
+		 ORDER BY created_at DESC
+		 LIMIT $3 OFFSET $4`,
+		userID, direction, limit, offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get payment history: query: %w", err)
+	}
+	defer rows.Close()
+
+	entries := make([]*PaymentHistoryEntry, 0)
+	for rows.Next() {
+		e := &PaymentHistoryEntry{}
+		if err := rows.Scan(&e.ID, &e.UserID, &e.Direction, &e.Method, &e.Amount,
+			&e.Currency, &e.Status, &e.ProviderRef, &e.UPIID, &e.WalletAddress,
+			&e.TxHash, &e.CreatedAt, &e.CompletedAt); err != nil {
+			return nil, fmt.Errorf("get payment history: scan: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("get payment history: rows iteration: %w", err)
+	}
+	return entries, nil
+}
+
+// ---------------------------------------------------------------------------
 // GetLedger
 // ---------------------------------------------------------------------------
 

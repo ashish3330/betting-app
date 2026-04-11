@@ -75,6 +75,9 @@ func main() {
 	protected := http.NewServeMux()
 	protected.HandleFunc("GET /api/v1/risk/market/{id}", handler.MarketExposure)
 	protected.HandleFunc("GET /api/v1/risk/user/{id}", handler.UserExposure)
+	// /api/v1/risk/exposure returns the caller's own exposure breakdown; no
+	// admin role required.
+	protected.HandleFunc("GET /api/v1/risk/exposure", handler.MyExposure)
 	mux.Handle("/api/v1/risk/", authMw(protected))
 
 	// Prometheus scrape endpoint

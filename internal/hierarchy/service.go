@@ -208,6 +208,106 @@ func (s *Service) IsUserSelfExcluded(ctx context.Context, userID int64) (bool, t
 	return true, until, nil
 }
 
+// GetReferralCode returns the referral_code for a given user, or an empty
+// string if the column is blank.
+func (s *Service) GetReferralCode(ctx context.Context, userID int64) (string, error) {
+	var code sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(referral_code, '') FROM users WHERE id = $1`,
+		userID,
+	).Scan(&code)
+	if err != nil {
+		return "", fmt.Errorf("get referral code: %w", err)
+	}
+	return code.String, nil
+}
+
+// ReferralStats mirrors the shape returned by the monolith's GetReferralStats
+// so frontend code can consume either service transparently.
+type ReferralStats struct {
+	ReferralCode   string         `json:"referral_code"`
+	ReferralLink   string         `json:"referral_link"`
+	TotalReferrals int            `json:"total_referrals"`
+	TotalEarnings  float64        `json:"total_earnings"`
+	ReferredUsers  []ReferredUser `json:"referred_users"`
+}
+
+// ReferredUser is a single row in ReferralStats.ReferredUsers.
+type ReferredUser struct {
+	Username string  `json:"username"`
+	JoinedAt string  `json:"joined_at"`
+	Status   string  `json:"status"`
+	Earnings float64 `json:"earnings"`
+}
+
+// GetReferralStats returns the referral code plus aggregated stats for a user.
+//
+// The auth.users table in the microservices migration set does not declare a
+// `referred_by` column (it is only ALTER-ed in by the monolith's bootstrap
+// path), so the count-and-aggregate query is guarded by a pg_catalog lookup.
+// If the column is not present we simply return zero totals rather than
+// erroring out — the caller still gets a usable, well-formed response.
+func (s *Service) GetReferralStats(ctx context.Context, userID int64) (*ReferralStats, error) {
+	code, err := s.GetReferralCode(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	stats := &ReferralStats{
+		ReferralCode:  code,
+		ReferralLink:  "https://lotusexchange.com/register?ref=" + code,
+		ReferredUsers: []ReferredUser{},
+	}
+
+	// Detect column presence once per call — cheap and avoids the need for a
+	// global schema cache in what is a read-only listing endpoint.
+	var hasReferredBy bool
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS (
+		   SELECT 1 FROM information_schema.columns
+		   WHERE table_schema = 'auth'
+		     AND table_name = 'users'
+		     AND column_name = 'referred_by'
+		 )`,
+	).Scan(&hasReferredBy); err != nil {
+		return nil, fmt.Errorf("check referred_by column: %w", err)
+	}
+
+	if !hasReferredBy {
+		return stats, nil
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT username, COALESCE(to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SSOF'), ''), status
+		 FROM users
+		 WHERE referred_by = $1
+		 ORDER BY created_at DESC`,
+		userID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list referred users: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var ru ReferredUser
+		if err := rows.Scan(&ru.Username, &ru.JoinedAt, &ru.Status); err != nil {
+			return nil, fmt.Errorf("scan referred user: %w", err)
+		}
+		// Match the monolith's mock earnings formula (1% of a notional 1000
+		// first-deposit). Real earnings accounting lives in the reporting
+		// pipeline; this endpoint is just for the referral dashboard card.
+		ru.Earnings = 10.0
+		stats.TotalEarnings += ru.Earnings
+		stats.ReferredUsers = append(stats.ReferredUsers, ru)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate referred users: %w", err)
+	}
+	stats.TotalReferrals = len(stats.ReferredUsers)
+	return stats, nil
+}
+
 func (s *Service) IsAncestor(ctx context.Context, ancestorID, descendantID int64) (bool, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx,

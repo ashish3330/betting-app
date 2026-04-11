@@ -99,14 +99,22 @@ func main() {
 	}
 	mux.Handle("GET /health", service.HealthHandler("reporting-service", checks))
 
-	// Admin-only reporting routes
+	// /api/v1/reports/pnl is available to any authenticated user — the
+	// handler scopes the query to the caller's own user_id. The remaining
+	// reporting endpoints stay admin-only. We register two separate muxes
+	// so each can have its own middleware chain, and mount pnl on the outer
+	// mux first so Go's ServeMux picks the more specific pattern over the
+	// /api/v1/reports/ prefix.
+	userReportsMux := http.NewServeMux()
+	userReportsMux.HandleFunc("GET /api/v1/reports/pnl", handler.GetPnL)
+
 	adminMux := http.NewServeMux()
 	adminMux.HandleFunc("GET /api/v1/reports/dashboard", handler.GetDashboard)
 	adminMux.HandleFunc("GET /api/v1/reports/volume", handler.GetBetVolume)
-	adminMux.HandleFunc("GET /api/v1/reports/pnl", handler.GetPnL)
 	adminMux.HandleFunc("GET /api/v1/reports/market/{id}", handler.GetMarketReport)
 	adminMux.HandleFunc("GET /api/v1/reports/hierarchy/pnl", handler.GetHierarchyPnL)
 
+	mux.Handle("GET /api/v1/reports/pnl", authMw(userReportsMux))
 	mux.Handle("/api/v1/reports/", authMw(requireAdmin(adminMux)))
 
 	// Prometheus scrape endpoint

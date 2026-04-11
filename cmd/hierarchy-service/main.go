@@ -102,6 +102,8 @@ func main() {
 
 	mux.Handle("/api/v1/hierarchy/", authMw(protectedMux))
 	mux.Handle("/api/v1/responsible-gambling/", authMw(protectedMux))
+	mux.Handle("/api/v1/responsible/", authMw(protectedMux))
+	mux.Handle("/api/v1/referral/", authMw(protectedMux))
 	mux.Handle("/api/v1/kyc/", authMw(protectedMux))
 
 	// ── Admin routes (require auth + admin role) ────────────────

@@ -354,6 +354,8 @@ func main() {
 	protectedMux.HandleFunc("GET /api/v1/wallet/balance", walletHandler.GetBalance)
 	protectedMux.HandleFunc("GET /api/v1/wallet/ledger", walletHandler.GetLedger)
 	protectedMux.HandleFunc("GET /api/v1/wallet/statement", walletHandler.GetStatement)
+	protectedMux.HandleFunc("GET /api/v1/wallet/deposits", walletHandler.GetDeposits)
+	protectedMux.HandleFunc("GET /api/v1/wallet/withdrawals", walletHandler.GetWithdrawals)
 	protectedMux.HandleFunc("POST /api/v1/wallet/deposit", walletHandler.Deposit)
 
 	mux.Handle("/api/v1/wallet/", authMw(protectedMux))

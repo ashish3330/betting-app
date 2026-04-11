@@ -22,6 +22,15 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/responsible-gambling/self-exclude", h.SelfExclude)
 	mux.HandleFunc("POST /api/v1/responsible-gambling/cooling-off", h.CoolingOff)
 	mux.HandleFunc("GET /api/v1/responsible-gambling/session", h.SessionInfo)
+
+	// Short-form /responsible/* aliases. These match the URLs used by the
+	// frontend and the integration test suite, which never adopted the
+	// longer /responsible-gambling/ prefix used by the original monolith.
+	mux.HandleFunc("GET /api/v1/responsible/limits", h.GetLimits)
+	mux.HandleFunc("PUT /api/v1/responsible/limits", h.UpdateLimits)
+	mux.HandleFunc("POST /api/v1/responsible/self-exclude", h.SelfExclude)
+	mux.HandleFunc("POST /api/v1/responsible/cooling-off", h.CoolingOff)
+	mux.HandleFunc("GET /api/v1/responsible/session", h.SessionInfo)
 }
 
 func (h *Handler) GetLimits(w http.ResponseWriter, r *http.Request) {

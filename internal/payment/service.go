@@ -400,8 +400,10 @@ func (s *Service) completeDeposit(ctx context.Context, txID string, userID int64
 func (s *Service) GetTransaction(ctx context.Context, txID string) (*Transaction, error) {
 	tx := &Transaction{}
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, user_id, direction, method, amount, currency, status, provider_ref,
-		        upi_id, wallet_address, tx_hash, created_at, completed_at
+		`SELECT id, user_id, direction, method, amount, currency, status,
+		        COALESCE(provider_ref, ''), COALESCE(upi_id, ''),
+		        COALESCE(wallet_address, ''), COALESCE(tx_hash, ''),
+		        created_at, completed_at
 		 FROM payment_transactions WHERE id = $1`,
 		txID,
 	).Scan(&tx.ID, &tx.UserID, &tx.Direction, &tx.Method, &tx.Amount, &tx.Currency,
@@ -414,29 +416,40 @@ func (s *Service) GetTransaction(ctx context.Context, txID string) (*Transaction
 }
 
 func (s *Service) GetUserTransactions(ctx context.Context, userID int64, limit, offset int) ([]*Transaction, error) {
+	// The text columns provider_ref, upi_id, wallet_address and tx_hash are
+	// all nullable in the schema, but the Transaction struct scans them into
+	// plain `string`. Without COALESCE any row created with NULLs (e.g. a UPI
+	// deposit whose wallet_address is unused) would fail the scan with
+	// "converting NULL to string is unsupported" — this was the bug that made
+	// the list query look "broken".
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, user_id, direction, method, amount, currency, status, provider_ref,
-		        upi_id, wallet_address, tx_hash, created_at, completed_at
+		`SELECT id, user_id, direction, method, amount, currency, status,
+		        COALESCE(provider_ref, ''), COALESCE(upi_id, ''),
+		        COALESCE(wallet_address, ''), COALESCE(tx_hash, ''),
+		        created_at, completed_at
 		 FROM payment_transactions WHERE user_id = $1
 		 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
 		userID, limit, offset,
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get user transactions: query: %w", err)
 	}
 	defer rows.Close()
 
-	var txns []*Transaction
+	txns := make([]*Transaction, 0)
 	for rows.Next() {
 		tx := &Transaction{}
 		if err := rows.Scan(&tx.ID, &tx.UserID, &tx.Direction, &tx.Method, &tx.Amount,
 			&tx.Currency, &tx.Status, &tx.ProviderRef, &tx.UPIId, &tx.WalletAddress,
 			&tx.TxHash, &tx.CreatedAt, &tx.CompletedAt); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("get user transactions: scan: %w", err)
 		}
 		txns = append(txns, tx)
 	}
-	return txns, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("get user transactions: rows iteration: %w", err)
+	}
+	return txns, nil
 }
 
 func (s *Service) verifyRazorpaySignature(payload []byte, signature string) bool {

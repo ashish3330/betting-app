@@ -23,6 +23,8 @@ func NewHandler(service *Service) *Handler {
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/wallet/balance", h.GetBalance)
 	mux.HandleFunc("GET /api/v1/wallet/ledger", h.GetLedger)
+	mux.HandleFunc("GET /api/v1/wallet/deposits", h.GetDeposits)
+	mux.HandleFunc("GET /api/v1/wallet/withdrawals", h.GetWithdrawals)
 	mux.HandleFunc("POST /api/v1/wallet/deposit", h.Deposit)
 }
 
@@ -95,6 +97,60 @@ func (h *Handler) GetLedger(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Error("get ledger failed", "error", err, "user_id", userID)
 		httputil.WriteError(w, http.StatusInternalServerError, "failed to retrieve ledger")
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, entries)
+}
+
+// GetDeposits lists the authenticated user's deposit payment transactions.
+// Backed by betting.payment_transactions WHERE direction='deposit'.
+func (h *Handler) GetDeposits(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+
+	limit := 50
+	offset := 0
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 100 {
+			limit = v
+		}
+	}
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if v, err := strconv.Atoi(o); err == nil && v >= 0 {
+			offset = v
+		}
+	}
+
+	entries, err := h.service.GetPaymentHistory(r.Context(), userID, "deposit", limit, offset)
+	if err != nil {
+		slog.Error("get deposits failed", "error", err, "user_id", userID)
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to retrieve deposits")
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, entries)
+}
+
+// GetWithdrawals lists the authenticated user's withdrawal payment transactions.
+// Backed by betting.payment_transactions WHERE direction='withdrawal'.
+func (h *Handler) GetWithdrawals(w http.ResponseWriter, r *http.Request) {
+	userID := middleware.UserIDFromContext(r.Context())
+
+	limit := 50
+	offset := 0
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 100 {
+			limit = v
+		}
+	}
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if v, err := strconv.Atoi(o); err == nil && v >= 0 {
+			offset = v
+		}
+	}
+
+	entries, err := h.service.GetPaymentHistory(r.Context(), userID, "withdrawal", limit, offset)
+	if err != nil {
+		slog.Error("get withdrawals failed", "error", err, "user_id", userID)
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to retrieve withdrawals")
 		return
 	}
 	httputil.WriteJSON(w, http.StatusOK, entries)
