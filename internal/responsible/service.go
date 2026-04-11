@@ -3,6 +3,7 @@ package responsible
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -91,7 +92,7 @@ func (s *Service) UpdateLimits(ctx context.Context, userID int64, req *UpdateLim
 	if err != nil {
 		return nil, fmt.Errorf("begin update-limits tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Lock the row to prevent concurrent modifications
 	current := &GamblingLimits{UserID: userID}
@@ -261,7 +262,7 @@ func (s *Service) SelfExclude(ctx context.Context, userID int64, req *SelfExclus
 	if err != nil {
 		return fmt.Errorf("begin self-exclude tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	_, err = tx.ExecContext(ctx,
 		`UPDATE responsible_gambling SET self_excluded_until = $1, updated_at = NOW() WHERE user_id = $2`,
@@ -331,9 +332,9 @@ func (s *Service) CheckCanBet(ctx context.Context, userID int64, stake float64) 
 	if err != nil {
 		return fmt.Errorf("begin check-can-bet tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
-	limits := &GamblingLimits{UserID: userID}
+	limits := &GamblingLimits{}
 	err = tx.QueryRowContext(ctx,
 		`SELECT daily_deposit_limit, weekly_deposit_limit, monthly_deposit_limit,
 		        daily_loss_limit, max_stake_per_bet, session_time_limit_mins,
@@ -397,12 +398,14 @@ func (s *Service) CheckDepositLimit(ctx context.Context, userID int64, amount fl
 
 	// Check daily deposit limit
 	var dailyDeposits float64
-	s.db.QueryRowContext(ctx,
+	if err := s.db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(amount), 0) FROM payment_transactions
 		 WHERE user_id = $1 AND direction = 'deposit' AND status = 'completed'
 		 AND created_at >= CURRENT_DATE`,
 		userID,
-	).Scan(&dailyDeposits)
+	).Scan(&dailyDeposits); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("sum daily deposits: %w", err)
+	}
 
 	if dailyDeposits+amount > limits.DailyDepositLimit {
 		return fmt.Errorf("daily deposit limit of %.2f would be exceeded (current: %.2f)", limits.DailyDepositLimit, dailyDeposits)
@@ -410,12 +413,14 @@ func (s *Service) CheckDepositLimit(ctx context.Context, userID int64, amount fl
 
 	// Check weekly deposit limit
 	var weeklyDeposits float64
-	s.db.QueryRowContext(ctx,
+	if err := s.db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(amount), 0) FROM payment_transactions
 		 WHERE user_id = $1 AND direction = 'deposit' AND status = 'completed'
 		 AND created_at >= CURRENT_DATE - INTERVAL '7 days'`,
 		userID,
-	).Scan(&weeklyDeposits)
+	).Scan(&weeklyDeposits); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("sum weekly deposits: %w", err)
+	}
 
 	if weeklyDeposits+amount > limits.WeeklyDepositLimit {
 		return fmt.Errorf("weekly deposit limit of %.2f would be exceeded", limits.WeeklyDepositLimit)
@@ -423,12 +428,14 @@ func (s *Service) CheckDepositLimit(ctx context.Context, userID int64, amount fl
 
 	// Check monthly deposit limit
 	var monthlyDeposits float64
-	s.db.QueryRowContext(ctx,
+	if err := s.db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(amount), 0) FROM payment_transactions
 		 WHERE user_id = $1 AND direction = 'deposit' AND status = 'completed'
 		 AND created_at >= CURRENT_DATE - INTERVAL '30 days'`,
 		userID,
-	).Scan(&monthlyDeposits)
+	).Scan(&monthlyDeposits); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("sum monthly deposits: %w", err)
+	}
 
 	if monthlyDeposits+amount > limits.MonthlyDepositLimit {
 		return fmt.Errorf("monthly deposit limit of %.2f would be exceeded", limits.MonthlyDepositLimit)
@@ -447,13 +454,20 @@ func (s *Service) GetSessionDuration(ctx context.Context, userID int64) (time.Du
 	key := fmt.Sprintf("session:start:%d", userID)
 	startStr, err := s.redis.Get(ctx, key).Result()
 	if err != nil {
+		if !errors.Is(err, redis.Nil) {
+			return 0, 0, fmt.Errorf("read session start: %w", err)
+		}
 		// No active session, start one
-		s.redis.Set(ctx, key, time.Now().Unix(), 24*time.Hour)
+		if setErr := s.redis.Set(ctx, key, time.Now().Unix(), 24*time.Hour).Err(); setErr != nil {
+			return 0, 0, fmt.Errorf("start session: %w", setErr)
+		}
 		return 0, limits.SessionTimeLimitMins, nil
 	}
 
 	var startUnix int64
-	fmt.Sscanf(startStr, "%d", &startUnix)
+	if _, err := fmt.Sscanf(startStr, "%d", &startUnix); err != nil {
+		return 0, 0, fmt.Errorf("parse session start: %w", err)
+	}
 	start := time.Unix(startUnix, 0)
 	duration := time.Since(start)
 

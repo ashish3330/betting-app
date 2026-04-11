@@ -1,3 +1,4 @@
+// Package main implements the Lotus Exchange API gateway.
 package main
 
 import (
@@ -321,7 +322,7 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(statusCode)
-		json.NewEncoder(w).Encode(result)
+		_ = json.NewEncoder(w).Encode(result)
 	})
 
 	// Prometheus scrape endpoint
@@ -508,7 +509,7 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, oddsServiceURL strin
 		log.Error("websocket accept error", "error", err)
 		return
 	}
-	defer clientConn.CloseNow()
+	defer func() { _ = clientConn.CloseNow() }()
 
 	// Build the backend WebSocket URL
 	backendURL := strings.Replace(oddsServiceURL, "http://", "ws://", 1)
@@ -524,15 +525,18 @@ func proxyWebSocket(w http.ResponseWriter, r *http.Request, oddsServiceURL strin
 	backendHeaders.Set("X-Username", claims.Username)
 	backendHeaders.Set("X-Role", string(claims.Role))
 
-	backendConn, _, err := websocket.Dial(ctx, backendURL, &websocket.DialOptions{
+	backendConn, dialResp, err := websocket.Dial(ctx, backendURL, &websocket.DialOptions{
 		HTTPHeader: backendHeaders,
 	})
+	if dialResp != nil && dialResp.Body != nil {
+		_ = dialResp.Body.Close()
+	}
 	if err != nil {
 		log.Error("failed to connect to backend websocket", "error", err, "url", backendURL)
-		clientConn.Close(websocket.StatusInternalError, "backend unavailable")
+		_ = clientConn.Close(websocket.StatusInternalError, "backend unavailable")
 		return
 	}
-	defer backendConn.CloseNow()
+	defer func() { _ = backendConn.CloseNow() }()
 
 	// Start ping/pong keepalive for the client connection
 	go wsPingLoop(ctx, clientConn, 30*time.Second)
@@ -591,10 +595,4 @@ func copyWS(ctx context.Context, dst, src *websocket.Conn) error {
 			return err
 		}
 	}
-}
-
-// wsConnectionCount returns the current active WebSocket connection count.
-// Exported for testing / metrics.
-func wsConnectionCount() int64 {
-	return atomic.LoadInt64(&activeWSConns)
 }

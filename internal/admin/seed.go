@@ -135,7 +135,7 @@ func (h *Handler) Seed(w http.ResponseWriter, r *http.Request) {
 		if err := h.wallet.Deposit(ctx, saID, 10_000_000, ref); err != nil {
 			res.Credits = append(res.Credits, fmt.Sprintf("bootstrap deposit: %v", err))
 		} else {
-			res.Credits = append(res.Credits, fmt.Sprintf("bootstrap deposit: superadmin += 10,000,000"))
+			res.Credits = append(res.Credits, "bootstrap deposit: superadmin += 10,000,000")
 		}
 	}
 
@@ -195,7 +195,7 @@ func (h *Handler) transferCredit(ctx context.Context, fromID, toID int64, amount
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE users SET balance = balance - $1, updated_at = NOW() WHERE id = $2`,
 		amount, fromID); err != nil {

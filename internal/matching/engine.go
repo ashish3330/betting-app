@@ -58,9 +58,6 @@ import (
 const (
 	scoreMultiplier int64 = 10000000000 // 1e10
 	epochOffset     int64 = 9999999999  // safely above current unix seconds
-	// maxCandidates bounds the ZRANGEBYSCORE scan per match call so a deep
-	// order book cannot blow up a single Lua invocation.
-	maxCandidates = 100
 )
 
 // Redis Lua script for atomic order matching with integer arithmetic.
@@ -296,8 +293,9 @@ func formatCompactOrder(userID, price, stake, remaining, timestamp int64) string
 	return string(buf)
 }
 
-// parseCompactOrder reverses formatCompactOrder.
-func parseCompactOrder(s string) (userID, price, stake, remaining, timestamp int64, err error) {
+// parseCompactOrder reverses formatCompactOrder. The stake field is parsed
+// and validated but not returned — no caller currently needs it.
+func parseCompactOrder(s string) (userID, price, remaining, timestamp int64, err error) {
 	parts := strings.Split(s, "|")
 	if len(parts) != 5 {
 		err = fmt.Errorf("invalid compact order: %d fields", len(parts))
@@ -309,7 +307,7 @@ func parseCompactOrder(s string) (userID, price, stake, remaining, timestamp int
 	if price, err = strconv.ParseInt(parts[1], 10, 64); err != nil {
 		return
 	}
-	if stake, err = strconv.ParseInt(parts[2], 10, 64); err != nil {
+	if _, err = strconv.ParseInt(parts[2], 10, 64); err != nil {
 		return
 	}
 	if remaining, err = strconv.ParseInt(parts[3], 10, 64); err != nil {
@@ -534,7 +532,7 @@ func (e *Engine) CancelOrder(ctx context.Context, marketID, betID string, side m
 		return nil, fmt.Errorf("unexpected cancel result type: %T", result)
 	}
 
-	uid, price, _, remaining, _, err := parseCompactOrder(resultStr)
+	uid, price, remaining, _, err := parseCompactOrder(resultStr)
 	if err != nil {
 		return nil, fmt.Errorf("parse cancelled order: %w", err)
 	}
@@ -553,7 +551,12 @@ func (e *Engine) GetOrderBook(ctx context.Context, marketID string, depth int) (
 	mk := e.keysFor(marketID)
 
 	// Best backs: highest composite score first (highest price, earliest time).
-	backMembers, err := e.redis.ZRevRange(ctx, mk.backZ, 0, int64(depth-1)).Result()
+	backMembers, err := e.redis.ZRangeArgs(ctx, redis.ZRangeArgs{
+		Key:   mk.backZ,
+		Start: 0,
+		Stop:  int64(depth - 1),
+		Rev:   true,
+	}).Result()
 	if err != nil {
 		return nil, nil, fmt.Errorf("get backs: %w", err)
 	}
@@ -598,7 +601,7 @@ func aggregateSide(ctx context.Context, rdb *redis.Client, hashKey string, betID
 		if !ok {
 			return nil, fmt.Errorf("order[%d] not a string: %T", i, r)
 		}
-		_, price, _, remaining, _, perr := parseCompactOrder(s)
+		_, price, remaining, _, perr := parseCompactOrder(s)
 		if perr != nil {
 			return nil, fmt.Errorf("parse order[%d]: %w", i, perr)
 		}
@@ -632,7 +635,7 @@ func (e *Engine) ExpireOrders(ctx context.Context, marketID string, before time.
 			for i := 0; i < len(members); i += 2 {
 				betID := members[i]
 				value := members[i+1]
-				_, _, _, _, ts, perr := parseCompactOrder(value)
+				_, _, _, ts, perr := parseCompactOrder(value)
 				if perr != nil {
 					return removed, fmt.Errorf("parse order for expiry: %w", perr)
 				}

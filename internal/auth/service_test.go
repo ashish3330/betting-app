@@ -49,7 +49,10 @@ func TestHashAndVerifyPassword(t *testing.T) {
 	s := &Service{}
 	password := "testPassword123!"
 
-	hash := s.hashPassword(password)
+	hash, err := s.hashPassword(password)
+	if err != nil {
+		t.Fatalf("hashPassword() returned error: %v", err)
+	}
 
 	if !s.verifyPassword(password, hash) {
 		t.Error("verifyPassword() returned false for correct password")

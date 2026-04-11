@@ -141,9 +141,11 @@ func (s *Service) AnalyzeBet(ctx context.Context, pattern *BetPattern) (*UserRis
 		riskScore += 25
 	}
 
-	// 3. Check historical avg stake and detect sudden changes
+	// 3. Check historical avg stake and detect sudden changes. Any error
+	// leaves avgStake as 0, which disables the stake-spike check for the
+	// call — acceptable for a heuristic risk score.
 	var avgStake float64
-	s.db.QueryRowContext(ctx,
+	_ = s.db.QueryRowContext(ctx,
 		"SELECT COALESCE(AVG(stake), 0) FROM bets WHERE user_id = $1 AND created_at > NOW() - INTERVAL '7 days'",
 		pattern.UserID,
 	).Scan(&avgStake)
@@ -154,9 +156,9 @@ func (s *Service) AnalyzeBet(ctx context.Context, pattern *BetPattern) (*UserRis
 		riskScore += 20
 	}
 
-	// 4. Win rate analysis
+	// 4. Win rate analysis. Scan errors are tolerated — heuristic metric only.
 	var totalBets, wonBets int
-	s.db.QueryRowContext(ctx,
+	_ = s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*), COALESCE(SUM(CASE WHEN profit > 0 THEN 1 ELSE 0 END), 0)
 		 FROM bets WHERE user_id = $1 AND status = 'settled'`,
 		pattern.UserID,

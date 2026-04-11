@@ -27,7 +27,7 @@ func withSerializableRetry(ctx context.Context, db *sql.DB, maxRetries int, fn f
 
 		err = fn(tx)
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			if isSerializationFailure(err) && attempt < maxRetries {
 				continue
 			}
@@ -588,7 +588,7 @@ func (s *Service) ValidateSession(ctx context.Context, sessionID, token string) 
 		}
 
 		if time.Now().After(session.ExpiresAt) {
-			s.CloseSession(ctx, sessionID)
+			_ = s.CloseSession(ctx, sessionID)
 			return nil, fmt.Errorf("session expired")
 		}
 

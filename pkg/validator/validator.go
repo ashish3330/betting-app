@@ -17,11 +17,13 @@ var (
 func Get() *v10.Validate {
 	once.Do(func() {
 		instance = v10.New()
-		instance.RegisterValidation("betting_side", validateBettingSide)
-		instance.RegisterValidation("betting_price", validateBettingPrice)
-		instance.RegisterValidation("upi_id", validateUPIID)
-		instance.RegisterValidation("username", validateUsername)
-		instance.RegisterValidation("safe_string", validateSafeString)
+		// RegisterValidation only errors on empty tag or nil fn, both of
+		// which are compile-time constants here — safe to ignore.
+		_ = instance.RegisterValidation("betting_side", validateBettingSide)
+		_ = instance.RegisterValidation("betting_price", validateBettingPrice)
+		_ = instance.RegisterValidation("upi_id", validateUPIID)
+		_ = instance.RegisterValidation("username", validateUsername)
+		_ = instance.RegisterValidation("safe_string", validateSafeString)
 	})
 	return instance
 }

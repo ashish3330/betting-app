@@ -1,3 +1,4 @@
+// Package main implements the Lotus Exchange odds service.
 package main
 
 import (
@@ -185,7 +186,7 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(sports)
+		_ = json.NewEncoder(w).Encode(sports)
 	})
 
 	mux.HandleFunc("GET /api/v1/competitions", func(w http.ResponseWriter, r *http.Request) {
@@ -196,7 +197,7 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(competitions)
+		_ = json.NewEncoder(w).Encode(competitions)
 	})
 
 	mux.HandleFunc("GET /api/v1/events", func(w http.ResponseWriter, r *http.Request) {
@@ -208,7 +209,7 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(events)
+		_ = json.NewEncoder(w).Encode(events)
 	})
 
 	mux.HandleFunc("GET /api/v1/events/{id}/markets", func(w http.ResponseWriter, r *http.Request) {
@@ -219,7 +220,7 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(markets)
+		_ = json.NewEncoder(w).Encode(markets)
 	})
 
 	// ── Public odds routes ──────────────────────────────────────
@@ -230,9 +231,11 @@ func main() {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		marketService.SyncFromProvider(r.Context(), markets)
+		if _, _, syncErr := marketService.SyncFromProvider(r.Context(), markets); syncErr != nil {
+			log.Warn("sync from provider", "error", syncErr)
+		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(markets)
+		_ = json.NewEncoder(w).Encode(markets)
 	})
 
 	mux.HandleFunc("GET /api/v1/markets/{id}/odds", func(w http.ResponseWriter, r *http.Request) {
@@ -243,7 +246,7 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(update)
+		_ = json.NewEncoder(w).Encode(update)
 	})
 
 	// /odds/status is the cheap health/overview endpoint consumed by the
@@ -255,7 +258,7 @@ func main() {
 	mux.HandleFunc("GET /api/v1/odds/status", func(w http.ResponseWriter, r *http.Request) {
 		status := oddsService.GetStatus(r.Context())
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(status)
+		_ = json.NewEncoder(w).Encode(status)
 	})
 
 	// wsWrite writes a JSON message to the WebSocket with a 5-second deadline.
@@ -286,7 +289,7 @@ func main() {
 			log.Error("websocket accept error", "error", err)
 			return
 		}
-		defer c.CloseNow()
+		defer func() { _ = c.CloseNow() }()
 
 		connID := uuid.New().String()
 		wsConns.Store(connID, c)
@@ -294,7 +297,7 @@ func main() {
 
 		wsCtx := r.Context()
 
-		wsWrite(c, map[string]string{"type": "authenticated", "user": claims.Username})
+		_ = wsWrite(c, map[string]string{"type": "authenticated", "user": claims.Username})
 
 		heartbeatDone := make(chan struct{})
 		var heartbeatOnce sync.Once
@@ -349,7 +352,7 @@ func main() {
 
 				updates, err := oddsService.StartSubscription(subCtx, msg.Payload.MarketIDs)
 				if err != nil {
-					wsWrite(c, map[string]string{"type": "error", "message": err.Error()})
+					_ = wsWrite(c, map[string]string{"type": "error", "message": err.Error()})
 					cancel()
 					subCancel = nil
 					continue
@@ -368,13 +371,13 @@ func main() {
 
 			case "unsubscribe":
 				cancelSubscription()
-				wsWrite(c, map[string]string{
+				_ = wsWrite(c, map[string]string{
 					"type":    "unsubscribed",
 					"message": "unsubscribe acknowledged",
 				})
 
 			case "ping":
-				wsWrite(c, map[string]string{"type": "pong"})
+				_ = wsWrite(c, map[string]string{"type": "pong"})
 			}
 		}
 

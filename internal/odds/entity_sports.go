@@ -190,7 +190,7 @@ func (e *EntitySportsProvider) Subscribe(ctx context.Context, marketIDs []string
 func (e *EntitySportsProvider) fetchLiveOdds(ctx context.Context, marketID string) (*models.OddsUpdate, error) {
 	// Extract match ID from market ID (format: es-{matchID}-mo)
 	var matchID int
-	fmt.Sscanf(marketID, "es-%d-mo", &matchID)
+	_, _ = fmt.Sscanf(marketID, "es-%d-mo", &matchID)
 
 	url := fmt.Sprintf("%s/matches/%d/scorecard?token=%s", e.baseURL, matchID, e.apiKey)
 	if _, err := e.doRequest(ctx, url); err != nil {
@@ -237,7 +237,7 @@ func (e *EntitySportsProvider) FetchEvents(ctx context.Context, competitionID st
 // FetchMarketsByEvent returns markets for a specific event from Entity Sports.
 func (e *EntitySportsProvider) FetchMarketsByEvent(ctx context.Context, eventID string) ([]*models.Market, error) {
 	var matchID int
-	fmt.Sscanf(eventID, "es-%d", &matchID)
+	_, _ = fmt.Sscanf(eventID, "es-%d", &matchID)
 
 	url := fmt.Sprintf("%s/matches/%d/odds?token=%s", e.baseURL, matchID, e.apiKey)
 	if _, err := e.doRequest(ctx, url); err != nil {

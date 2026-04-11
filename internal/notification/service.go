@@ -160,12 +160,16 @@ func (s *Service) GetUnreadCount(ctx context.Context, userID int64) (int, error)
 	return count, err
 }
 
-// Helper methods for common notifications
+// Helper methods for common notifications. Send failures are logged on the
+// service and tolerated — a missed push notification should never break the
+// calling business flow (bet match, settlement, deposit, etc).
 func (s *Service) NotifyBetMatched(ctx context.Context, userID int64, betID string, stake, price float64) {
-	s.Send(ctx, userID, NotifBetMatched, "Bet Matched",
+	if err := s.Send(ctx, userID, NotifBetMatched, "Bet Matched",
 		fmt.Sprintf("Your bet has been matched - Stake: %.2f @ %.2f", stake, price),
 		map[string]interface{}{"bet_id": betID, "stake": stake, "price": price},
-		fmt.Sprintf("bet_matched:%s", betID))
+		fmt.Sprintf("bet_matched:%s", betID)); err != nil {
+		s.logger.WarnContext(ctx, "notify bet matched", "error", err, "bet_id", betID)
+	}
 }
 
 func (s *Service) NotifyBetSettled(ctx context.Context, userID int64, betID string, pnl float64) {
@@ -173,22 +177,28 @@ func (s *Service) NotifyBetSettled(ctx context.Context, userID int64, betID stri
 	if pnl < 0 {
 		title = "Bet Lost"
 	}
-	s.Send(ctx, userID, NotifBetSettled, title,
+	if err := s.Send(ctx, userID, NotifBetSettled, title,
 		fmt.Sprintf("P&L: %.2f", pnl),
 		map[string]interface{}{"bet_id": betID, "pnl": pnl},
-		fmt.Sprintf("bet_settled:%s", betID))
+		fmt.Sprintf("bet_settled:%s", betID)); err != nil {
+		s.logger.WarnContext(ctx, "notify bet settled", "error", err, "bet_id", betID)
+	}
 }
 
 func (s *Service) NotifyDeposit(ctx context.Context, userID int64, amount float64, txID string) {
-	s.Send(ctx, userID, NotifDepositComplete, "Deposit Successful",
+	if err := s.Send(ctx, userID, NotifDepositComplete, "Deposit Successful",
 		fmt.Sprintf("%.2f has been credited to your wallet", amount),
 		map[string]interface{}{"amount": amount, "tx_id": txID},
-		fmt.Sprintf("deposit:%s", txID))
+		fmt.Sprintf("deposit:%s", txID)); err != nil {
+		s.logger.WarnContext(ctx, "notify deposit", "error", err, "tx_id", txID)
+	}
 }
 
 func (s *Service) NotifyWithdrawal(ctx context.Context, userID int64, amount float64, txID string) {
-	s.Send(ctx, userID, NotifWithdrawalComplete, "Withdrawal Processed",
+	if err := s.Send(ctx, userID, NotifWithdrawalComplete, "Withdrawal Processed",
 		fmt.Sprintf("%.2f withdrawal has been processed", amount),
 		map[string]interface{}{"amount": amount, "tx_id": txID},
-		fmt.Sprintf("withdrawal:%s", txID))
+		fmt.Sprintf("withdrawal:%s", txID)); err != nil {
+		s.logger.WarnContext(ctx, "notify withdrawal", "error", err, "tx_id", txID)
+	}
 }

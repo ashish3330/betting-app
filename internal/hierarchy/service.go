@@ -92,7 +92,7 @@ func (s *Service) TransferCredit(ctx context.Context, req *models.CreditTransfer
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Verify parent-child relationship
 	var fromRole models.Role

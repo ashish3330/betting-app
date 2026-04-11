@@ -80,7 +80,7 @@ func main() {
 	authMwFactory := middleware.AuthMiddleware(authService)
 	authMw := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			authMwFactory(http.HandlerFunc(h)).ServeHTTP(w, r)
+			authMwFactory(h).ServeHTTP(w, r)
 		}
 	}
 

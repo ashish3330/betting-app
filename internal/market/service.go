@@ -92,7 +92,6 @@ func (s *Service) List(ctx context.Context, sport string, status string, inPlay 
 	if inPlay != nil {
 		query += fmt.Sprintf(" AND in_play = $%d", argIdx)
 		args = append(args, *inPlay)
-		argIdx++
 	}
 	query += " ORDER BY start_time DESC LIMIT 100"
 

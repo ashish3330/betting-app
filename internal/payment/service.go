@@ -28,7 +28,7 @@ func withSerializableRetry(ctx context.Context, db *sql.DB, maxRetries int, fn f
 
 		err = fn(tx)
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			if isSerializationFailure(err) && attempt < maxRetries {
 				continue
 			}

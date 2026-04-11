@@ -54,7 +54,7 @@ var (
 func init() {
 	secret := os.Getenv("ENCRYPTION_SECRET")
 	if secret == "" {
-		secret = "lotus-dev-local-encryption-key-change-in-prod-min-32-chars"
+		secret = "lotus-dev-local-encryption-key-change-in-prod-min-32-chars" //nolint:gosec // G101: dev-only default for the e2e test harness; real secret comes from ENCRYPTION_SECRET env var
 	}
 	hash := sha256.Sum256([]byte(secret))
 	encKey = hash[:]
@@ -84,7 +84,12 @@ func encryptBody(data interface{}) ([]byte, error) {
 
 func decryptBody(body []byte) ([]byte, error) {
 	var envelope struct{ D string }
-	if err := json.Unmarshal(body, &envelope); err != nil || envelope.D == "" {
+	if unmarshalErr := json.Unmarshal(body, &envelope); unmarshalErr != nil {
+		// Body is not an encrypted envelope; return as-is. This is not an
+		// error — plaintext responses are valid.
+		return body, nil //nolint:nilerr // plaintext passthrough is intentional
+	}
+	if envelope.D == "" {
 		return body, nil // not encrypted
 	}
 	data, err := base64.StdEncoding.DecodeString(envelope.D)
@@ -199,12 +204,11 @@ func truncate(s string, n int) string {
 // ── Tokens cache ─────────────────────────────────────────────────
 
 var (
-	playerToken     string
-	playerUserID    int64
-	adminToken      string
-	masterToken     string
-	agentToken      string
-	superadminToken string
+	playerToken  string
+	playerUserID int64
+	adminToken   string
+	masterToken  string
+	agentToken   string
 )
 
 func login(username, password string) (string, int64, error) {
@@ -311,7 +315,7 @@ func main() {
 		req, _ := http.NewRequest("POST", *baseURL+"/api/v1/seed", nil)
 		seedSecret := os.Getenv("SEED_SECRET")
 		if seedSecret == "" {
-			seedSecret = "lotus-dev-seed-secret"
+			seedSecret = "lotus-dev-seed-secret" //nolint:gosec // G101: dev-only default for the e2e test harness; real secret comes from SEED_SECRET env var
 		}
 		req.Header.Set("X-Seed-Secret", seedSecret)
 		resp, err := client.Do(req)
@@ -363,12 +367,8 @@ func main() {
 		return nil
 	})
 	test("Login superadmin", func() error {
-		t, _, err := login("superadmin", "Admin@123")
-		if err != nil {
-			return err
-		}
-		superadminToken = t
-		return nil
+		_, _, err := login("superadmin", "Admin@123")
+		return err
 	})
 	test("Login wrong password (should fail with 401)", func() error {
 		resp, err := apiCall("POST", "/api/v1/auth/login", map[string]string{
@@ -440,7 +440,7 @@ func main() {
 				LayPrice    float64 `json:"lay_price"`
 			} `json:"runners"`
 		}
-		json.Unmarshal(resp.Body, &markets)
+		_ = json.Unmarshal(resp.Body, &markets)
 		for _, m := range markets {
 			if m.MarketType != "" && m.MarketType != "match_odds" {
 				continue
@@ -465,7 +465,7 @@ func main() {
 						} `json:"back_prices"`
 					} `json:"runners"`
 				}
-				json.Unmarshal(oddsResp.Body, &odds)
+				_ = json.Unmarshal(oddsResp.Body, &odds)
 				for _, r := range odds.Runners {
 					if r.SelectionID == selectionID && len(r.BackPrices) > 0 {
 						betPrice = r.BackPrices[0].Price
@@ -761,7 +761,7 @@ func main() {
 			Balance         float64 `json:"balance"`
 			AvailableBalance float64 `json:"available_balance"`
 		}
-		json.Unmarshal(balResp.Body, &balBefore)
+		_ = json.Unmarshal(balResp.Body, &balBefore)
 		if balBefore.AvailableBalance < 100 {
 			return fmt.Errorf("insufficient balance for E2E test: %.2f", balBefore.AvailableBalance)
 		}
@@ -777,7 +777,7 @@ func main() {
 				BackPrices  []struct{ Price float64 `json:"price"` } `json:"back_prices"`
 			} `json:"runners"`
 		}
-		json.Unmarshal(oddsResp.Body, &odds)
+		_ = json.Unmarshal(oddsResp.Body, &odds)
 		var freshPrice float64
 		for _, r := range odds.Runners {
 			if r.SelectionID == selectionID && len(r.BackPrices) > 0 {
@@ -820,7 +820,7 @@ func main() {
 			ID      string `json:"id"`
 			EventID string `json:"event_id"`
 		}
-		json.Unmarshal(mResp.Body, &markets)
+		_ = json.Unmarshal(mResp.Body, &markets)
 		if len(markets) == 0 {
 			return fmt.Errorf("no markets returned")
 		}

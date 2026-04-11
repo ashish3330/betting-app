@@ -187,6 +187,9 @@ func (s *Service) GetBetVolumeTrend(ctx context.Context, from, to time.Time, int
 		return nil, fmt.Errorf("invalid interval: must be one of 1, 5, 10, 15, 30, 60")
 	}
 
+	// Safe: intervalMinutes is validated against a fixed allowlist above,
+	// so no user-controlled value reaches the SQL string.
+	//nolint:gosec // G201: intervalMinutes is validated against a fixed allowlist above
 	query := fmt.Sprintf(`
 		SELECT
 			date_trunc('minute', created_at) - (EXTRACT(MINUTE FROM created_at)::int %% %d) * INTERVAL '1 minute' AS bucket,
@@ -201,7 +204,7 @@ func (s *Service) GetBetVolumeTrend(ctx context.Context, from, to time.Time, int
 	if err != nil {
 		return nil, fmt.Errorf("get bet volume trend: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var points []BetVolumePoint
 	for rows.Next() {
@@ -294,7 +297,7 @@ func (s *Service) IngestToClickHouse(ctx context.Context, since time.Time) (int,
 	if err != nil {
 		return 0, fmt.Errorf("begin clickhouse tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT INTO raw_bets (bet_id, market_id, user_id, side, price, stake, matched_stake, profit, status, timestamp, matched_at, settled_at)

@@ -56,7 +56,7 @@ func main() {
 		log.Error("nats", "err", err)
 		os.Exit(1)
 	}
-	defer nc.Drain()
+	defer func() { _ = nc.Drain() }()
 
 	// ── Fraud Service ───────────────────────────────────────────
 	fraudService := fraud.NewService(db, rdb, log)

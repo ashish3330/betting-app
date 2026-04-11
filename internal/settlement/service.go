@@ -73,7 +73,7 @@ func (s *Service) SettleMarket(ctx context.Context, marketID string, winnerSelec
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Lock the market row to prevent double settlement
 	var currentStatus string
@@ -224,20 +224,23 @@ func (s *Service) settleBatch(
 		if err != nil {
 			return nil, 0, fmt.Errorf("bulk fetch commission rates: %w", err)
 		}
-		for crRows.Next() {
-			var id int64
-			var rate float64
-			if err := crRows.Scan(&id, &rate); err != nil {
-				crRows.Close()
-				return nil, 0, fmt.Errorf("scan commission rate: %w", err)
+		if err := func() error {
+			defer func() { _ = crRows.Close() }()
+			for crRows.Next() {
+				var id int64
+				var rate float64
+				if err := crRows.Scan(&id, &rate); err != nil {
+					return fmt.Errorf("scan commission rate: %w", err)
+				}
+				commissionRates[id] = rate
 			}
-			commissionRates[id] = rate
+			if err := crRows.Err(); err != nil {
+				return fmt.Errorf("iterate commission rates: %w", err)
+			}
+			return nil
+		}(); err != nil {
+			return nil, 0, err
 		}
-		if err := crRows.Err(); err != nil {
-			crRows.Close()
-			return nil, 0, fmt.Errorf("iterate commission rates: %w", err)
-		}
-		crRows.Close()
 	}
 
 	// Single P&L + commission calculation loop
@@ -288,7 +291,7 @@ func (s *Service) VoidMarket(ctx context.Context, marketID string) error {
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Lock market row to prevent double void / concurrent settlement
 	var currentStatus string
@@ -379,7 +382,7 @@ func (s *Service) ProcessOutbox(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("begin claim tx: %w", err)
 	}
-	defer claimTx.Rollback()
+	defer func() { _ = claimTx.Rollback() }()
 
 	rows, err := claimTx.QueryContext(ctx,
 		`SELECT id, market_id, bet_id, user_id, event_type, amount, commission, held_stake
@@ -511,7 +514,7 @@ func (s *Service) RollbackSettlement(ctx context.Context, marketID string) error
 	if err != nil {
 		return fmt.Errorf("begin rollback tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Lock and verify market is settled
 	var currentStatus string

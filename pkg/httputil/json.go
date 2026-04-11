@@ -41,7 +41,7 @@ func WriteJSON(w http.ResponseWriter, status int, v interface{}) {
 		return
 	}
 	w.WriteHeader(status)
-	w.Write(buf.Bytes())
+	_, _ = w.Write(buf.Bytes())
 }
 
 // WriteError writes a JSON error response: {"error": "<message>"}.

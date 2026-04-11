@@ -55,7 +55,7 @@ func main() {
 		log.Error("nats", "err", err)
 		os.Exit(1)
 	}
-	defer nc.Drain()
+	defer func() { _ = nc.Drain() }()
 
 	// ── Auth Service (for JWT validation) ───────────────────────
 	authService, err := auth.NewService(

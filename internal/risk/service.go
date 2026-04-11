@@ -65,7 +65,7 @@ func (s *Service) GetUserExposure(ctx context.Context, userID int64) (*UserExpos
 		}
 		for market, amountStr := range byMarket {
 			var amount float64
-			fmt.Sscanf(amountStr, "%f", &amount)
+			_, _ = fmt.Sscanf(amountStr, "%f", &amount)
 			ue.ByMarket[market] = amount
 			ue.TotalExposure += amount
 		}

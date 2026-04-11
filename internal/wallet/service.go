@@ -131,7 +131,7 @@ func (s *Service) HoldFunds(ctx context.Context, userID int64, amount float64, b
 	if err != nil {
 		return fmt.Errorf("hold funds: begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Check balance with row lock
 	var balance, exposure float64
@@ -206,7 +206,7 @@ func (s *Service) ReleaseFunds(ctx context.Context, userID int64, amount float64
 	if err != nil {
 		return fmt.Errorf("release funds: begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Read current exposure to detect negative-exposure anomalies instead of
 	// silently clamping with GREATEST().
@@ -315,7 +315,7 @@ func (s *Service) SettleBet(ctx context.Context, userID int64, betID string, pnl
 	if err != nil {
 		return fmt.Errorf("settle bet: begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Claim the idempotency key first. If a row already exists for this
 	// betID we treat the operation as already applied and return the
@@ -457,7 +457,7 @@ func (s *Service) Deposit(ctx context.Context, userID int64, amount float64, ref
 	if err != nil {
 		return fmt.Errorf("deposit: begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Lock the row before updating to prevent serialization failures.
 	var balance float64
@@ -674,7 +674,7 @@ func (s *Service) Withdraw(ctx context.Context, userID int64, amount float64, re
 	if err != nil {
 		return fmt.Errorf("withdraw: begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var balance, exposure float64
 	err = tx.QueryRowContext(ctx,

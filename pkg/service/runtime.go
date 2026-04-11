@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	_ "net/http/pprof" // registers pprof handlers on http.DefaultServeMux
+	//nolint:gosec // G108: pprof is only exposed via the separate admin listener bound to 127.0.0.1 and gated behind ENVIRONMENT/PPROF_ENABLED — never on the main service mux.
+	_ "net/http/pprof"
 	"os"
 	"strings"
 	"time"

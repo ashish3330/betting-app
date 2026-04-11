@@ -171,13 +171,16 @@ func (s *Service) Register(ctx context.Context, req *models.CreateUserRequest) (
 		return nil, fmt.Errorf("password validation: %w", err)
 	}
 
-	hash := s.hashPassword(req.Password)
+	hash, err := s.hashPassword(req.Password)
+	if err != nil {
+		return nil, fmt.Errorf("hash password: %w", err)
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var user models.User
 	err = tx.QueryRowContext(ctx,
@@ -471,7 +474,10 @@ func (s *Service) ChangePassword(ctx context.Context, userID int64, oldPassword,
 		return fmt.Errorf("current password is incorrect")
 	}
 
-	newHash := s.hashPassword(newPassword)
+	newHash, err := s.hashPassword(newPassword)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
 	_, err = s.db.ExecContext(ctx,
 		`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
 		newHash, userID,
@@ -558,11 +564,13 @@ func (s *Service) generateToken(user *models.User, ttl time.Duration) (string, e
 	return token.SignedString(s.privateKey)
 }
 
-func (s *Service) hashPassword(password string) string {
+func (s *Service) hashPassword(password string) (string, error) {
 	salt := make([]byte, argon2SaltLength)
-	rand.Read(salt)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("generate salt: %w", err)
+	}
 	hash := argon2.IDKey([]byte(password), salt, argon2Iterations, argon2Memory, argon2Threads, argon2KeyLength)
-	return hex.EncodeToString(salt) + ":" + hex.EncodeToString(hash)
+	return hex.EncodeToString(salt) + ":" + hex.EncodeToString(hash), nil
 }
 
 func (s *Service) verifyPassword(password, stored string) bool {

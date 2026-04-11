@@ -97,15 +97,6 @@ func encryptBytes(plaintext []byte) (string, error) {
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// encryptPayload is retained for callers that still hand us a Go value.
-func encryptPayload(data interface{}) (string, error) {
-	plaintext, err := json.Marshal(data)
-	if err != nil {
-		return "", err
-	}
-	return encryptBytes(plaintext)
-}
-
 type encryptedResponseWriter struct {
 	http.ResponseWriter
 	body          *bytes.Buffer
@@ -204,16 +195,16 @@ func EncryptionMiddleware(next http.Handler) http.Handler {
 				h.Set("X-Encrypted", "true")
 				w.WriteHeader(erw.statusCode)
 				// {"d":"<base64>"}
-				w.Write([]byte(`{"d":"`))
-				w.Write([]byte(encrypted))
-				w.Write([]byte(`"}`))
+				_, _ = w.Write([]byte(`{"d":"`))
+				_, _ = w.Write([]byte(encrypted))
+				_, _ = w.Write([]byte(`"}`))
 				return
 			}
 		}
 
 		// Fallback: write original response
 		w.WriteHeader(erw.statusCode)
-		w.Write(responseBody)
+		_, _ = w.Write(responseBody)
 	})
 }
 

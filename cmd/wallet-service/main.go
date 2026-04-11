@@ -130,16 +130,20 @@ func isSerializationError(err error) bool {
 	return strings.Contains(msg, "40001") || strings.Contains(msg, "serialization_failure")
 }
 
-// withRetry executes fn up to maxAttempts times, retrying only on
+// maxRetries is the maximum number of attempts for serializable wallet
+// transactions before the caller gives up.
+const maxRetries = 3
+
+// withRetry executes fn up to maxRetries times, retrying only on
 // serialization failures with exponential backoff.
-func withRetry(ctx context.Context, maxAttempts int, fn func(ctx context.Context) error) error {
+func withRetry(ctx context.Context, fn func(ctx context.Context) error) error {
 	var err error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := uint(0); attempt < maxRetries; attempt++ {
 		err = fn(ctx)
 		if err == nil || !isSerializationError(err) {
 			return err
 		}
-		backoff := time.Duration(50<<uint(attempt)) * time.Millisecond // 50ms, 100ms, 200ms
+		backoff := time.Duration(50<<attempt) * time.Millisecond // 50ms, 100ms, 200ms
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -188,7 +192,7 @@ func main() {
 		log.Error("nats", "err", err)
 		os.Exit(1)
 	}
-	defer nc.Drain()
+	defer func() { _ = nc.Drain() }()
 
 	// ── Auth Service (for JWT validation in HTTP middleware) ────
 	authService, err := auth.NewService(
@@ -213,7 +217,6 @@ func main() {
 	// natsTimeout is the maximum time a NATS handler may spend processing a
 	// request before the context is cancelled.
 	const natsTimeout = 10 * time.Second
-	const maxRetries = 3
 
 	// Pending limits on subscriptions guard against unbounded memory growth if
 	// the wallet service momentarily falls behind producers.
@@ -244,7 +247,7 @@ func main() {
 		var req BalanceRequest
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
 			data, _ := json.Marshal(BalanceResponse{Success: false, Error: "invalid request: " + err.Error()})
-			msg.Respond(data)
+			_ = msg.Respond(data)
 			return
 		}
 		cctx, cancel := context.WithTimeout(context.Background(), natsTimeout)
@@ -252,7 +255,7 @@ func main() {
 		summary, err := walletSvc.GetBalance(cctx, req.UserID)
 		if err != nil {
 			data, _ := json.Marshal(BalanceResponse{Success: false, Error: errStr(err)})
-			msg.Respond(data)
+			_ = msg.Respond(data)
 			return
 		}
 		data, _ := json.Marshal(BalanceResponse{
@@ -261,7 +264,7 @@ func main() {
 			Exposure:         summary.Exposure,
 			AvailableBalance: summary.AvailableBalance,
 		})
-		msg.Respond(data)
+		_ = msg.Respond(data)
 	})
 
 	// wallet.hold — matching engine holds funds for a bet
@@ -269,16 +272,16 @@ func main() {
 		var req HoldRequest
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
 			data, _ := json.Marshal(HoldResponse{Success: false, Error: "invalid request: " + err.Error()})
-			msg.Respond(data)
+			_ = msg.Respond(data)
 			return
 		}
 		cctx, cancel := context.WithTimeout(context.Background(), natsTimeout)
 		defer cancel()
-		err := withRetry(cctx, maxRetries, func(ctx context.Context) error {
+		err := withRetry(cctx, func(ctx context.Context) error {
 			return walletSvc.HoldFunds(ctx, req.UserID, req.Amount, req.BetID)
 		})
 		data, _ := json.Marshal(HoldResponse{Success: err == nil, Error: errStr(err)})
-		msg.Respond(data)
+		_ = msg.Respond(data)
 	})
 
 	// wallet.release — release previously held funds
@@ -286,16 +289,16 @@ func main() {
 		var req ReleaseRequest
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
 			data, _ := json.Marshal(ReleaseResponse{Success: false, Error: "invalid request: " + err.Error()})
-			msg.Respond(data)
+			_ = msg.Respond(data)
 			return
 		}
 		cctx, cancel := context.WithTimeout(context.Background(), natsTimeout)
 		defer cancel()
-		err := withRetry(cctx, maxRetries, func(ctx context.Context) error {
+		err := withRetry(cctx, func(ctx context.Context) error {
 			return walletSvc.ReleaseFunds(ctx, req.UserID, req.Amount, req.BetID)
 		})
 		data, _ := json.Marshal(ReleaseResponse{Success: err == nil, Error: errStr(err)})
-		msg.Respond(data)
+		_ = msg.Respond(data)
 	})
 
 	// wallet.deposit — payment service credits deposits
@@ -303,16 +306,16 @@ func main() {
 		var req DepositRequest
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
 			data, _ := json.Marshal(DepositResponse{Success: false, Error: "invalid request: " + err.Error()})
-			msg.Respond(data)
+			_ = msg.Respond(data)
 			return
 		}
 		cctx, cancel := context.WithTimeout(context.Background(), natsTimeout)
 		defer cancel()
-		err := withRetry(cctx, maxRetries, func(ctx context.Context) error {
+		err := withRetry(cctx, func(ctx context.Context) error {
 			return walletSvc.Deposit(ctx, req.UserID, req.Amount, req.Reference)
 		})
 		data, _ := json.Marshal(DepositResponse{Success: err == nil, Error: errStr(err)})
-		msg.Respond(data)
+		_ = msg.Respond(data)
 	})
 
 	// wallet.settle — settlement service applies P&L
@@ -320,16 +323,16 @@ func main() {
 		var req SettleRequest
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
 			data, _ := json.Marshal(SettleResponse{Success: false, Error: "invalid request: " + err.Error()})
-			msg.Respond(data)
+			_ = msg.Respond(data)
 			return
 		}
 		cctx, cancel := context.WithTimeout(context.Background(), natsTimeout)
 		defer cancel()
-		err := withRetry(cctx, maxRetries, func(ctx context.Context) error {
+		err := withRetry(cctx, func(ctx context.Context) error {
 			return walletSvc.SettleBet(ctx, req.UserID, req.BetID, req.PnL, req.Commission)
 		})
 		data, _ := json.Marshal(SettleResponse{Success: err == nil, Error: errStr(err)})
-		msg.Respond(data)
+		_ = msg.Respond(data)
 	})
 
 	log.Info("nats subscriptions active",

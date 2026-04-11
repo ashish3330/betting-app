@@ -168,7 +168,7 @@ func (s *Service) AcceptOffer(ctx context.Context, offerID string, userID int64)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Re-check and lock offer inside the serializable tx
 	var offer CashoutOffer
@@ -267,7 +267,9 @@ func (s *Service) getCurrentPrice(ctx context.Context, marketID, side string) (f
 		return 0, err
 	}
 	var price float64
-	fmt.Sscanf(priceStr, "%f", &price)
+	if _, err := fmt.Sscanf(priceStr, "%f", &price); err != nil {
+		return 0, fmt.Errorf("parse price: %w", err)
+	}
 	if price <= 1.0 {
 		return 0, fmt.Errorf("invalid price")
 	}

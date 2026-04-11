@@ -525,11 +525,13 @@ func (h *Handler) PanelDashboard(w http.ResponseWriter, r *http.Request) {
 	stats["available_balance"] = balance - exposure
 
 	// Downline counts via ltree (users.path <@ caller.path, excluding self).
+	// Scan errors are tolerated here — these are dashboard counters, not
+	// load-bearing data, and any failure simply leaves the zero value.
 	var directChildren, downlineTotal int
-	h.db.QueryRowContext(r.Context(),
+	_ = h.db.QueryRowContext(r.Context(),
 		`SELECT COUNT(*) FROM users WHERE parent_id = $1`, userID,
 	).Scan(&directChildren)
-	h.db.QueryRowContext(r.Context(),
+	_ = h.db.QueryRowContext(r.Context(),
 		`SELECT COUNT(*) FROM users
 		 WHERE path <@ (SELECT path FROM users WHERE id = $1) AND id != $1`,
 		userID,
@@ -539,7 +541,7 @@ func (h *Handler) PanelDashboard(w http.ResponseWriter, r *http.Request) {
 
 	// Downline aggregate balance/exposure.
 	var downlineBalance, downlineExposure float64
-	h.db.QueryRowContext(r.Context(),
+	_ = h.db.QueryRowContext(r.Context(),
 		`SELECT COALESCE(SUM(balance), 0), COALESCE(SUM(exposure), 0)
 		 FROM users
 		 WHERE path <@ (SELECT path FROM users WHERE id = $1) AND id != $1`,
@@ -552,9 +554,9 @@ func (h *Handler) PanelDashboard(w http.ResponseWriter, r *http.Request) {
 	if role == models.RoleSuperAdmin {
 		var totalUsers, totalMarkets, totalBets int
 		var totalVolume float64
-		h.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM users").Scan(&totalUsers)
-		h.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM markets").Scan(&totalMarkets)
-		h.db.QueryRowContext(r.Context(),
+		_ = h.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM users").Scan(&totalUsers)
+		_ = h.db.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM markets").Scan(&totalMarkets)
+		_ = h.db.QueryRowContext(r.Context(),
 			"SELECT COUNT(*), COALESCE(SUM(stake), 0) FROM bets",
 		).Scan(&totalBets, &totalVolume)
 		stats["platform_total_users"] = totalUsers

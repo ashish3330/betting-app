@@ -53,7 +53,7 @@ func (h *Handler) ResolveAlert(w http.ResponseWriter, r *http.Request) {
 		Resolution string `json:"resolution"`
 	}
 	// Decode optional resolution note; ignore decode errors (body may be empty)
-	json.NewDecoder(r.Body).Decode(&req)
+	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	if err := h.service.ResolveAlert(r.Context(), alertID, adminID, req.Resolution); err != nil {
 		httputil.WriteError(w, http.StatusInternalServerError, "failed to resolve alert")
