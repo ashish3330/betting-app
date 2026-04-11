@@ -1,0 +1,148 @@
+groups:
+  - name: http_red_metrics
+    interval: 30s
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum by (service) (rate(lotus_http_requests_total{status=~"5.."}[5m]))
+            /
+            sum by (service) (rate(lotus_http_requests_total[5m]))
+          ) > 0.01
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "High HTTP 5xx error rate on {{ $labels.service }}"
+          description: "Service {{ $labels.service }} is returning more than 1% 5xx responses over the last 5 minutes (current value: {{ $value | humanizePercentage }})."
+          runbook_url: "https://runbooks.internal/high-error-rate"
+
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le, service) (rate(lotus_http_request_duration_seconds_bucket[5m]))
+          ) > 1
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "High HTTP p99 latency on {{ $labels.service }}"
+          description: "p99 of HTTP request duration on {{ $labels.service }} has been above 1s for 10 minutes (current value: {{ $value }}s)."
+          runbook_url: "https://runbooks.internal/high-latency"
+
+      - alert: ZeroTraffic
+        expr: |
+          sum by (service) (rate(lotus_http_requests_total[2m])) == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "Zero HTTP traffic on {{ $labels.service }}"
+          description: "Service {{ $labels.service }} has received no HTTP requests for the past 2 minutes. This service is expected to receive traffic continuously; verify ingress, load balancer, and pod readiness."
+          runbook_url: "https://runbooks.internal/zero-traffic"
+
+  - name: business_kpis
+    interval: 30s
+    rules:
+      - alert: BetPlacementSpike
+        expr: |
+          sum(rate(lotus_bets_placed_total[5m]))
+          >
+          (3 * sum(rate(lotus_bets_placed_total[1h])))
+        for: 5m
+        labels:
+          severity: notify
+        annotations:
+          summary: "Bet placement rate spike detected"
+          description: "Current bet placement rate is more than 3x the 1h average. Could be a real surge (big match) or abusive traffic. Investigate sources and verify matching engine and wallet headroom."
+          runbook_url: "https://runbooks.internal/bet-placement-spike"
+
+      - alert: BetPlacementDrop
+        expr: |
+          sum(rate(lotus_bets_placed_total[5m]))
+          <
+          (0.5 * sum(rate(lotus_bets_placed_total[1h])))
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Bet placement rate dropped >50% vs 1h baseline"
+          description: "Bet placement rate has dropped to less than half of the 1h baseline for 5 minutes. Likely a partial outage on the bet placement path: API gateway, auth, wallet, or matching engine."
+          runbook_url: "https://runbooks.internal/bet-placement-drop"
+
+      - alert: SettlementLatencyHigh
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (rate(lotus_settlement_duration_seconds_bucket[5m]))
+          ) > 5
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Settlement p99 latency above 5s"
+          description: "p99 settlement duration has exceeded 5 seconds for 5 minutes (current value: {{ $value }}s). Customers may be seeing delays in winnings credit; risk of SLO breach."
+          runbook_url: "https://runbooks.internal/settlement-latency-high"
+
+      - alert: LedgerImbalanceDetected
+        expr: lotus_ledger_imbalance > 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Ledger imbalance detected"
+          description: "lotus_ledger_imbalance is greater than zero ({{ $value }}). The double-entry ledger is out of balance; freeze withdrawals and engage finance/SRE immediately."
+          runbook_url: "https://runbooks.internal/ledger-imbalance-detected"
+
+  - name: reliability
+    interval: 30s
+    rules:
+      - alert: DBConnectionPoolNearLimit
+        expr: |
+          (
+            sum by (instance) (lotus_db_pool_connections{state="in_use"})
+            /
+            sum by (instance) (lotus_db_pool_connections{state="open"})
+          ) > 0.9
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "DB connection pool utilisation > 90% on {{ $labels.instance }}"
+          description: "More than 90% of the database connection pool is in use on {{ $labels.instance }} for 2 minutes (current: {{ $value | humanizePercentage }}). Risk of request queueing and timeouts."
+          runbook_url: "https://runbooks.internal/db-connection-pool-near-limit"
+
+      - alert: NotificationOutboxBacklog
+        expr: notification_outbox_pending > 1000
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "Notification outbox backlog > 1000"
+          description: "Notification outbox has more than 1000 pending messages (current: {{ $value }}). Customer notifications (bet confirmation, settlement, withdrawal updates) are delayed."
+          runbook_url: "https://runbooks.internal/notification-outbox-backlog"
+
+      - alert: WebSocketConnectionsHigh
+        expr: lotus_active_websocket_connections > 8000
+        for: 5m
+        labels:
+          severity: notify
+        annotations:
+          summary: "Active WebSocket connections approaching cap"
+          description: "Active WebSocket connections have been above 8000 for 5 minutes (cap is 10000). Consider scaling out the realtime tier preemptively."
+          runbook_url: "https://runbooks.internal/websocket-connections-high"
+
+      - alert: MatchingEngineLatency
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (rate(lotus_matching_engine_duration_seconds_bucket[5m]))
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Matching engine p99 latency > 100ms"
+          description: "p99 of matching engine duration has been above 100ms for 5 minutes (current: {{ $value }}s). Order matching is degrading; check CPU, GC, and lock contention on the matching engine."
+          runbook_url: "https://runbooks.internal/matching-engine-latency"
